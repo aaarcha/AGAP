@@ -1,0 +1,129 @@
+# AGAP — Revised Replit Build Prompt
+### (Aligned to Sinalhan Elementary School study — DepEd ID 108484)
+
+Paste everything below into Replit's AI builder / prompt box.
+
+---
+
+Build a high-contrast, fully interactive, **static/client-side-only** (no backend, all state in-memory via React `useState`/`useReducer`), production-styled Emergency Reporting and Prioritization Web Prototype named **"AGAP" (Automated Guidance and Emergency Prioritization)**, built for **Sinalhan Elementary School** (DepEd School ID **108484**, Barangay Sinalhan, City of Santa Rosa, Laguna — Santa Rosa City Schools Division District II). This is a **single-school prototype** — do NOT build multi-school/multi-tenant switching as a core feature (see Section 7 for the optional bonus module only).
+
+The app simulates a Progressive Web App: fluid, installable-style responsive layout, no artificial phone-frame mockups, and a bottom "Add to Home Screen" style install banner is a nice-to-have (cosmetic only, no real service worker required unless trivial to add).
+
+---
+
+## 1. DESIGN, THEME & RESPONSIVE LAYOUT
+
+- Primary theme: Emergency Red `#DC2626`, dark red accents `#991B1B`, dark slate text `#0F172A`, off-white cards `#F8FAFC`.
+- Clean, modern, high-legibility "emergency command dashboard" aesthetic — bold badges, large touch targets, structured status cards.
+- Fluid Tailwind responsive layout, **no phone-bezel wrappers**:
+  - Desktop/laptop: multi-column command dashboards (Principal, Responder).
+  - Mobile/tablet: stacked, touch-optimized single-column (Teacher, Parent).
+- Footer micro-copy on every screen: *"AGAP is a reporting and coordination tool. It does not replace school DRRM drills, alarms, or RA 10121 / DepEd Order 21 s.2015 procedures."*
+
+---
+
+## 2. ROLES & STRICT RBAC ROUTING
+
+Remove any static role-switcher header from authenticated screens. The rendered view is determined ONLY by the logged-in user's role. Provide a simple login/demo-account picker screen (since this is static — no real auth) listing these accounts:
+
+| Role | Sample Account | View Rendered |
+|---|---|---|
+| **Teacher** | any teacher demo login | 3-Tap Emergency Reporting + Profile Settings |
+| **Principal** | `principal@sinalhanes.deped.ph` | Reporting access (same 3-tap flow as teacher) **+** Institutional Incident Command Dashboard **+** Teacher Roster **+** AHP Weights (view-only, labeled illustrative) |
+| **Parent / PTA Representative** | any parent demo login | Emergency Advisory Feed (scoped to their child's/section's alerts) |
+| **Responder** (Barangay Sinalhan + CDRRMO liaison) | responder demo login | Priority Dispatch Queue + Escalation Matrix |
+
+> Note: the Principal is BOTH a reporting user and the monitoring/admin user per the study — do not restrict them to monitoring only.
+
+---
+
+## 3. AHP → SAW URGENCY ENGINE (label everything "illustrative")
+
+Every weight, CR, and score band shown anywhere in the UI must carry a small tag: **"Illustrative example weights — pending final Expert Panel session (Principal, DRRM coordinator, Barangay Sinalhan official, CDRRMO liaison)."**
+
+Runtime formula (SAW — this is what actually scores incoming reports; AHP itself is an offline, one-time weight-derivation step, not something the app recomputes per report):
+
+```
+Urgency Score = (0.50 × Severity) + (0.29 × Vulnerability) + (0.11 × LocationRisk) + (0.10 × TimeSensitivity)
+```
+
+- Consistency Ratio to display: **CR ≈ 0.006** (from the study's own worked example — λmax ≈ 4.02, CI ≈ 0.005, RI = 0.90 for n=4), labeled "example judgment set, not real panel data."
+- Score badges:
+  - CRITICAL (red): ≥ 4.0
+  - HIGH (orange): 3.0 – 3.99
+  - MODERATE (yellow): < 3.0
+  - RESOLVED (green): closed by Principal or Responder
+
+---
+
+## 4. DETAILED SCREENS BY ROLE
+
+### A. TEACHER / PRINCIPAL REPORTING VIEW (mobile-first)
+
+1. **Location header card** — pre-filled from the user's saved profile, e.g. `📍 Bldg A | Flr 2 | Rm 204 (Grade 3 – Sec A)`, with a simulated GPS badge (`GPS Locked: 14.312, 121.115`).
+   - **GPS-mismatch flow (not an always-visible dropdown):** simulate a toggle/button "Simulate location mismatch." When triggered, show a modal: *"Your GPS doesn't match your saved room. Please confirm where you actually are"* → dropdown of non-classroom areas (Canteen, Quadrangle, Covered Court, Hallway, Comfort Room). Only after this confirmation does Location Risk get scored against the real location.
+   - "⚙️ Edit Profile / Room" button → modal to edit Name, Grade/Section, Default Room. Saving updates the banner instantly AND updates the Principal's Teacher Roster table in real time (shared state).
+2. **Keyword quick-search bar** — typing (e.g. "earthquake," "faint") auto-highlights the matching category card and sub-chip.
+3. **Tap 1 — Category grid + sub-chips:**
+   - 🔥 Fire — [Electrical Short (Sev 4)] [Chemical/Gas Leak (Sev 5)]
+   - 🚑 Medical — [Heatstroke (Sev 3)] [Severe Injury (Sev 4)] [Mass Collapse (Sev 5)]
+   - 🌊 Flooding/Natural — [Flash Flood (Sev 4)] [Structural Damage/Earthquake (Sev 5)]
+   - 🛡️ Security/Threat — [Intruder (Sev 5)] [Structural Collapse (Sev 5)]
+   - Wide standalone button: **"Other / General Emergency (Sev = 4)"** — always visible, never nested in a menu, single-tap send (per study: never defaults to low priority).
+4. **Tap 2 — Affected population toggle:** [Individual Pupil (Vuln 2)] [Classroom/Section (Vuln 4)] [Whole Floor/School (Vuln 5)].
+5. **Tap 3 — Submit:**
+   - Full-width red **"🔴 SUBMIT EMERGENCY ALERT"** button.
+   - Before finalizing: **simulate connectivity check.** If a "No Connection" demo toggle is on, show *"Not sent. No connection. Use the school's emergency steps now (alarm, PA system, runner, landline)."* Save the report to a local "pending" queue and auto-flush it (simulate auto-resend) once connectivity is toggled back on.
+   - If connected: run the AHP/SAW score, run duplicate-detection (below), start a 10-second cancel countdown, then broadcast to Principal, Parent, and Responder state simultaneously.
+
+**Duplicate-report merging (required — was missing):** Before creating a new ticket, check open tickets for same/nearby location + within a short time window (simulate: same room tag within last N minutes). If matched, add the new submission as corroborating evidence to the existing ticket (increment a "confirmed by N reports" counter) instead of creating a duplicate alert or re-notifying Parent/Responder.
+
+### B. PRINCIPAL VIEW — Incident Command + Roster (Sinalhan ES)
+
+1. Summary stat cards: Active Incidents, Total Reports Today, Active Staff, "Sinalhan ES | DepEd ID 108484."
+2. **Active Incident Command Queue** — sorted by Urgency Score descending. Shows category, exact room, reporter, elapsed time, score badge, "confirmed by N reports" tag if merged.
+   - [Acknowledge Ticket] → status "EN ROUTE."
+   - [Mark Resolved / Cancel False Alarm] → clears ticket, resets that pupil/section's Parent Feed to "🟢 All Clear," logs the action.
+3. **Teacher Roster & Section Mapping (CRUD)** — Name, Section, Default Room, Status. Add/Edit/Delete modals. Reflects teacher profile edits in real time.
+4. **AHP Weights tab (view-only)** — shows the 0.50/0.29/0.11/0.10 matrix and CR ≈ 0.006, clearly labeled illustrative/pending panel.
+5. **Incident-to-Agency Escalation Matrix (reference table)** — Fire → Bureau of Fire Protection; Medical → nearest hospital/EMS; Flooding/Structural → CDRRMO; Security → PNP. Note: *"AGAP does not connect directly to these agencies — contacting them remains a manual step by Barangay Sinalhan/CDRRMO staff."*
+
+### C. PARENT / PTA REPRESENTATIVE VIEW
+
+1. **Normal state:** green banner — *"🟢 Sinalhan Elementary School is operating normally. No active emergency alerts."*
+2. **Active alert state** (scoped to the specific pupil/section the parent/rep is linked to — not a school-wide broadcast, per the study's one-household-at-a-time design):
+   - Banner: *"🚨 OFFICIAL SCHOOL ADVISORY — SINALHAN ELEMENTARY EMERGENCY FEED"*
+   - Badge: category + urgency level
+   - Location & impact, elapsed time
+   - Plain-language directive box confirming school, Barangay Sinalhan, and CDRRMO are already aware
+   - **"📞 Contact School DRRM Desk"** button (working modal/mock action)
+
+### D. RESPONDER VIEW (Barangay Sinalhan official + CDRRMO liaison)
+
+1. **Priority Dispatch Queue** — sorted by Urgency Score.
+2. Each card shows: score, category, micro-location, raw Severity/Vulnerability/LocationRisk/TimeSensitivity (1–5 each), and the recommended agency pulled from the Escalation Matrix.
+3. Actions: [🔴 Acknowledge & Mark En Route] / [Mark On-Site / Resolved] — both sync instantly to Principal queue and reset Parent Feed when resolved.
+
+---
+
+## 5. SHARED GLOBAL STATE (single React state tree, no backend needed)
+
+One shared `incidents` array + `teacherRoster` array + `connectivity` flag drive every view. Any create/update from any role must be reflected instantly in all other role views that depend on it:
+- Submit (Teacher/Principal) → Principal queue, Parent feed, Responder queue, stat counters.
+- Edit profile/room (Teacher) → Principal roster table.
+- Acknowledge/Resolve (Principal or Responder) → the other role's queue + Parent feed reset.
+- Duplicate match → increments existing ticket, does not create a second alert.
+
+---
+
+## 6. HONESTY LABELS TO INCLUDE SOMEWHERE VISIBLE
+
+- "Testing scope: Sinalhan Elementary School only; Android-focused PWA design."
+- "AHP weights and score bands shown are illustrative examples pending the real expert panel session — not final results."
+- "AGAP does not detect incidents automatically and does not replace RA 10121 / DepEd Order 21 s.2015 procedures."
+
+---
+
+## 7. OPTIONAL BONUS MODULE (clearly out of current thesis scope — build only if asked)
+
+If you still want a "Super Admin / scaling" screen for demo purposes, label it explicitly: *"Future Scaling Concept — Not Part of Current Study Scope (Sinalhan ES Only)."* Keep it visually separated (e.g., a locked/preview tab) so it isn't mistaken for a validated part of the prototype. Use it to sketch how the same AHP engine could later extend to other Santa Rosa public elementary schools, per the study's stated future-replication goal — but do not present it as functioning multi-tenancy within this capstone's tested scope.

@@ -1,0 +1,27 @@
+kind = "web"
+previewPath = "/"
+title = "AGAP — Emergency Prioritization"
+version = "1.0.0"
+id = "artifacts/agap"
+router = "path"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 23865
+
+[services.development]
+run = "pnpm --filter @workspace/agap run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/agap", "run", "build" ]
+serve = "static"
+publicDir = "artifacts/agap/dist/public"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "23865"
+BASE_PATH = "/"
