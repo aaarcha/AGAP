@@ -1,0 +1,32 @@
+{
+  "name": "agap",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "AGAP – Automated Guidance and Emergency Prioritization (Sinalhan Elementary School)",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "dev": "vite",
+    "dev:server": "node --watch server/index.js",
+    "dev:all": "node scripts/dev.mjs",
+    "build": "vite build",
+    "start": "node server/index.js",
+    "test": "node --test test/*.test.mjs",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "lucide-react": "^0.545.0",
+    "react": "19.1.0",
+    "react-dom": "19.1.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.1.14",
+    "@types/node": "^22.10.0",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "@vitejs/plugin-react": "^5.0.4",
+    "tailwindcss": "^4.1.14",
+    "typescript": "~5.9.3",
+    "vite": "^7.1.0"
+  }
+}

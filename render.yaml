@@ -1,0 +1,29 @@
+# Render Blueprint – "New +" → "Blueprint" → pick this repo.
+services:
+  - type: web
+    name: agap
+    runtime: node
+    plan: free            # see README "Free vs paid" – free sleeps when idle and loses data on restart
+    region: singapore     # closest Render region to the Philippines
+    buildCommand: npm install --include=dev && npm run build
+    startCommand: node server/index.js
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      - key: NODE_VERSION
+        value: 22
+      - key: AGAP_SECRET
+        generateValue: true     # signs login tokens; keep it stable
+      - key: AGAP_ACCESS_CODE
+        sync: false             # optional: set a school access code in the dashboard
+      - key: SEED_DEMO_INCIDENT
+        value: "0"
+      - key: ALLOW_DEMO_RESET
+        value: "1"              # set to 0 once you go live
+    # For real use (paid plan), uncomment so incidents/roster survive restarts:
+    # plan: starter
+    # disk:
+    #   name: agap-data
+    #   mountPath: /var/data
+    #   sizeGB: 1
+    # and add env var  DATA_DIR = /var/data

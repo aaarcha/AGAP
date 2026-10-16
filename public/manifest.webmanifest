@@ -1,0 +1,19 @@
+{
+  "id": "/",
+  "name": "School Emergency Reporting",
+  "short_name": "Emergency",
+  "description": "Emergency reporting and coordination for Sinalhan Elementary School, Barangay Sinalhan and CDRRMO.",
+  "lang": "en-PH",
+  "start_url": "/?source=pwa",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#FFF6DC",
+  "theme_color": "#425B9A",
+  "categories": ["education", "utilities"],
+  "icons": [
+    { "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/icons/maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
