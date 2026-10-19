@@ -2,6 +2,7 @@ import { useState } from "react";
 import { SCHOOL } from "../shared/domain.js";
 import { useApp } from "./lib/store";
 import { AlertToasts, ConnectionBanner, Footer, Header, InstallBanner, TabBar } from "./components/Chrome";
+import { ModeBanners } from "./components/Rules";
 import LoginView from "./views/LoginView";
 import ReportView from "./views/ReportView";
 import ParentView from "./views/ParentView";
@@ -34,6 +35,7 @@ export default function App() {
     <div className="min-h-dvh flex flex-col bg-cream text-brand-900">
       <Header title={title} subtitle={subtitle} />
       <ConnectionBanner />
+      <ModeBanners />
       {user.role === "principal" && <TabBar tab={pTab} setTab={setPTab} tabs={PRINCIPAL_TABS} />}
       {user.role === "responder" && <TabBar tab={rTab} setTab={setRTab} tabs={RESPONDER_TABS} />}
       <main className={`flex-1 w-full ${hasTabs ? "pb-20 md:pb-4" : "pb-4"}`}>

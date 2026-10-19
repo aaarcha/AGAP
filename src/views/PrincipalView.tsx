@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { ClipboardList, History, SlidersHorizontal, Siren, Users } from "lucide-react";
+import { ClipboardList, FlaskConical, History, SlidersHorizontal, Siren, Users } from "lucide-react";
 import { CONSISTENCY, DISCLAIMERS, SCHOOL, WEIGHTS } from "../../shared/domain.js";
 import { useApp } from "../lib/store";
 import { startOfToday } from "../lib/format";
@@ -10,11 +10,13 @@ import { IllustrativeTag } from "../components/Chrome";
 import HistorySection from "../components/History";
 import ReportView from "./ReportView";
 import RosterPanel from "./RosterPanel";
+import SafetyView from "./SafetyView";
 import { IncidentQueue } from "./ResponderView";
 
 export const PRINCIPAL_TABS = [
   { id: "command" as const, label: "Command", icon: ClipboardList },
   { id: "report" as const, label: "Report", icon: Siren },
+  { id: "safety" as const, label: "Safety", icon: FlaskConical },
   { id: "history" as const, label: "History", icon: History },
   { id: "roster" as const, label: "Roster", icon: Users },
   { id: "weights" as const, label: "Weights", icon: SlidersHorizontal },
@@ -32,13 +34,14 @@ function Stat({ value, label, tone }: { value: string | number; label: string; t
 
 function Command() {
   const { incidents, roster, now } = useApp();
-  const active = incidents.filter((i) => i.status !== "RESOLVED").length;
-  const today = incidents.filter((i) => i.createdAt >= startOfToday(now)).reduce((n, i) => n + i.confirmedBy, 0);
+  const active = incidents.filter((i) => i.status !== "RESOLVED" && !i.drill).length;
+  const critical = incidents.filter((i) => i.status !== "RESOLVED" && !i.drill && i.overrideReasons.length > 0).length;
+  const today = incidents.filter((i) => !i.drill && i.createdAt >= startOfToday(now)).reduce((n, i) => n + i.confirmedBy, 0);
   const staff = roster.filter((r) => r.status === "active").length;
   return (
     <div className="mx-auto w-full max-w-6xl px-3 py-3 space-y-4">
       <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
-        <Stat value={active} label="Active incidents" tone="text-brand-600" />
+        <Stat value={active} label={`Active incidents${critical ? ` · ${critical} critical override` : ""}`} tone="text-brand-600" />
         <Stat value={today} label="Total reports today" tone="text-slate-700" />
         <Stat value={staff} label="Active staff" tone="text-emerald-600" />
         <Stat value={SCHOOL.depedId} label="Sinalhan ES · DepEd ID" tone="text-slate-700 !text-xl" />
@@ -107,6 +110,7 @@ export default function PrincipalView({ tab }: { tab: PrincipalTab }) {
     <>
       {tab === "command" && <Command />}
       {tab === "report" && <ReportView />}
+      {tab === "safety" && <SafetyView />}
       {tab === "history" && <div className="mx-auto w-full max-w-3xl px-3 py-3"><HistorySection title="Incident history (official record)" /></div>}
       {tab === "roster" && <RosterPanel />}
       {tab === "weights" && <Weights />}

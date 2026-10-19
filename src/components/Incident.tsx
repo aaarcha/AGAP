@@ -6,9 +6,10 @@ import { BAND_STYLE, catTheme } from "../lib/theme";
 import { clockTime, elapsed } from "../lib/format";
 import type { Incident, Status } from "../lib/types";
 import { ConfirmModal, Modal } from "./Modal";
+import { AckModal, EtaLine, HeadcountPanel, RuleBadges } from "./Rules";
 
 export function ScoreReadout({ inc }: { inc: Incident }) {
-  const band = bandFor(inc.score, inc.status);
+  const band = bandFor(inc.score, inc.status, inc.overrideReasons);
   const st = BAND_STYLE[inc.status === "RESOLVED" ? "RESOLVED" : band];
   return (
     <div className="flex items-center gap-2">
@@ -69,7 +70,7 @@ export function WaitingLine({ inc }: { inc: Pick<Incident, "status" | "outcome">
 }
 
 const ACTION_LABEL: Record<string, string> = {
-  reported: "Reported", cancelled: "Cancelled", merged: "Corroborated", escalated: "Escalated", seen: "Seen", en_route: "En route",
+  reported: "Reported", cancelled: "Cancelled", headcount: "Headcount", override: "Override", hazard: "Hazard mode", route: "Route", drill_end: "Drill ended", merged: "Corroborated", escalated: "Escalated", seen: "Seen", en_route: "En route",
   on_site: "On site", resolved: "Resolved", false_alarm: "False alarm",
 };
 
@@ -80,6 +81,7 @@ export function IncidentCard({ inc, showActions, showLog }: { inc: Incident; sho
   const [confirm, setConfirm] = useState<"resolved" | "false_alarm" | null>(null);
   const [logOpen, setLogOpen] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [ackOpen, setAckOpen] = useState(false);
 
   // First time a principal/responder sees a "Sent" ticket, tell the server it was seen.
   useEffect(() => { if (showActions && inc.status === "SENT") markSeen(inc.id); }, [showActions, inc.id, inc.status, markSeen]);
@@ -87,6 +89,10 @@ export function IncidentCard({ inc, showActions, showLog }: { inc: Incident; sho
   async function run(action: "ack" | "onsite" | "resolve", outcome?: "resolved" | "false_alarm") {
     setBusy(true);
     try { await act(inc.id, action, outcome ? { outcome } : undefined); } finally { setBusy(false); }
+  }
+  async function ack(v: { mode?: string; distanceKm?: number }) {
+    setBusy(true);
+    try { await act(inc.id, "ack", v); } finally { setBusy(false); }
   }
 
   const btn = "flex-1 min-w-[9rem] min-h-11 rounded-xl px-3 text-sm font-bold disabled:opacity-60";
@@ -98,7 +104,8 @@ export function IncidentCard({ inc, showActions, showLog }: { inc: Incident; sho
         {inc.confirmedBy > 1 && (
           <span className="ml-auto text-xs font-bold px-2 py-0.5 rounded-full text-white" style={{ background: ct.pill }}>✔ Confirmed by {inc.confirmedBy} reports</span>
         )}
-        {closed && <span className={`${inc.confirmedBy > 1 ? "" : "ml-auto"} text-xs font-bold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700`}>{inc.outcome === "false_alarm" ? "FALSE ALARM" : inc.outcome === "cancelled" ? "CANCELLED" : "RESOLVED"}</span>}
+        {inc.drill && <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-accent-100 text-accent-700">🧪 DRILL</span>}
+        {closed && <span className={`${inc.confirmedBy > 1 || inc.drill ? "" : "ml-auto"} text-xs font-bold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700`}>{inc.outcome === "false_alarm" ? "FALSE ALARM" : inc.outcome === "cancelled" ? "CANCELLED" : inc.outcome === "drill" ? "DRILL ENDED" : "RESOLVED"}</span>}
       </div>
 
       <div className="p-3 space-y-2">
@@ -111,14 +118,17 @@ export function IncidentCard({ inc, showActions, showLog }: { inc: Incident; sho
         </div>
         <p className="text-sm text-slate-600">📍 {inc.room}</p>
         {inc.populationLabel && <p className="text-xs text-slate-500">Affected: {inc.populationLabel}{inc.linkedSection !== "ALL" ? ` · ${inc.linkedSection}` : " · whole school"}</p>}
+        <RuleBadges inc={{ ...inc, drill: false }} />
         <ResponseTracker status={inc.status} category={inc.category} compact />
         <WaitingLine inc={inc} />
+        <EtaLine inc={inc} />
         <p className="text-xs font-semibold" style={{ color: ct.color }}>↗ Recommended agency: {agencyFor(inc.category)}</p>
+        {showActions && <HeadcountPanel inc={inc} />}
 
         {showActions && !closed && (
           <div className="flex flex-wrap gap-2 pt-1">
             {(inc.status === "SENT" || inc.status === "SEEN") && (
-              <button disabled={busy} onClick={() => run("ack")} className={`${btn} text-white`} style={{ background: ct.gradient }}>🔴 Acknowledge &amp; En Route</button>
+              <button disabled={busy} onClick={() => setAckOpen(true)} className={`${btn} text-white`} style={{ background: ct.gradient }}>🚑 Acknowledge &amp; En Route</button>
             )}
             {inc.status !== "ON_SITE" && (
               <button disabled={busy} onClick={() => run("onsite")} className={`${btn} bg-teal-700 text-white`}>Mark On-Site</button>
@@ -144,6 +154,7 @@ export function IncidentCard({ inc, showActions, showLog }: { inc: Incident; sho
         )}
       </div>
 
+      {ackOpen && <AckModal inc={inc} onClose={() => setAckOpen(false)} onConfirm={ack} />}
       {confirm && (
         <ConfirmModal
           title={confirm === "resolved" ? "Mark as resolved?" : "Cancel as false alarm?"}

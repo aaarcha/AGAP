@@ -9,6 +9,7 @@ function TeacherForm({ initial, onClose }: { initial: RosterEntry | null; onClos
   const [name, setName] = useState(initial?.name ?? "");
   const [section, setSection] = useState(initial?.section ?? "");
   const [room, setRoom] = useState(initial?.room ?? "");
+  const [registry, setRegistry] = useState(String(initial?.registry ?? 30));
   const [status, setStatus] = useState<"active" | "inactive">(initial?.status ?? "active");
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
@@ -16,13 +17,14 @@ function TeacherForm({ initial, onClose }: { initial: RosterEntry | null; onClos
   async function save() {
     setBusy(true); setErr("");
     try {
-      if (initial) await editTeacher(initial.id, { name, section, room, status });
-      else await addTeacher({ name, section, room, status });
+      if (initial) await editTeacher(initial.id, { name, section, room, status, registry: Number(registry) });
+      else await addTeacher({ name, section, room, status, registry: Number(registry) });
       onClose();
     } catch (e) { setErr(e instanceof Error ? e.message : "Could not save."); setBusy(false); }
   }
   const fields: [string, string, (v: string) => void, string][] = [
     ["Name", name, setName, "Ms. Reyes"], ["Grade / Section", section, setSection, "Grade 3 - Sec A"], ["Default Room", room, setRoom, "Bldg A | Flr 2 | Rm 204"],
+    ["Today's registry (number of pupils)", registry, (v: string) => setRegistry(v.replace(/\D/g, "").slice(0, 3)), "30"],
   ];
   return (
     <Modal title={initial ? "Edit Teacher" : "Add Teacher"} onClose={onClose}>
@@ -65,6 +67,7 @@ export default function RosterPanel() {
                 <p className="text-base font-bold text-slate-800">{t.name}</p>
                 <p className="text-sm text-slate-600">{t.section}</p>
                 <p className="text-xs text-slate-500 mt-0.5">📍 {t.room}</p>
+                <p className="text-xs text-slate-500">👥 Registry today: <span className="font-mono font-bold">{t.registry}</span></p>
               </div>
               <span className={`text-xs font-bold rounded-full px-2 py-1 shrink-0 ${t.status === "active" ? "text-emerald-700 bg-emerald-50" : "text-slate-500 bg-slate-100"}`}>
                 {t.status === "active" ? "On duty" : "Off duty"}

@@ -7,6 +7,7 @@ import { distanceInMeters, parseGps } from "../lib/format";
 import type { Incident, ReportPayload } from "../lib/types";
 import { ConfirmModal, Modal } from "../components/Modal";
 import { ResponseTracker, WaitingLine } from "../components/Incident";
+import { EtaLine, HeadcountPanel, RuleBadges } from "../components/Rules";
 import { SCHOOL_MAP_POINTS, SchoolMap, areaForMapPoint, type MapPoint } from "../components/SchoolMap";
 
 const CAT_ICON: Record<string, React.ElementType> = { fire: Flame, medical: Siren, flood: Waves, security: ShieldAlert };
@@ -36,13 +37,15 @@ export default function ReportView() {
   const [mismatchReason, setMismatchReason] = useState("");
   const [confirmCancel, setConfirmCancel] = useState(false);
   const [notice, setNotice] = useState<Notice>(null);
+  const taps = useRef(0); // passive interface-interaction counter (used for drill usability metrics)
   const noticeTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
   const pop = POPULATIONS.find((p) => p.id === popId) ?? null;
   const needSection = !isTeacher && pop && pop.id !== "wholeschool";
   const match = useMemo(() => searchCatalog(query), [query]);
   const hasQuery = query.trim().length >= 2;
-  const last: Incident | undefined = isTeacher ? incidents[0] : incidents.find((i) => i.reporterId === "principal");
+const last: Incident | undefined = incidents.find((i) => i.reporterId === user!.id);
+  const classAlerts = isTeacher ? incidents.filter((i) => i.status !== "RESOLVED" && i.id !== last?.id) : [];
 
   function flash(n: Notice) {
     setNotice(n);
@@ -76,6 +79,7 @@ export default function ReportView() {
       } else {
         flash({ kind: "sent", text: "🔴 Alert broadcast to Principal, Parent/PTA and Barangay Sinalhan / CDRRMO. Tracking is shown below — use “Cancel this alert” there if it was a mistake." });
       }
+      taps.current = 0;
       reset();
     } catch (e) {
       flash({ kind: "error", text: e instanceof Error ? e.message : "The alert could not be sent." });
@@ -87,6 +91,7 @@ export default function ReportView() {
     const payload: ReportPayload = {
       categoryId: sel.catId, subId: sel.subId, populationId: pop.id, ...loc,
       ...(needSection ? { section } : {}),
+      interactions: taps.current,
     };
     const label = `${sel.catLabel} — ${sel.subLabel}`;
     void sendNow(payload, label); // sends at once (or queues if offline). Mistakes: cancel from "Your last report".
@@ -133,7 +138,7 @@ export default function ReportView() {
   const ct = sel ? catTheme(sel.catId) : catTheme("other");
 
   return (
-    <div className="mx-auto w-full max-w-md px-3 py-3 space-y-3">
+    <div className="mx-auto w-full max-w-md px-3 py-3 space-y-3" onClickCapture={() => { taps.current += 1; }}>
       {/* Location header card */}
       <section className="bg-white rounded-2xl border border-slate-200 p-3">
         <div className="flex items-center gap-3">
@@ -187,6 +192,25 @@ export default function ReportView() {
               </li>
             ))}
           </ul>
+        </section>
+      )}
+
+      {classAlerts.length > 0 && (
+        <section aria-label="Alerts for your class" className="space-y-2">
+          <h2 className="text-xs font-bold text-slate-500 uppercase tracking-wide">Active alert{classAlerts.length > 1 ? "s" : ""} affecting your class</h2>
+          {classAlerts.map((a) => {
+            const t = catTheme(a.category);
+            return (
+              <div key={a.id} className="rounded-2xl p-3 space-y-2" style={{ background: t.bg, border: `2px solid ${t.border}` }}>
+                <p className="text-xs font-extrabold uppercase tracking-wide" style={{ color: t.color }}>{t.emoji} {a.categoryLabel} · {a.subLabel}</p>
+                <p className="text-sm text-slate-600">📍 {a.room}</p>
+                <WaitingLine inc={a} />
+                <RuleBadges inc={a} />
+                <EtaLine inc={a} />
+                <HeadcountPanel inc={a} />
+              </div>
+            );
+          })}
         </section>
       )}
 
@@ -295,7 +319,10 @@ export default function ReportView() {
           <section className="rounded-2xl p-3" style={{ background: t.bg, border: `2px solid ${t.border}` }}>
             <p className="text-xs font-extrabold uppercase tracking-wide mb-1.5" style={{ color: t.color }}>{t.emoji} Your last report · {last.categoryLabel}</p>
             <WaitingLine inc={last} />
+            <div className="mt-2"><RuleBadges inc={last} /></div>
             <div className="mt-3"><ResponseTracker status={last.status} category={last.category} compact /></div>
+            <div className="mt-2"><EtaLine inc={last} /></div>
+            {last.status !== "RESOLVED" && <div className="mt-3"><HeadcountPanel inc={last} /></div>}
             {last.canCancel && (
               <button onClick={() => setConfirmCancel(true)} className="mt-3 w-full min-h-11 rounded-xl bg-white text-blush-700 border border-blush-200 font-bold text-sm">
                 ✕ Cancel this alert
@@ -327,15 +354,17 @@ function ProfileModal({ onClose }: { onClose: () => void }) {
   const [name, setName] = useState(user!.name);
   const [section, setSection] = useState(user!.section ?? "");
   const [room, setRoom] = useState(user!.room ?? "");
+  const [registry, setRegistry] = useState(String(user!.registry ?? ""));
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
   async function save() {
     setBusy(true); setErr("");
-    try { await saveProfile({ name, section, room }); onClose(); }
+    try { await saveProfile({ name, section, room, ...(registry !== "" ? { registry: Number(registry) } : {}) }); onClose(); }
     catch (e) { setErr(e instanceof Error ? e.message : "Could not save."); setBusy(false); }
   }
   const fields: [string, string, (v: string) => void, string][] = [
     ["Name", name, setName, "Ms. Reyes"], ["Grade / Section", section, setSection, "Grade 3 - Sec A"], ["Default Room", room, setRoom, "Bldg A | Flr 2 | Rm 204"],
+    ["Today's registry (number of pupils)", registry, (v: string) => setRegistry(v.replace(/\D/g, "").slice(0, 3)), "28"],
   ];
   return (
     <Modal title="Edit Profile / Room" onClose={onClose}>
@@ -349,7 +378,7 @@ function ProfileModal({ onClose }: { onClose: () => void }) {
           </div>
         ))}
         {err && <p className="text-sm text-blush-700" role="alert">{err}</p>}
-        <p className="text-xs text-slate-500">Saving updates the Principal's roster right away.</p>
+        <p className="text-xs text-slate-500">The registry is the number of pupils expected in your class today; it is what the evacuation headcount is compared with. Saving updates the Principal's roster right away.</p>
         <button onClick={save} disabled={busy} className="w-full min-h-12 bg-brand-600 text-white rounded-xl font-bold disabled:opacity-60">{busy ? "Saving…" : "Save Changes"}</button>
       </div>
     </Modal>

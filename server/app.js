@@ -48,6 +48,8 @@ export function createApp(opts = {}) {
     allowReset = true,
     seedDemoIncident = false,
     historyDays = 90,
+    escalationMinutes = D.DEFAULT_ESCALATION_MINUTES,
+    autoTick = true,
     now = () => Date.now(),
     log = () => {},
   } = opts;
@@ -97,7 +99,7 @@ export function createApp(opts = {}) {
     if (sub.startsWith("teacher:")) {
       const t = db.roster.find((r) => r.id === sub.slice(8));
       if (!t || t.status !== "active") return null;
-      return { id: t.id, role: "teacher", name: t.name, section: t.section, room: t.room, gps: t.gps, subtitle: `Teacher · ${t.section}` };
+      return { id: t.id, role: "teacher", name: t.name, section: t.section, room: t.room, gps: t.gps, registry: t.registry, subtitle: `Teacher · ${t.section}` };
     }
     if (sub.startsWith("parent:")) {
       const section = sub.slice(7);
@@ -174,7 +176,8 @@ export function createApp(opts = {}) {
 
   function canSee(i, user) {
     if (user.role === "principal" || user.role === "responder") return true;
-    if (user.role === "teacher") return i.reporterIds.includes(user.id);
+    if (user.role === "teacher") return i.reporterIds.includes(user.id) || i.linkedSection === user.section || i.linkedSection === "ALL";
+    if (i.drill) return false; // parents are not alarmed by drills
     return i.linkedSection === user.section || i.linkedSection === "ALL";
   }
 
@@ -189,8 +192,39 @@ export function createApp(opts = {}) {
     );
   }
 
+  // Which class sections must report a headcount for this incident.
+  function expectedSections(i) {
+    if (i.linkedSection !== "ALL") return [i.linkedSection];
+    return [...new Set(store.db.roster.filter((r) => r.status === "active").map((r) => r.section))];
+  }
+
+  function accountabilityOf(i) {
+    const need = expectedSections(i);
+    const have = need.filter((sec) => i.headcounts.some((h) => h.section === sec));
+    const mismatch = i.headcounts.some((h) => h.present !== h.expected);
+    let status = "pending";
+    if (mismatch) status = "mismatch";
+    else if (have.length && have.length >= need.length) status = "verified";
+    else if (have.length) status = "partial";
+    return { status, reported: have.length, total: need.length };
+  }
+
+  function metricsOf(i) {
+    const d = store.db.drills.find((x) => x.id === i.drillId);
+    const drillStart = d ? d.startedAt : store.db.modes.drill.id === i.drillId ? store.db.modes.drill.startedAt : null;
+    return {
+      toReportMs: i.drill && drillStart ? i.createdAt - drillStart : null,
+      toAckMs: i.enRouteAt ? i.enRouteAt - i.createdAt : null,
+      toOnSiteMs: i.onSiteAt ? i.onSiteAt - i.createdAt : null, // end-to-end: report → responder on site
+      toHeadcountMs: i.firstHeadcountAt ? i.firstHeadcountAt - i.createdAt : null,
+      toResolveMs: i.resolvedAt ? i.resolvedAt - i.createdAt : null,
+      interactions: i.interactions,
+    };
+  }
+
   function publicIncident(i, user) {
     const role = user.role;
+    const acc = accountabilityOf(i);
     const base = {
       id: i.id,
       category: i.category,
@@ -205,21 +239,38 @@ export function createApp(opts = {}) {
       populationLabel: i.populationLabel,
       outcome: i.outcome,
       resolvedAt: i.resolvedAt,
+      overrideReasons: i.overrideReasons,
+      escalationLevel: i.escalationLevel,
+      eta: i.eta,
+      accountability: acc,
+      // Parents only ever see aggregate counts for their own section.
+      headcounts: role === "parent" ? i.headcounts.filter((h) => h.section === user.section).map((h) => ({ section: h.section, expected: h.expected, present: h.present, at: h.at })) : i.headcounts,
     };
     if (role === "parent") return base; // no reporter names, no scoring internals
     const extra = {
       severity: i.severity,
       vulnerability: i.vulnerability,
       locationRisk: i.locationRisk,
+      baseLocationRisk: i.baseLocationRisk,
       timeSensitivity: i.timeSensitivity,
+      hazardApplied: D.scoreIncident(i, { hazardActive: store.db.modes.hazard.active }).hazardApplied,
+      drill: i.drill,
       reporterName: i.reporterName,
       reporterId: i.reporterId,
       acknowledgedBy: i.acknowledgedBy,
       resolvedBy: i.resolvedBy,
       log: i.log,
+      metrics: metricsOf(i),
       canCancel: canCancel(i, user),
     };
     return { ...base, ...extra };
+  }
+
+  function publicModes(user) {
+    const m = store.db.modes;
+    const out = { hazard: m.hazard, route: m.route, drill: { active: m.drill.active, label: m.drill.label, startedAt: m.drill.startedAt } };
+    if (user.role === "parent") out.route = { status: m.route.status };
+    return out;
   }
 
   function stateFor(user) {
@@ -236,7 +287,45 @@ export function createApp(opts = {}) {
       incidents,
       roster,
       sections: user.role === "principal" ? sections() : [],
+      modes: publicModes(user),
+      drills: user.role === "principal" ? db.drills.slice(-10).reverse() : [],
+      rules: { escalationMinutes, tiers: D.ESCALATION_TIERS, hazardBoost: D.HAZARD_LOCATION_BOOST },
     };
+  }
+
+  // Single place where score / location risk / time sensitivity / override flags are (re)computed.
+  function rescore(inc) {
+    const r = D.scoreIncident(inc, { hazardActive: store.db.modes.hazard.active });
+    inc.locationRisk = r.locationRisk;
+    inc.timeSensitivity = r.timeSensitivity;
+    inc.score = r.score;
+    inc.overrideReasons = r.overrideReasons;
+    return r;
+  }
+
+  // Time-based escalation: unacknowledged tickets climb Principal → Barangay → CDRRMO.
+  function runEscalations() {
+    const t = now();
+    let changed = false;
+    for (const inc of store.db.incidents) {
+      if (inc.status !== "SENT" && inc.status !== "SEEN") continue;
+      const age = t - inc.createdAt;
+      let level = 0;
+      escalationMinutes.forEach((m, idx) => { if (age >= m * 60000) level = idx + 1; });
+      if (level > inc.escalationLevel) {
+        const before = inc.score;
+        inc.escalationLevel = level;
+        inc.escalatedAt = t;
+        rescore(inc);
+        inc.log.push({
+          at: t, by: "System", role: "system", action: "escalated",
+          note: `No acknowledgement after ${escalationMinutes[level - 1]} min — escalated to ${D.ESCALATION_TIERS[level]} (score ${before.toFixed(2)} → ${inc.score.toFixed(2)})`,
+        });
+        changed = true;
+      }
+    }
+    if (changed) commit({ type: "escalated" });
+    return changed;
   }
 
   // ------------------------------------------------------------- mutations
@@ -269,6 +358,7 @@ export function createApp(opts = {}) {
     const kind = body.locationKind || "saved";
     let room = reporter.room;
     let locationRisk = D.LOCATION_RISK_SAVED_ROOM;
+    const lowLying = D.isLowLying({ locationKind: body.locationKind || "saved", areaId: body.areaId, savedRoom: reporter.room });
     if (kind === "area") {
       const area = D.NON_CLASSROOM_AREAS.find((a) => a.id === body.areaId);
       if (!area) throw bad("Unknown area.");
@@ -292,12 +382,14 @@ export function createApp(opts = {}) {
     }
 
     const t = now();
-    const timeSensitivity = D.DEFAULT_TIME_SENSITIVITY;
+    const drillMode = store.db.modes.drill;
+    const interactions = Number.isInteger(body.interactions) && body.interactions >= 0 && body.interactions < 1000 ? body.interactions : 0;
 
     // Duplicate merge: same kind of emergency, same place, still open, recent.
     const dup = db.incidents.find(
       (i) =>
         i.status !== "RESOLVED" &&
+        Boolean(i.drill) === Boolean(drillMode.active) &&
         i.category === cat.categoryId &&
         i.room === room &&
         (i.linkedSection === linkedSection || i.linkedSection === "ALL" || linkedSection === "ALL") &&
@@ -309,14 +401,17 @@ export function createApp(opts = {}) {
       dup.clientIds.push(clientId);
       dup.log.push({ at: t, by: reporter.name, role: user.role, action: "merged", note: `Corroborating report #${dup.confirmedBy}` });
       if (linkedSection === "ALL") dup.linkedSection = "ALL";
-      const sev = Math.max(dup.severity, cat.severity);
-      const vul = Math.max(dup.vulnerability, pop.vuln);
-      const loc = Math.max(dup.locationRisk, locationRisk);
-      const score = D.computeScore(sev, vul, loc, dup.timeSensitivity);
-      if (score > dup.score) {
-        dup.log.push({ at: t, by: "System", role: "system", action: "escalated", note: `Score ${dup.score.toFixed(2)} → ${score.toFixed(2)}` });
-        if (cat.severity > dup.severity) dup.subLabel = cat.subLabel;
-        Object.assign(dup, { severity: sev, vulnerability: vul, locationRisk: loc, score });
+      const before = dup.score;
+      const higherSeverity = cat.severity > dup.severity;
+      dup.severity = Math.max(dup.severity, cat.severity);
+      dup.vulnerability = Math.max(dup.vulnerability, pop.vuln);
+      dup.baseLocationRisk = Math.max(dup.baseLocationRisk, locationRisk);
+      dup.lowLying = dup.lowLying || lowLying;
+      if (higherSeverity) dup.subLabel = cat.subLabel;
+      dup.interactions += interactions;
+      rescore(dup);
+      if (dup.score > before) {
+        dup.log.push({ at: t, by: "System", role: "system", action: "escalated", note: `Score ${before.toFixed(2)} → ${dup.score.toFixed(2)}` });
       }
       db.clientIds[clientId] = { id: dup.id, at: t };
       return { incident: dup, merged: true };
@@ -331,9 +426,23 @@ export function createApp(opts = {}) {
       subLabel: cat.subLabel,
       severity: cat.severity,
       vulnerability: pop.vuln,
+      baseLocationRisk: locationRisk,
+      baseTimeSensitivity: D.DEFAULT_TIME_SENSITIVITY,
+      lowLying,
+      escalationLevel: 0,
+      escalatedAt: null,
       locationRisk,
-      timeSensitivity,
-      score: D.computeScore(cat.severity, pop.vuln, locationRisk, timeSensitivity),
+      timeSensitivity: D.DEFAULT_TIME_SENSITIVITY,
+      score: 0,
+      overrideReasons: [],
+      headcounts: [],
+      firstHeadcountAt: null,
+      drill: Boolean(drillMode.active),
+      drillId: drillMode.active ? drillMode.id : null,
+      interactions,
+      eta: null,
+      enRouteAt: null,
+      onSiteAt: null,
       room,
       populationLabel: pop.label,
       reporterId: reporter.id,
@@ -348,8 +457,15 @@ export function createApp(opts = {}) {
       resolvedAt: null,
       resolvedBy: null,
       hiddenBy: [],
-      log: [{ at: t, by: reporter.name, role: user.role, action: "reported", note: `${cat.categoryLabel} – ${cat.subLabel}` }],
+      log: [{ at: t, by: reporter.name, role: user.role, action: "reported", note: `${cat.categoryLabel} – ${cat.subLabel}${drillMode.active ? " (DRILL)" : ""}` }],
     };
+    rescore(incident);
+    if (store.db.modes.hazard.active && D.scoreIncident(incident, { hazardActive: true }).hazardApplied) {
+      incident.log.push({ at: t, by: "System", role: "system", action: "hazard", note: `Hazard mode (${store.db.modes.hazard.kind}): Location Risk ${incident.baseLocationRisk} → ${incident.locationRisk}` });
+    }
+    if (incident.overrideReasons.includes("SEVERITY_5")) {
+      incident.log.push({ at: t, by: "System", role: "system", action: "override", note: "Severity 5 — critical override applied" });
+    }
     db.incidents.push(incident);
     db.clientIds[clientId] = { id: incident.id, at: t };
     return { incident, merged: false };
@@ -368,9 +484,24 @@ export function createApp(opts = {}) {
     if (action === "seen" && inc.status === "SENT") {
       inc.status = "SEEN"; push("seen"); changed = true;
     } else if (action === "ack" && (inc.status === "SENT" || inc.status === "SEEN")) {
-      inc.status = "EN_ROUTE"; inc.acknowledgedBy = user.name; push("en_route", "Acknowledged"); changed = true;
+      // Validate everything first so a rejected request never leaves the ticket half-updated.
+      let eta = null;
+      let note = "Acknowledged";
+      if (body.mode) {
+        const mode = D.TRANSPORT_MODES.find((m) => m.id === body.mode);
+        const km = Number(body.distanceKm);
+        if (!mode) throw bad("Unknown transport mode.");
+        if (!(km > 0 && km <= 50)) throw bad("Enter the distance to the school in km (0–50).");
+        const route = store.db.modes.route.status;
+        const r = D.computeEta({ mode: mode.id, distanceKm: km, route });
+        eta = { mode: mode.id, distanceKm: km, routeStatus: route, blocked: Boolean(r.blocked), minutes: r.minutes, startedAt: t, arriveBy: r.blocked ? null : t + r.minutes * 60000 };
+        note = r.blocked ? `Acknowledged — ${mode.label}, ${km} km, route BLOCKED (no ETA)` : `Acknowledged — ${mode.label}, ${km} km, ETA ${r.minutes} min (route ${route})`;
+      }
+      inc.status = "EN_ROUTE"; inc.acknowledgedBy = user.name; inc.enRouteAt = t; inc.eta = eta;
+      push("en_route", note); changed = true;
     } else if (action === "onsite" && inc.status !== "ON_SITE") {
-      inc.status = "ON_SITE"; inc.acknowledgedBy = inc.acknowledgedBy || user.name; push("on_site"); changed = true;
+      inc.status = "ON_SITE"; inc.acknowledgedBy = inc.acknowledgedBy || user.name; inc.onSiteAt = t; inc.enRouteAt = inc.enRouteAt || t;
+      push("on_site", `Report → on site in ${Math.max(0, Math.round((t - inc.createdAt) / 60000))} min`); changed = true;
     } else if (action === "resolve") {
       const falseAlarm = body.outcome === "false_alarm";
       inc.status = "RESOLVED";
@@ -401,6 +532,11 @@ export function createApp(opts = {}) {
     if (!partial || body.name !== undefined) { if (!name) throw bad("Name is required."); out.name = name; }
     if (!partial || body.section !== undefined) { if (!section) throw bad("Grade / section is required."); out.section = section; }
     if (!partial || body.room !== undefined) { if (!room) throw bad("Default room is required."); out.room = room; }
+    if (body.registry !== undefined && body.registry !== null && body.registry !== "") {
+      const n = Number(body.registry);
+      if (!Number.isInteger(n) || n < 0 || n > 200) throw bad("Today's registry must be a whole number from 0 to 200.");
+      out.registry = n;
+    }
     return out;
   }
 
@@ -411,6 +547,8 @@ export function createApp(opts = {}) {
     db.incidents.push({
       id: store.nextId("INC-"), clientId: "seed-1", clientIds: ["seed-1"], category: "flood", categoryLabel: "Flooding/Natural",
       subLabel: "Flash Flood", severity: 4, vulnerability: 4, locationRisk: 2, timeSensitivity: 3,
+      baseLocationRisk: 2, baseTimeSensitivity: 3, lowLying: true, escalationLevel: 0, escalatedAt: null, headcounts: [], overrideReasons: [],
+      firstHeadcountAt: null, drill: false, drillId: null, interactions: 3, eta: null, enRouteAt: t - 3 * 60000, onSiteAt: null,
       score: D.computeScore(4, 4, 2, 3), room: "Bldg B | Flr 1 | Rm 105", populationLabel: "Classroom / Section",
       reporterId: "t3", reporterIds: ["t3"], reporterName: "Ms. Bautista", linkedSection: "Grade 5 - Sec A",
       createdAt: t - 6 * 60000, status: "EN_ROUTE", confirmedBy: 2, acknowledgedBy: "Brgy. Sinalhan / CDRRMO",
@@ -473,6 +611,7 @@ export function createApp(opts = {}) {
     // Everything below needs a signed-in user.
     const user = authenticate(req, url);
     if (m !== "GET") rateLimit(req, "write", 120);
+    runEscalations(); // deterministic, time-based escalation (also runs on a timer)
 
     if (p === "/api/state" && m === "GET") return send(res, 200, stateFor(user));
 
@@ -487,7 +626,7 @@ export function createApp(opts = {}) {
     let mt = p.match(/^\/api\/incidents\/([\w-]+)\/(seen|ack|onsite|resolve)$/);
     if (mt && m === "POST") {
       need(user, "principal", "responder");
-      const body = mt[2] === "resolve" ? await readJson(req) : {};
+      const body = mt[2] === "resolve" || mt[2] === "ack" ? await readJson(req) : {};
       const { incident, changed } = transition(user, mt[1], mt[2], body);
       if (changed) commit({ type: "incident_updated", id: incident.id, status: incident.status });
       return send(res, 200, { incident: publicIncident(incident, user), changed });
@@ -538,6 +677,105 @@ export function createApp(opts = {}) {
       return send(res, 200, { ok: true, mode: user.role === "principal" ? "permanent" : "hidden" });
     }
 
+
+    // ---- Headcount verification (aggregate numbers only – no pupil names or personal data)
+    let mh = p.match(/^\/api\/incidents\/([\w-]+)\/headcount$/);
+    if (mh && m === "POST") {
+      need(user, "teacher", "principal");
+      const inc = store.db.incidents.find((i) => i.id === mh[1] && canSee(i, user));
+      if (!inc) throw new HttpError(404, "not_found", "Incident not found.");
+      if (inc.status === "RESOLVED") throw new HttpError(409, "already_resolved", "This incident is already closed.");
+      const body = await readJson(req);
+      const need_ = expectedSections(inc);
+      const section = user.role === "teacher" ? user.section : clean(body.section, 60);
+      if (!need_.includes(section)) throw new HttpError(403, "forbidden", "That section is not part of this incident.");
+      const roster = store.db.roster.find((r) => r.section === section && r.status === "active") || store.db.roster.find((r) => r.section === section);
+      const expected = body.expected !== undefined && body.expected !== null && body.expected !== "" ? Number(body.expected) : roster ? roster.registry : NaN;
+      const present = Number(body.present);
+      const okInt = (n) => Number.isInteger(n) && n >= 0 && n <= 999;
+      if (!okInt(present)) throw bad("Enter how many pupils are present (whole number).");
+      if (!okInt(expected)) throw bad("Enter today's registry count for this section.");
+      const t = now();
+      const entry = { section, expected, present, at: t, by: user.name, byRole: user.role };
+      inc.headcounts = inc.headcounts.filter((h) => h.section !== section).concat(entry);
+      inc.firstHeadcountAt = inc.firstHeadcountAt || t;
+      const wasCritical = inc.overrideReasons.includes("HEADCOUNT_MISMATCH");
+      const before = inc.score;
+      rescore(inc);
+      const diff = expected - present;
+      inc.log.push({
+        at: t, by: user.name, role: user.role, action: "headcount",
+        note: diff === 0 ? `${section}: ${present}/${expected} present — all accounted for` : diff > 0 ? `${section}: ${present}/${expected} present — ${diff} unaccounted for` : `${section}: ${present}/${expected} — ${-diff} more than the registry`,
+      });
+      if (inc.overrideReasons.includes("HEADCOUNT_MISMATCH") && !wasCritical) {
+        inc.log.push({ at: t, by: "System", role: "system", action: "override", note: `Accountability mismatch — forced Critical (score ${before.toFixed(2)} → ${inc.score.toFixed(2)})` });
+      } else if (wasCritical && !inc.overrideReasons.includes("HEADCOUNT_MISMATCH")) {
+        inc.log.push({ at: t, by: "System", role: "system", action: "override", note: "Headcount now matches the registry — mismatch override cleared" });
+      }
+      commit({ type: "headcount", id: inc.id });
+      return send(res, 200, { incident: publicIncident(inc, user) });
+    }
+
+    // ---- System modes (Hazard, Drill, Approach route)
+    if (p === "/api/modes/hazard" && m === "PUT") {
+      need(user, "principal");
+      const body = await readJson(req);
+      const hz = store.db.modes.hazard;
+      const active = Boolean(body.active);
+      const kind = D.HAZARD_KINDS.some((k) => k.id === body.kind) ? body.kind : hz.kind;
+      const t = now();
+      Object.assign(hz, { active, kind, note: clean(body.note, 140), since: active ? (hz.active ? hz.since : t) : null, by: active ? user.name : null });
+      for (const inc of store.db.incidents) {
+        if (inc.status === "RESOLVED") continue;
+        const before = inc.locationRisk;
+        const beforeScore = inc.score;
+        rescore(inc);
+        if (inc.locationRisk !== before) {
+          inc.log.push({ at: t, by: "System", role: "system", action: "hazard", note: `Hazard mode ${active ? "ON" : "OFF"}: Location Risk ${before} → ${inc.locationRisk} (score ${beforeScore.toFixed(2)} → ${inc.score.toFixed(2)})` });
+        }
+      }
+      commit({ type: "hazard_mode", active });
+      return send(res, 200, { hazard: hz });
+    }
+
+    if (p === "/api/modes/drill" && m === "PUT") {
+      need(user, "principal");
+      const body = await readJson(req);
+      const dm = store.db.modes.drill;
+      const t = now();
+      let summary = null;
+      if (body.active && !dm.active) {
+        Object.assign(dm, { active: true, id: store.nextId("DRL-"), label: clean(body.label, 80) || "Campus disaster drill", startedAt: t, by: user.name });
+      } else if (!body.active && dm.active) {
+        summary = endDrill(user, t);
+      }
+      commit({ type: "drill_mode", active: dm.active });
+      return send(res, 200, { drill: dm, summary });
+    }
+
+    if (p === "/api/modes/route" && m === "PUT") {
+      need(user, "principal", "responder");
+      const body = await readJson(req);
+      if (!D.ROUTE_STATUSES.some((r) => r.id === body.status)) throw bad("Route status must be passable, flooded or blocked.");
+      const t = now();
+      const rt = store.db.modes.route;
+      Object.assign(rt, { status: body.status, note: clean(body.note, 140), updatedAt: t, by: user.name });
+      for (const inc of store.db.incidents) {
+        if (!inc.eta || inc.status !== "EN_ROUTE") continue; // arrived or closed: nothing to re-estimate
+        const e = inc.eta;
+        const oldMs = e.blocked || !e.minutes ? null : e.minutes * 60000;
+        const remainingFrac = oldMs ? Math.max(0, 1 - (t - e.startedAt) / oldMs) : 1;
+        const r = D.computeEta({ mode: e.mode, distanceKm: e.distanceKm, route: body.status });
+        const oldMin = e.blocked ? "blocked" : `${Math.max(0, Math.ceil((e.arriveBy - t) / 60000))} min left`;
+        if (r.blocked) inc.eta = { ...e, routeStatus: body.status, blocked: true, minutes: null, arriveBy: null };
+        else inc.eta = { ...e, routeStatus: body.status, blocked: false, minutes: r.minutes, startedAt: t - (1 - remainingFrac) * r.minutes * 60000, arriveBy: t + remainingFrac * r.minutes * 60000 };
+        const newMin = inc.eta.blocked ? "no usable route — reroute" : `${Math.max(0, Math.ceil((inc.eta.arriveBy - t) / 60000))} min left`;
+        inc.log.push({ at: t, by: user.name, role: user.role, action: "route", note: `Approach route ${body.status}: ETA ${oldMin} → ${newMin}` });
+      }
+      commit({ type: "route_status", status: body.status });
+      return send(res, 200, { route: rt });
+    }
+
     if (p === "/api/profile" && m === "PUT") {
       need(user, "teacher");
       const entry = store.db.roster.find((r) => r.id === user.id);
@@ -552,7 +790,7 @@ export function createApp(opts = {}) {
       const body = await readJson(req);
       const fields = parseTeacherFields(body);
       const gps = /^-?\d{1,3}\.\d+, ?-?\d{1,3}\.\d+$/.test(String(body.gps || "")) ? String(body.gps) : DEFAULT_GPS;
-      const entry = { id: store.nextId("t"), ...fields, gps, status: body.status === "inactive" ? "inactive" : "active" };
+      const entry = { id: store.nextId("t"), registry: 30, ...fields, gps, status: body.status === "inactive" ? "inactive" : "active" };
       store.db.roster.push(entry);
       commit({ type: "roster_updated", id: entry.id });
       return send(res, 201, { teacher: entry });
@@ -586,6 +824,34 @@ export function createApp(opts = {}) {
     }
 
     throw new HttpError(404, "not_found", "No such endpoint.");
+  }
+
+  // Ending a drill closes its open tickets and stores the passive usability metrics.
+  function endDrill(user, t) {
+    const db = store.db;
+    const dm = db.modes.drill;
+    const items = db.incidents.filter((i) => i.drillId === dm.id);
+    for (const inc of items) {
+      if (inc.status === "RESOLVED") continue;
+      inc.status = "RESOLVED"; inc.outcome = "drill"; inc.resolvedAt = t; inc.resolvedBy = user.name;
+      inc.log.push({ at: t, by: user.name, role: user.role, action: "drill_end", note: "Drill ended" });
+    }
+    const avg = (arr) => { const v = arr.filter((x) => x !== null && x !== undefined); return v.length ? Math.round(v.reduce((a, b) => a + b, 0) / v.length) : null; };
+    const rows = items.map((i) => ({ id: i.id, subLabel: i.subLabel, toReportMs: i.createdAt - dm.startedAt, toAckMs: i.enRouteAt ? i.enRouteAt - i.createdAt : null, toOnSiteMs: i.onSiteAt ? i.onSiteAt - i.createdAt : null, toHeadcountMs: i.firstHeadcountAt ? i.firstHeadcountAt - i.createdAt : null, interactions: i.interactions }));
+    const summary = {
+      id: dm.id, label: dm.label, startedAt: dm.startedAt, endedAt: t, startedBy: dm.by, endedBy: user.name,
+      incidents: rows.length,
+      avgToReportMs: avg(rows.map((r) => r.toReportMs)),
+      avgToAckMs: avg(rows.map((r) => r.toAckMs)),
+      avgToOnSiteMs: avg(rows.map((r) => r.toOnSiteMs)),
+      avgToHeadcountMs: avg(rows.map((r) => r.toHeadcountMs)),
+      avgInteractions: rows.length ? Math.round((rows.reduce((a, r) => a + r.interactions, 0) / rows.length) * 10) / 10 : null,
+      rows,
+    };
+    db.drills.push(summary);
+    if (db.drills.length > 30) db.drills.shift();
+    Object.assign(dm, { active: false, id: null, label: "", startedAt: null, by: null });
+    return summary;
   }
 
   // ---------------------------------------------------------------- static
@@ -649,12 +915,16 @@ export function createApp(opts = {}) {
     }
   });
   server.requestTimeout = 0; // SSE connections stay open
+  const tickTimer = autoTick ? setInterval(runEscalations, 10000) : null;
+  if (tickTimer) tickTimer.unref();
   server.headersTimeout = 20000;
 
   return {
     server,
     store,
+    runEscalations,
     close() {
+      if (tickTimer) clearInterval(tickTimer);
       store.flush();
       for (const c of sseClients) { try { c.end(); } catch { /* ignore */ } }
       sseClients.clear();

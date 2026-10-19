@@ -1,15 +1,15 @@
 import { useMemo, useState } from "react";
 import { History as HistoryIcon, Trash2 } from "lucide-react";
-import { OUTCOME_LABEL, WEIGHTS, agencyFor, bandFor } from "../../shared/domain.js";
+import { ESCALATION_TIERS, OUTCOME_LABEL, OVERRIDE_LABEL, TRANSPORT_MODES, WEIGHTS, agencyFor, bandFor } from "../../shared/domain.js";
 import { useApp } from "../lib/store";
 import { BAND_STYLE, catTheme } from "../lib/theme";
-import { dateTime, duration, elapsed } from "../lib/format";
+import { dateTime, duration, elapsed, fmtMs } from "../lib/format";
 import type { Incident } from "../lib/types";
 import { ConfirmModal, Modal } from "./Modal";
 import { ResponseTracker } from "./Incident";
 
 const ACTION_LABEL: Record<string, string> = {
-  reported: "Reported", merged: "Corroborated", escalated: "Escalated", seen: "Seen", en_route: "En route",
+  reported: "Reported", headcount: "Headcount", override: "Override", hazard: "Hazard mode", route: "Route", drill_end: "Drill ended", merged: "Corroborated", escalated: "Escalated", seen: "Seen", en_route: "En route",
   on_site: "On site", resolved: "Resolved", false_alarm: "False alarm", cancelled: "Cancelled",
 };
 
@@ -17,6 +17,7 @@ const OUTCOME_STYLE: Record<string, string> = {
   resolved: "bg-emerald-100 text-emerald-700",
   false_alarm: "bg-slate-200 text-slate-700",
   cancelled: "bg-amber-100 text-amber-800",
+  drill: "bg-accent-100 text-accent-700",
 };
 const outcomeOf = (i: Incident) => (i.outcome ?? "resolved") as keyof typeof OUTCOME_LABEL;
 
@@ -39,7 +40,7 @@ export function IncidentDetails({ inc, onClose }: { inc: Incident; onClose: () =
   const copy = useDeleteCopy();
   const [confirm, setConfirm] = useState(false);
   const ct = catTheme(inc.category);
-  const band = bandFor(inc.score, "SENT");
+  const band = bandFor(inc.score, "SENT", inc.overrideReasons);
   const bs = BAND_STYLE[band];
   const outcome = outcomeOf(inc);
   const closedAt = inc.resolvedAt ?? inc.createdAt;
@@ -56,6 +57,14 @@ export function IncidentDetails({ inc, onClose }: { inc: Incident; onClose: () =
     ["Acknowledged by", inc.acknowledgedBy ?? undefined],
     ["Closed by", inc.resolvedBy ?? undefined],
     ["Recommended agency", agencyFor(inc.category)],
+    ["Critical override", inc.overrideReasons.length ? inc.overrideReasons.map((r) => OVERRIDE_LABEL[r as keyof typeof OVERRIDE_LABEL] ?? r).join(" + ") : undefined],
+    ["Escalation", inc.escalationLevel > 0 ? `Escalated to ${ESCALATION_TIERS[inc.escalationLevel]}` : undefined],
+    ["Headcount", inc.headcounts.length ? inc.headcounts.map((h) => `${h.section} ${h.present}/${h.expected}`).join(" · ") : undefined],
+    ["Responder ETA", inc.eta ? (inc.eta.blocked ? "Route blocked" : `${inc.eta.minutes} min by ${TRANSPORT_MODES.find((m: { id: string }) => m.id === inc.eta!.mode)?.label ?? inc.eta.mode} (${inc.eta.distanceKm} km)`) : undefined],
+    ["Report → on site", inc.metrics?.toOnSiteMs ? fmtMs(inc.metrics.toOnSiteMs) : undefined],
+    ["Time to acknowledge", inc.metrics?.toAckMs ? fmtMs(inc.metrics.toAckMs) : undefined],
+    ["Time to headcount", inc.metrics?.toHeadcountMs ? fmtMs(inc.metrics.toHeadcountMs) : undefined],
+    ["Taps to report", inc.drill && inc.metrics ? String(inc.metrics.interactions) : undefined],
   ];
 
   return (
@@ -64,7 +73,7 @@ export function IncidentDetails({ inc, onClose }: { inc: Incident; onClose: () =
         <span className="text-2xl" aria-hidden>{ct.emoji}</span>
         <div className="flex-1 min-w-0">
           <p className="text-xs font-extrabold uppercase tracking-wider" style={{ color: ct.color }}>{inc.categoryLabel}</p>
-          <p className="text-base font-bold text-slate-800">{inc.subLabel}</p>
+          <p className="text-base font-bold text-slate-800">{inc.subLabel}{inc.drill ? " · 🧪 DRILL" : ""}</p>
         </div>
         <div className="rounded-lg px-2.5 py-1 text-center shrink-0" style={{ background: bs.bg, border: `1px solid ${bs.color}55` }}>
           <p className="font-mono text-lg font-extrabold leading-none" style={{ color: bs.color }}>{inc.score.toFixed(2)}</p>
@@ -158,7 +167,7 @@ export default function HistorySection({ title = "Incident history" }: { title?:
                 <button onClick={() => setOpen(i.id)} className="flex-1 min-w-0 flex items-center gap-3 px-3 py-3 text-left min-h-16 hover:bg-slate-50" aria-label={`View details: ${i.subLabel}, ${i.room}`}>
                   <span className="text-xl" aria-hidden>{catTheme(i.category).emoji}</span>
                   <span className="flex-1 min-w-0">
-                    <span className="block text-sm font-bold text-slate-800 truncate">{i.subLabel}</span>
+                    <span className="block text-sm font-bold text-slate-800 truncate">{i.subLabel}{i.drill ? " · 🧪 DRILL" : ""}</span>
                     <span className="block text-xs text-slate-500 truncate">{i.room}</span>
                     <span className="block text-xs text-slate-400">{i.resolvedAt ? `${elapsed(i.resolvedAt, now)} · ${dateTime(i.resolvedAt)}` : ""}</span>
                   </span>

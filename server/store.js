@@ -5,13 +5,51 @@ import fs from "node:fs";
 import path from "node:path";
 
 export const SEED_ROSTER = [
-  { id: "t1", name: "Ms. Reyes", section: "Grade 3 - Sec A", room: "Bldg A | Flr 2 | Rm 204", gps: "14.312, 121.115", status: "active" },
-  { id: "t2", name: "Mr. Dizon", section: "Grade 4 - Sec B", room: "Bldg A | Flr 2 | Rm 210", gps: "14.312, 121.115", status: "active" },
-  { id: "t3", name: "Ms. Bautista", section: "Grade 5 - Sec A", room: "Bldg B | Flr 1 | Rm 105", gps: "14.313, 121.116", status: "active" },
+  { id: "t1", name: "Ms. Reyes", section: "Grade 3 - Sec A", room: "Bldg A | Flr 2 | Rm 204", gps: "14.312, 121.115", status: "active", registry: 28 },
+  { id: "t2", name: "Mr. Dizon", section: "Grade 4 - Sec B", room: "Bldg A | Flr 2 | Rm 210", gps: "14.312, 121.115", status: "active", registry: 30 },
+  { id: "t3", name: "Ms. Bautista", section: "Grade 5 - Sec A", room: "Bldg B | Flr 1 | Rm 105", gps: "14.313, 121.116", status: "active", registry: 29 },
 ];
 
+function freshModes() {
+  return {
+    hazard: { active: false, kind: "flood", note: "", since: null, by: null },
+    drill: { active: false, id: null, label: "", startedAt: null, by: null },
+    route: { status: "passable", note: "", updatedAt: null, by: null },
+  };
+}
+
 function freshDb() {
-  return { version: 1, seq: 0, roster: structuredClone(SEED_ROSTER), incidents: [], clientIds: {} };
+  return { version: 1, seq: 0, roster: structuredClone(SEED_ROSTER), incidents: [], clientIds: {}, modes: freshModes(), drills: [] };
+}
+
+// Backfill fields added by newer versions so an old data file keeps working.
+export function normalize(d) {
+  const f = freshModes();
+  d.modes = {
+    hazard: { ...f.hazard, ...(d.modes && d.modes.hazard) },
+    drill: { ...f.drill, ...(d.modes && d.modes.drill) },
+    route: { ...f.route, ...(d.modes && d.modes.route) },
+  };
+  d.drills = Array.isArray(d.drills) ? d.drills : [];
+  for (const r of d.roster) if (!Number.isInteger(r.registry)) r.registry = 30;
+  for (const i of d.incidents) {
+    i.baseLocationRisk ??= i.locationRisk;
+    i.baseTimeSensitivity ??= i.timeSensitivity ?? 3;
+    i.lowLying ??= false;
+    i.escalationLevel ??= 0;
+    i.escalatedAt ??= null;
+    i.headcounts ??= [];
+    i.overrideReasons ??= i.severity >= 5 ? ["SEVERITY_5"] : [];
+    i.drill ??= false;
+    i.drillId ??= null;
+    i.interactions ??= 0;
+    i.eta ??= null;
+    i.enRouteAt ??= null;
+    i.onSiteAt ??= null;
+    i.firstHeadcountAt ??= null;
+    i.hiddenBy ??= [];
+  }
+  return d;
 }
 
 export function createStore({ dataDir, onPersistError = console.error } = {}) {
@@ -25,7 +63,7 @@ export function createStore({ dataDir, onPersistError = console.error } = {}) {
       if (fs.existsSync(file)) {
         const parsed = JSON.parse(fs.readFileSync(file, "utf8"));
         if (parsed && Array.isArray(parsed.roster) && Array.isArray(parsed.incidents)) {
-          db = { ...freshDb(), ...parsed };
+          db = normalize({ ...freshDb(), ...parsed });
         }
       }
     } catch (err) {

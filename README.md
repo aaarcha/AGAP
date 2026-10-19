@@ -15,7 +15,7 @@ Principal, Parent/PTA and Barangay/CDRRMO devices within about a second.
 ## Run locally
 ```bash
 npm install
-npm test                 # 17 API tests (roles, scoping, merging, offline replay, SSE…)
+npm test                 # 25 API tests (roles, scoping, merging, offline replay, SSE…)
 npm run dev:all          # starts BOTH the API (:3000) and the app (:5173) in one terminal
 # (or separately: npm run dev:server  and  npm run dev -- --host)
 # or production-style:
@@ -42,6 +42,7 @@ After your first local `npm install`, commit the generated `package-lock.json`, 
 | `AGAP_ACCESS_CODE` | Optional shared code required at login |
 | `DATA_DIR` | Where `agap-db.json` is stored (mount a disk here) |
 | `SEED_DEMO_INCIDENT` | `1` adds one sample flood incident at boot |
+| `ESCALATION_MINUTES` | Minutes without acknowledgement before escalating to Barangay then CDRRMO (default `3,6`) |
 | `HISTORY_DAYS` | How long closed incidents are kept before auto-removal (default 90) |
 | `ALLOW_DEMO_RESET` | `0` hides/disables the Principal's "Reset demo data" |
 
@@ -69,3 +70,18 @@ The product name is intentionally not shown right now. Change it in **one place*
 (then also `index.html` `<title>`, `public/manifest.webmanifest` `name`/`short_name`, and the icon in `public/icons/`).
 Palette tokens live in `src/index.css` (`@theme`): brand blue `#425B9A`, sky `#76C0EC`, cream `#FFF6DC`, blush `#FF95A5`.
 Internal names (repo, `AGAP_SECRET`, `AGAP_ACCESS_CODE`) were left unchanged so existing deploy settings keep working.
+
+## Priority-rule features (added on top of AHP–SAW)
+| # | Feature | Where |
+|---|---|---|
+| 1 | **Pupil headcount verification** – aggregate counts only (e.g. 27/28), compared with today's registry; a mismatch forces Critical | Teacher "last report" / class alerts, Principal cards |
+| 2 | **Hazard mode** – Principal switches on a flood/typhoon state; Location Risk +2 for ground-floor / low-lying zones, open tickets re-scored live | Principal → Safety |
+| 3 | **Time-based escalation** – unacknowledged ticket escalates to Barangay Sinalhan (Time Sensitivity +1) then CDRRMO (+2) | automatic |
+| 4 | **Critical override (non-compensatory)** – Severity 5 or a headcount mismatch is always CRITICAL | automatic |
+| 5 | **Drill mode** – tickets tagged DRILL, parents not alarmed, passive metrics (time to report/acknowledge/on-site/headcount, taps per report) saved per drill | Principal → Safety |
+| 7 | **English / Filipino advisory templates** for parents (with copy button) | Parent view |
+| 8 | **Responder ETA** by transport mode + **approach-route status** (passable / flooded / blocked), report→on-site metric | Responder acknowledge, Route control |
+
+Not built (listed as future work): #6 post-incident analytics / weight recalibration dashboard, #9 nearest-facility escalation map
+(needs verified facility locations). All thresholds, boosts and speeds are illustrative until the expert panel validates them.
+Remember to update your objectives, Table 14, the HIPO diagrams and the SFD/DFD for anything you keep in scope.
