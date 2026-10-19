@@ -4,7 +4,7 @@ import { notificationsSupported, showSystemNotification } from "./pwa";
 import { STATUS_LABEL } from "../../shared/domain.js";
 import { ESCALATION_TIERS, HAZARD_KINDS } from "../../shared/domain.js";
 import type {
-  AlertItem, AppConfig, DrillSummary, Incident, Modes, QueuedReport, ReportPayload, Role, RosterEntry, ServerState, Status, User,
+  AlertItem, AppConfig, DrillSummary, Incident, LoginResult, Modes, QueuedReport, ReportPayload, RosterEntry, ServerState, Status, User,
 } from "./types";
 
 const QUEUE_KEY = "agap.queue";
@@ -41,7 +41,10 @@ interface Ctx {
   dismissAlert: (id: string) => void;
   notifPermission: NotificationPermission | "unsupported";
   enableNotifications: () => Promise<void>;
-  login: (role: Role, accountId?: string, code?: string) => Promise<void>;
+  /** true while the signed-in account must set a new password (first sign-in / yearly rollover) */
+  mustChange: boolean;
+  login: (email: string, password: string, code?: string) => Promise<boolean>;
+  changePassword: (password: string) => Promise<void>;
   logout: (message?: string) => void;
   refresh: () => Promise<void>;
   submit: (payload: ReportPayload, label: string) => Promise<SubmitResult>;
@@ -97,6 +100,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [notifPermission, setNotifPermission] = useState<NotificationPermission | "unsupported">(
     notificationsSupported() ? Notification.permission : "unsupported",
   );
+  const [mustChange, setMustChange] = useState(false);
 
   const offset = useRef(0);
   const reqSeq = useRef(0);
@@ -214,8 +218,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const logout = useCallback((message?: string) => {
+    const token = getToken();
+    if (token) void api("POST", "/api/logout").catch(() => { /* server unreachable – token dies by itself */ }); // revoke server-side
     clearToken();
     setUser(null);
+    setMustChange(false);
     resetLocal();
     if (message) pushAlert({ kind: "info", title: "Signed out", body: message });
   }, [pushAlert, resetLocal]);
@@ -227,19 +234,34 @@ export function AppProvider({ children }: { children: ReactNode }) {
       const s = await api<ServerState>("GET", "/api/state");
       if (mine === reqSeq.current) applyState(s); // ignore out-of-order responses
     } catch (e) {
-      if (e instanceof ApiError && e.status === 401) logout("Your session ended. Please sign in again.");
+      if (e instanceof ApiError && e.status === 401) {
+        logout(e.code === "idle_timeout" ? "Your session timed out. Please sign in again." : "Your session ended. Please sign in again.");
+      } else if (e instanceof ApiError && e.code === "password_change_required") {
+        setMustChange(true); // pending password change: show the change screen, keep the cached view
+      }
       // network errors: keep showing the last known data
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [logout]);
 
-  const login = useCallback(async (role: Role, accountId?: string, code?: string) => {
-    const r = await api<{ token: string; user: User }>("POST", "/api/login", { role, accountId, code });
+  // Email + password only – the server derives the role from the account.
+  // Resolves true when the account must set a new password before continuing.
+  const login = useCallback(async (email: string, password: string, code?: string): Promise<boolean> => {
+    const r = await api<LoginResult>("POST", "/api/login", { email, password, code });
     resetLocal();
     setToken(r.token);
     setUser(r.user);
-    await refresh();
+    setMustChange(Boolean(r.mustChange));
+    if (!r.mustChange) await refresh();
+    return Boolean(r.mustChange);
   }, [refresh, resetLocal]);
+
+  // Single password field: no confirmation step, just the new password.
+  const changePassword = useCallback(async (password: string) => {
+    await api("POST", "/api/password", { password });
+    setMustChange(false);
+    await refresh();
+  }, [refresh]);
 
   // boot: config + restore session (use cached data immediately so an offline launch still works)
   useEffect(() => {
@@ -253,7 +275,20 @@ export function AppProvider({ children }: { children: ReactNode }) {
             if (cached.modes) setModes(cached.modes);
           }
         } catch { /* ignore bad cache */ }
-        await refresh();
+        // Validate the persisted session: revoked/expired → sign out; pending password change → force screen.
+        try {
+          const me = await api<{ user: User; mustChange: boolean }>("GET", "/api/me");
+          setMustChange(Boolean(me.mustChange));
+          if (!me.mustChange) await refresh();
+        } catch (e) {
+          if (e instanceof ApiError && e.status === 401) {
+            clearToken(); setUser(null); setMustChange(false); resetLocal();
+          } else if (e instanceof ApiError && e.code === "password_change_required") {
+            setMustChange(true);
+          } else {
+            await refresh(); // offline / server asleep: keep the cached view working
+          }
+        }
       }
       setReady(true);
     })();
@@ -430,7 +465,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   const value: Ctx = {
     user, ready, config, incidents, roster, sections, modes, drills, escalationMinutes, now, online, simulateOffline, setSimulateOffline, connected, live,
-    queue, alerts, dismissAlert, notifPermission, enableNotifications, login, logout, refresh, submit, cancelQueued,
+    queue, alerts, dismissAlert, notifPermission, enableNotifications, mustChange, login, changePassword, logout, refresh, submit, cancelQueued,
     act, recordHeadcount, setHazard, setDrill, setRoute, markSeen, cancelReport, deleteIncident, clearHistory, saveProfile, addTeacher, editTeacher, deleteTeacher, resetDemo,
   };
   return <AppCtx.Provider value={value}>{children}</AppCtx.Provider>;

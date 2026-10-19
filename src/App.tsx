@@ -9,9 +9,10 @@ import ParentView from "./views/ParentView";
 import ResponderView, { RESPONDER_TABS, type ResponderTab } from "./views/ResponderView";
 import HistorySection from "./components/History";
 import PrincipalView, { PRINCIPAL_TABS, type PrincipalTab } from "./views/PrincipalView";
+import AdminConsole from "./views/AdminConsole";
 
 export default function App() {
-  const { user, ready } = useApp();
+  const { user, ready, mustChange } = useApp();
   const [pTab, setPTab] = useState<PrincipalTab>("command");
   const [rTab, setRTab] = useState<ResponderTab>("queue");
 
@@ -23,11 +24,13 @@ export default function App() {
     );
   }
 
-  if (!user) {
+  // Not signed in, OR signed in but the server requires a password change first (rollover / temp credentials).
+  // LoginView contains the forced change-password form for the mustChange case.
+  if (!user || mustChange) {
     return (<><LoginView /><AlertToasts /><InstallBanner /></>);
   }
 
-  const title = { teacher: "Teacher", principal: "Principal", parent: "Parent/PTA", responder: "Responder" }[user.role];
+  const title = { teacher: "Teacher", principal: "Principal", parent: "Parent/PTA", responder: "Responder", super_admin: "Super Admin" }[user.role];
   const subtitle = user.role === "principal" ? SCHOOL.name : user.role === "responder" ? "Barangay Sinalhan + CDRRMO" : user.subtitle;
   const hasTabs = user.role === "principal" || user.role === "responder";
 
@@ -48,6 +51,7 @@ export default function App() {
         {user.role === "principal" && <PrincipalView tab={pTab} />}
         {user.role === "parent" && <ParentView />}
         {user.role === "responder" && <ResponderView tab={rTab} />}
+        {user.role === "super_admin" && <AdminConsole />}
       </main>
       <Footer />
       {hasTabs && <div className="h-14 md:hidden" aria-hidden />}

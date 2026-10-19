@@ -1,48 +1,134 @@
-import { useEffect, useState } from "react";
-import { ChevronRight } from "lucide-react";
+import { useState } from "react";
+import { Eye, EyeOff } from "lucide-react";
 import { DISCLAIMERS, SCHOOL } from "../../shared/domain.js";
-import { api } from "../lib/api";
 import { useApp } from "../lib/store";
 import { BRAND } from "../lib/brand";
-import type { Role } from "../lib/types";
-
-interface Accounts { teachers: { id: string; name: string; section: string; room: string; active: boolean }[]; sections: string[] }
-
-const ROLE_COLOR: Record<Role, string> = { teacher: "#FF95A5", principal: "#76C0EC", parent: "#FFF6DC", responder: "#94A8D0" };
+import { api } from "../lib/api";
 
 export default function LoginView() {
-  const { login, config } = useApp();
-  const [accounts, setAccounts] = useState<Accounts | null>(null);
-  const [open, setOpen] = useState<Role | null>(null);
-  const [code, setCode] = useState("");
+  const { login, mustChange, changePassword, config } = useApp();
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [submitting, setSubmitting] = useState(false);
 
-  useEffect(() => {
-    api<Accounts>("GET", "/api/accounts").then(setAccounts).catch(() => setError("Can't reach the server yet. If this is the first visit in a while, wait a few seconds and try again."));
-  }, []);
+  // Forced password change form (after school-year rollover / temp credentials)
+  const [newPassword, setNewPassword] = useState("");
+  const [showNew, setShowNew] = useState(false);
+  const [changing, setChanging] = useState(false);
+  const [changeError, setChangeError] = useState("");
+  const [changed, setChanged] = useState(false);
 
-  async function go(role: Role, accountId?: string) {
-    setBusy(true); setError("");
-    try { await login(role, accountId, code); }
-    catch (e) { setError(e instanceof Error ? e.message : "Could not sign in."); setBusy(false); }
+  async function handlePasswordChange(e: React.FormEvent) {
+    e.preventDefault();
+    if (newPassword.length < 8) { setChangeError("Password must be at least 8 characters."); return; }
+    setChanging(true); setChangeError("");
+    try {
+      await changePassword(newPassword);
+      setChanged(true);
+    } catch (err) {
+      setChangeError(err instanceof Error ? err.message : "Could not set password.");
+    } finally {
+      setChanging(false);
+    }
   }
 
-  const cardClass = "w-full flex items-center gap-3 rounded-2xl px-4 py-3 text-left min-h-16 border border-white/10 bg-white/5 hover:bg-white/10 active:scale-[0.99] disabled:opacity-60";
-  const Card = ({ role, name, sub, onClick }: { role: Role; name: string; sub: string; onClick: () => void }) => (
-    <button disabled={busy} onClick={onClick} className={cardClass} aria-expanded={role === "teacher" || role === "parent" ? open === role : undefined}>
-      <span className="w-10 h-10 rounded-xl flex items-center justify-center shrink-0" style={{ background: `${ROLE_COLOR[role]}22`, border: `1.5px solid ${ROLE_COLOR[role]}66` }}>
-        <span className="w-2.5 h-2.5 rounded-full" style={{ background: ROLE_COLOR[role] }} />
-      </span>
-      <span className="flex-1 min-w-0">
-        <span className="block text-base font-bold text-white">{name}</span>
-        <span className="block text-xs mt-0.5" style={{ color: ROLE_COLOR[role] }}>{sub}</span>
-      </span>
-      <ChevronRight size={18} className={`text-slate-500 shrink-0 ${open === role ? "rotate-90" : ""}`} />
-    </button>
-  );
-  const subList = "ml-4 pl-3 border-l-2 border-white/10 space-y-1.5 mt-1.5";
-  const subBtn = "w-full text-left rounded-xl px-3 min-h-12 bg-white/5 hover:bg-white/10 text-white text-sm disabled:opacity-50";
+  const validate = () => {
+    let valid = true;
+    let message = "";
+    if (!email) { valid = false; message = "Email is required."; }
+    else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { valid = false; message = "Please enter a valid email."; }
+    if (!password) { valid = false; const p = message ? message + " " : ""; message = p + "Password is required."; }
+    if (!valid) { setError(message); return false; }
+    setError("");
+    return true;
+  };
+
+  const toggle = () => setShowPassword((s) => !s);
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!validate()) return;
+    setSubmitting(true); setError("");
+    try { await login(email, password); }
+    catch (e: any) { setError(e instanceof Error ? e.message : "Could not sign in."); }
+    finally { setSubmitting(false); }
+  };
+
+  // ── Forced password change screen (single field + toggle, no confirm field) ──
+  if (mustChange && !changed) {
+    return (
+      <div className="min-h-dvh flex flex-col text-white" style={{ background: "radial-gradient(ellipse 120% 60% at 50% 0%, #425B9A 0%, #1D2848 55%, #0F1830 100%)" }}>
+        <div className="flex-1 w-full max-w-md mx-auto px-5 pt-[max(2rem,env(safe-area-inset-top))] pb-6 flex flex-col">
+          <div className="flex flex-col items-center text-center pt-4 pb-6">
+            <div className="w-28 h-28 rounded-3xl overflow-hidden bg-cream border-2 border-white/10 shadow-2xl" style={{ boxShadow: "0 0 40px 12px rgba(118,192,236,.35)" }}>
+              <img src="/icons/logo-256.png" alt="" width={112} height={112} className="w-full h-full object-contain p-1" />
+            </div>
+            <h1 className="text-2xl font-black tracking-tight mt-4">Set a new password</h1>
+            <p className="text-sm text-slate-300 font-medium mt-2">Your temporary credential must be replaced before you can continue.</p>
+          </div>
+
+          <form onSubmit={handlePasswordChange} className="w-full space-y-4">
+            <div className="relative">
+              <label className="block text-sm font-medium text-slate-300 mb-1.5" htmlFor="new-password">New password</label>
+              <input
+                id="new-password"
+                type={showNew ? "text" : "password"}
+                autoComplete="new-password"
+                value={newPassword}
+                onChange={(e) => setNewPassword(e.target.value)}
+                disabled={changing}
+                required
+                placeholder="At least 8 characters"
+                className="w-full min-h-14 rounded-xl px-4 bg-white text-slate-900 text-base outline-none focus:ring-2 focus:ring-accent"
+              />
+              <button
+                type="button"
+                onClick={() => setShowNew(!showNew)}
+                className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 hover:text-brand-600"
+                aria-label={showNew ? "Hide password" : "Show password"}
+              >
+                {showNew ? <Eye size={18} /> : <EyeOff size={18} />}
+              </button>
+            </div>
+
+            {changeError && <p role="alert" className="text-sm text-blush-300">{changeError}</p>}
+
+            <button
+              type="submit"
+              disabled={changing}
+              className="w-full min-h-14 rounded-xl px-4 bg-brand-600 text-white font-bold text-base disabled:opacity-60"
+            >
+              {changing ? "Saving…" : "Set password & continue"}
+            </button>
+          </form>
+
+          <p className="text-xs text-slate-400 text-center mt-6">{DISCLAIMERS.noAutoDetect}</p>
+        </div>
+      </div>
+    );
+  }
+
+  // ── Success screen after password change ──
+  if (mustChange && changed) {
+    return (
+      <div className="min-h-dvh flex flex-col text-white" style={{ background: "radial-gradient(ellipse 120% 60% at 50% 0%, #425B9A 0%, #1D2848 55%, #0F1830 100%)" }}>
+        <div className="flex-1 w-full max-w-md mx-auto px-5 pt-[max(2rem,env(safe-area-inset-top))] pb-6 flex flex-col items-center justify-center text-center">
+          <p className="text-5xl mb-4" aria-hidden>✅</p>
+          <h1 className="text-2xl font-black tracking-tight">Password set!</h1>
+          <p className="text-sm text-slate-300 font-medium mt-2">You can now continue to the app.</p>
+          <button
+            onClick={() => window.location.reload()}
+            className="mt-6 w-full min-h-14 rounded-xl px-4 bg-brand-600 text-white font-bold text-base"
+          >
+            Continue
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-dvh flex flex-col text-white" style={{ background: "radial-gradient(ellipse 120% 60% at 50% 0%, #425B9A 0%, #1D2848 55%, #0F1830 100%)" }}>
@@ -56,46 +142,66 @@ export default function LoginView() {
           <p className="text-xs text-slate-400 font-semibold mt-2">{SCHOOL.name} · DepEd ID {SCHOOL.depedId}</p>
         </div>
 
-        <p className="text-xs text-slate-400 uppercase tracking-widest font-bold mb-2">Select your role</p>
-        <div className="space-y-2">
-          {config?.accessCodeRequired && (
-            <input value={code} onChange={(e) => setCode(e.target.value)} type="password" autoComplete="off" placeholder="School access code" aria-label="School access code"
-              className="w-full min-h-12 rounded-xl px-4 bg-white text-slate-900 text-base outline-none focus:ring-2 focus:ring-accent" />
-          )}
-
+        {/* Login form – mobile-first, accessible, touch-target sized */}
+        <form onSubmit={handleSubmit} className="w-full space-y-4">
+          {/* Email / username field */}
           <div>
-            <Card role="teacher" name="Teacher" sub="3-tap emergency reporting" onClick={() => setOpen(open === "teacher" ? null : "teacher")} />
-            {open === "teacher" && (
-              <div className={subList}>
-                {!accounts && <p className="text-xs text-slate-400 py-2">Loading teachers…</p>}
-                {accounts?.teachers.map((t) => (
-                  <button key={t.id} disabled={busy || !t.active} onClick={() => go("teacher", t.id)} className={subBtn}>
-                    <span className="font-bold">{t.name}</span> <span className="text-slate-400">· {t.section}</span>
-                    {!t.active && <span className="text-xs text-amber-300"> · off duty</span>}
-                  </button>
-                ))}
-              </div>
-            )}
+            <label className="block text-sm font-medium text-slate-300 mb-1.5" htmlFor="email" aria-label="Email or username">
+              Email or username
+              <span className="text-slate-500 text-xs">required</span>
+            </label>
+            <input
+              id="email"
+              type="email"
+              autoComplete="username"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              disabled={busy}
+              required
+              placeholder="Enter your email"
+              className="w-full min-h-14 rounded-xl px-4 bg-white text-slate-900 text-base outline-none focus:ring-2 focus:ring-accent focus:outline-none"
+            />
           </div>
 
-          <Card role="principal" name="Principal" sub="Command dashboard · principal@sinalhanes.deped.ph" onClick={() => go("principal")} />
-
-          <div>
-            <Card role="parent" name="Parent / PTA Representative" sub="Emergency advisory feed" onClick={() => setOpen(open === "parent" ? null : "parent")} />
-            {open === "parent" && (
-              <div className={subList}>
-                {!accounts && <p className="text-xs text-slate-400 py-2">Loading sections…</p>}
-                {accounts?.sections.map((s) => (
-                  <button key={s} disabled={busy} onClick={() => go("parent", s)} className={subBtn}>Parent of a pupil in <span className="font-bold">{s}</span></button>
-                ))}
-              </div>
-            )}
+          {/* Password field – masked by default, show/hide toggle */}
+          <div className="relative">
+            <label className="block text-sm font-medium text-slate-300 mb-1.5" htmlFor="password" aria-label="Password">
+              Password
+              <span className="text-slate-500 text-xs">required</span>
+            </label>
+            <input
+              id="password"
+              type={showPassword ? "text" : "password"}
+              autoComplete="current-password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              disabled={busy}
+              required
+              placeholder="Enter your password"
+              className="w-full min-h-14 rounded-xl px-4 bg-white text-slate-900 text-base outline-none focus:ring-2 focus:ring-accent focus:outline-none"
+              aria-label={showPassword ? "Password (visible)" : "Password (masked)"}
+            />
+            <button
+              type="button"
+              onClick={toggle}
+              className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 hover:text-brand-600 focus:outline-none focus:ring-2 focus:ring-accent focus:ring-opacity-50"
+              aria-label={showPassword ? "Hide password" : "Show password"}
+            >
+              {showPassword ? <Eye size={18} /> : <EyeOff size={18} />}
+            </button>
           </div>
 
-          <Card role="responder" name="Brgy. Sinalhan / CDRRMO" sub="Responder · priority dispatch queue" onClick={() => go("responder")} />
-        </div>
+          {/* Inline validation / server error message – announced to screen readers */}
+          {error && <p role="alert" aria-live="assertive" className="text-sm text-blush-300">{error}</p>}
 
-        {error && <p role="alert" className="mt-3 rounded-xl bg-blush/15 border border-blush/50 text-blush text-sm px-3 py-2">{error}</p>}
+          <button
+            type="submit"
+            disabled={busy || submitting}
+            className="w-full min-h-14 rounded-xl px-4 bg-brand-600 text-white font-bold text-base disabled:opacity-60 transition-opacity"
+          >
+            {submitting ? "Signing in…" : "Sign In"}
+          </button>
+        </form>
 
         <div className="mt-auto pt-8 space-y-1.5 text-center">
           <p className="text-xs text-slate-400">{DISCLAIMERS.scope}</p>
@@ -107,3 +213,4 @@ export default function LoginView() {
     </div>
   );
 }
+

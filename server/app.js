@@ -35,9 +35,50 @@ const MIME = {
 };
 const COMPRESSIBLE = new Set([".html", ".js", ".mjs", ".css", ".json", ".webmanifest", ".svg", ".txt"]);
 
-const TOKEN_TTL_MS = 30 * 24 * 3600 * 1000;
 const DEFAULT_GPS = "14.312, 121.115";
 const PRINCIPAL_ROOM = D.PRINCIPAL_ROOM;
+
+// ---------------------------------------------------------------- auth core
+// Demo-mode credentials – only seeded when SEED_DEMO_INCIDENT / SEED_DEMO_ACCOUNTS is on.
+export const DEMO_PASSWORD = "Sinalhan-Demo-2026!";
+export const DEMO_ADMIN_EMAIL = "admin@sinalhanes.deped.ph";
+export const DEMO_ADMIN_PASSWORD = "Agap-Admin-2026!";
+
+const ACCOUNT_ROLES = new Set(["teacher", "principal", "responder", "parent", "super_admin"]);
+const ADMIN_ROLES = new Set(["super_admin", "principal"]); // role-based idle timeout: short for admins
+const PASSWORD_MIN = 8;
+
+// No composition rules (letters+digits+symbols are NOT required) – just length and
+// a blocklist of the passwords that get tried first anyway.
+const COMMON_PASSWORDS = new Set([
+  "password", "password1", "password12", "password123", "12345678", "123456789", "1234567890", "qwerty", "qwerty123",
+  "qwertyuiop", "letmein", "letmein123", "welcome", "welcome1", "admin", "admin123", "iloveyou", "iloveyou1",
+  "monkey", "dragon", "dragon123", "football", "baseball", "abc123", "passw0rd", "p@ssw0rd", "master",
+  "sunshine", "princess", "trustno1", "superman", "michael", "shadow", "11111111", "00000000", "aa123456",
+  "asdfgh", "asdfghjkl", "zxcvbn", "qazwsx", "changeme", "temp1234", "test1234", "school123", "teacher1",
+  "deped123", "sinalhan", "blanket", "flower", "chocolate", "internet",
+]);
+
+const normEmail = (v) => String(v ?? "").trim().toLowerCase();
+const emailOk = (e) => e.length <= 160 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e);
+const slugify = (s) => String(s).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+
+function validatePassword(pw) {
+  const s = String(pw ?? "");
+  if (s.length < PASSWORD_MIN) return `Password must be at least ${PASSWORD_MIN} characters.`;
+  if (s.length > 200) return "Password must be 200 characters or fewer.";
+  if (COMMON_PASSWORDS.has(s.toLowerCase())) return "That password is too common. Please choose a different one.";
+  return null;
+}
+
+const TEMP_ALPHABET = "abcdefghjkmnpqrstuvwxyz23456789";
+function makeTempPassword() {
+  // Per-account temporary credential (readable, ≥20 chars) – always flagged must-change at first sign-in.
+  const bytes = crypto.randomBytes(20);
+  let out = "";
+  for (let i = 0; i < 20; i++) out += TEMP_ALPHABET[bytes[i] % TEMP_ALPHABET.length];
+  return `${out.slice(0, 5)}-${out.slice(5, 10)}-${out.slice(10, 15)}-${out.slice(15, 20)}`;
+}
 
 export function createApp(opts = {}) {
   const {
@@ -47,8 +88,17 @@ export function createApp(opts = {}) {
     staticDir = "",
     allowReset = true,
     seedDemoIncident = false,
+    seedDemoAccounts = false,
+    superAdminEmail = "",
+    superAdminPassword = "",
     historyDays = 90,
     escalationMinutes = D.DEFAULT_ESCALATION_MINUTES,
+    scryptN = 16384,
+    sessionDays = 270,
+    idleAdminMinutes = 60,
+    idleUserMinutes = 43200,
+    lockoutFailures = 5,
+    lockoutMinutes = 10,
     autoTick = true,
     now = () => Date.now(),
     log = () => {},
@@ -63,10 +113,36 @@ export function createApp(opts = {}) {
   const clean = (v, max) => String(v ?? "").replace(/\s+/g, " ").trim().slice(0, max);
   const sections = () => [...new Set(store.db.roster.map((r) => r.section).filter(Boolean))];
 
+  const SESSION_TTL_MS = sessionDays * 24 * 3600 * 1000;
+
   function safeEqual(a, b) {
     const x = Buffer.from(String(a));
     const y = Buffer.from(String(b));
     return x.length === y.length && crypto.timingSafeEqual(x, y);
+  }
+
+  // ---- password hashing: scrypt (node:crypto) + per-user salt, constant-time compare
+  const SCRYPT_OPTS = { N: scryptN, r: 8, p: 1, maxmem: 96 * 1024 * 1024 };
+  function hashPassword(pw) {
+    const salt = crypto.randomBytes(16).toString("hex");
+    return { salt, hash: crypto.scryptSync(String(pw), salt, 64, SCRYPT_OPTS).toString("hex") };
+  }
+  function checkPassword(pw, salt, hash) {
+    const h = crypto.scryptSync(String(pw), String(salt), 64, SCRYPT_OPTS);
+    const e = Buffer.from(String(hash), "hex");
+    return e.length === h.length && crypto.timingSafeEqual(h, e);
+  }
+  // Unknown-email logins still pay the scrypt cost so response timing cannot reveal which accounts exist.
+  let dummyCred = null;
+  const dummyCredential = () => (dummyCred ||= hashPassword(`dummy-${crypto.randomBytes(16).toString("hex")}`));
+
+  const clientIp = (req) => String(req.headers["x-forwarded-for"] || req.socket.remoteAddress || "?").split(",")[0].trim();
+
+  // Append-only audit trail. NEVER put passwords, hashes or tokens in here.
+  function audit(action, { by = null, target = null, detail = "", req = null } = {}) {
+    store.db.audit.push({ at: now(), action, by, target, detail, ip: req ? clientIp(req) : "" });
+    if (store.db.audit.length > 1000) store.db.audit.splice(0, store.db.audit.length - 800);
+    store.save();
   }
 
   function sign(payload) {
@@ -89,33 +165,109 @@ export function createApp(opts = {}) {
     }
   }
 
-  // Accounts are derived from live data, so a deleted/renamed teacher loses access immediately.
-  function userFromSub(sub) {
+  // ------------------------------------------------------------- accounts
+  // The role ALWAYS comes from the stored account – the client can never pick one at sign-in.
+  const findAccount = (email) => store.db.accounts.find((a) => a.email === email) || null;
+  const accountById = (id) => store.db.accounts.find((a) => a.id === id) || null;
+  const teacherAccount = (teacherId) => store.db.accounts.find((a) => a.teacherId === teacherId) || null;
+
+  function userFromAccount(acc) {
     const db = store.db;
-    if (sub === "principal")
-      return { id: "principal", role: "principal", name: "Dr. Santos", subtitle: "principal@sinalhanes.deped.ph" };
-    if (sub === "responder")
-      return { id: "responder", role: "responder", name: "Brgy. Sinalhan / CDRRMO", subtitle: "Barangay + CDRRMO liaison" };
-    if (sub.startsWith("teacher:")) {
-      const t = db.roster.find((r) => r.id === sub.slice(8));
+    if (!acc || acc.status !== "active") return null;
+    if (acc.role === "super_admin") return { id: acc.id, role: "super_admin", name: acc.name, subtitle: acc.email };
+    if (acc.role === "principal") return { id: acc.id, role: "principal", name: acc.name, subtitle: acc.email };
+    if (acc.role === "responder") return { id: acc.id, role: "responder", name: acc.name, subtitle: "Barangay + CDRRMO liaison" };
+    if (acc.role === "teacher") {
+      const t = db.roster.find((r) => r.id === acc.teacherId);
       if (!t || t.status !== "active") return null;
       return { id: t.id, role: "teacher", name: t.name, section: t.section, room: t.room, gps: t.gps, registry: t.registry, subtitle: `Teacher · ${t.section}` };
     }
-    if (sub.startsWith("parent:")) {
-      const section = sub.slice(7);
-      if (!sections().includes(section)) return null;
-      return { id: sub, role: "parent", name: "Parent / PTA Representative", section, subtitle: `Parent/PTA · ${section}` };
-    }
+    if (acc.role === "parent" && acc.section)
+      return { id: acc.id, role: "parent", name: acc.name, section: acc.section, subtitle: `Parent/PTA · ${acc.section}` };
     return null;
   }
 
-  function authenticate(req, url) {
+  function newAccount({ email, role, name, password, mustChange = false, temp = false, id = null, teacherId = null, section = null }) {
+    const { salt, hash } = hashPassword(password);
+    const acc = {
+      id: id || store.nextId("acc"), email, role, name, teacherId, section,
+      pwSalt: salt, pwHash: hash, status: "active", mustChange, temp,
+      failed: 0, lockedUntil: 0, createdAt: now(), lastLoginAt: null,
+    };
+    store.db.accounts.push(acc);
+    return acc;
+  }
+
+  function publicAccount(a, t = now()) {
+    const roster = a.teacherId ? store.db.roster.find((r) => r.id === a.teacherId) : null;
+    return {
+      id: a.id, email: a.email, role: a.role, name: a.name,
+      section: a.role === "parent" ? a.section : roster ? roster.section : a.section || null,
+      status: a.status, mustChange: Boolean(a.mustChange), temp: Boolean(a.temp),
+      locked: a.lockedUntil > t, lockedUntil: a.lockedUntil, failed: a.failed,
+      lastLoginAt: a.lastLoginAt, createdAt: a.createdAt,
+    };
+  }
+
+  // ------------------------------------------------------------- sessions
+  // Server-side session records: tokens are only valid while their record is alive,
+  // so logout / password reset / deactivation / rollover can revoke them instantly.
+  function pruneSessions() {
+    const t = now();
+    const kept = store.db.sessions.filter((s) => s.expiresAt > t && (!s.revokedAt || t - s.revokedAt < 7 * 24 * 3600 * 1000));
+    if (kept.length > 400) kept.splice(0, kept.length - 400);
+    store.db.sessions = kept;
+  }
+
+  function issueSession(acc, req) {
+    const t = now();
+    const sid = crypto.randomBytes(24).toString("hex");
+    const expiresAt = t + SESSION_TTL_MS;
+    store.db.sessions.push({ id: sid, accountId: acc.id, createdAt: t, lastSeenAt: t, expiresAt, revokedAt: null, ip: clientIp(req) });
+    pruneSessions();
+    return sign({ sid, exp: expiresAt });
+  }
+
+  function revokeSessions(accountId, keepSid = null) {
+    const t = now();
+    let n = 0;
+    for (const s of store.db.sessions) {
+      if (s.accountId !== accountId || s.revokedAt || s.id === keepSid) continue;
+      s.revokedAt = t;
+      n += 1;
+    }
+    if (n) closeStreamsFor(accountId);
+    return n;
+  }
+
+  function authenticate(req, url, path) {
     const header = req.headers.authorization || "";
     const token = header.startsWith("Bearer ") ? header.slice(7) : url.searchParams.get("token");
     const payload = verify(token);
-    const user = payload && userFromSub(payload.sub);
-    if (!user) throw new HttpError(401, "unauthorized", "Please sign in again.");
-    return user;
+    const t = now();
+    const deny = () => new HttpError(401, "unauthorized", "Please sign in again.");
+    if (!payload || !payload.sid) throw deny();
+    const session = store.db.sessions.find((s) => s.id === payload.sid);
+    if (!session || session.revokedAt || session.expiresAt <= t) throw deny();
+    const acc = accountById(session.accountId);
+    if (!acc || acc.status !== "active") throw deny();
+    // Automatic session timeout – role-based and configurable. Activity (any authenticated
+    // request) refreshes it, so an engaged teacher is never signed out mid-emergency.
+    const idleMs = (ADMIN_ROLES.has(acc.role) ? idleAdminMinutes : idleUserMinutes) * 60000;
+    if (t - session.lastSeenAt > idleMs) {
+      session.revokedAt = t;
+      store.save();
+      throw new HttpError(401, "idle_timeout", "Your session timed out. Please sign in again.");
+    }
+    const user = userFromAccount(acc);
+    if (!user) throw deny();
+    session.lastSeenAt = t;
+    store.schedule();
+    // A pending password change (first sign-in, temporary credentials, school-year rollover)
+    // grants access to nothing except changing the password / signing out.
+    if (acc.mustChange && !["/api/password", "/api/logout", "/api/me", "/api/config", "/api/health"].includes(path))
+      throw new HttpError(403, "password_change_required", "Set a new password to continue.");
+    return { user, session, account: acc };
   }
 
   function need(user, ...roles) {
@@ -123,7 +275,7 @@ export function createApp(opts = {}) {
   }
 
   function rateLimit(req, bucket, max) {
-    const ip = String(req.headers["x-forwarded-for"] || req.socket.remoteAddress || "?").split(",")[0].trim();
+    const ip = clientIp(req);
     const key = `${bucket}:${ip}`;
     const t = now();
     const arr = (buckets.get(key) || []).filter((x) => t - x < 60000);
@@ -161,9 +313,19 @@ export function createApp(opts = {}) {
   function broadcast(evt) {
     const payload = `event: change\ndata: ${JSON.stringify({ version: store.db.version, ...evt })}\n\n`;
     for (const c of sseClients) {
-      try { c.write(payload); } catch { sseClients.delete(c); }
+      try { c.res.write(payload); } catch { sseClients.delete(c); }
     }
   }
+
+  // Cut every live stream belonging to an account (logout, reset, deactivation, rollover).
+  function closeStreamsFor(accountId) {
+    for (const c of sseClients) {
+      if (c.accountId !== accountId) continue;
+      try { c.res.end(); } catch { /* ignore */ }
+      sseClients.delete(c);
+    }
+  }
+
 
   function commit(evt) {
     store.prune(now(), historyDays);
@@ -175,6 +337,7 @@ export function createApp(opts = {}) {
   const isHiddenFor = (i, user) => (i.hiddenBy || []).includes(user.id);
 
   function canSee(i, user) {
+    if (user.role === "super_admin") return false; // console-only role: accounts + audit, never incident data
     if (user.role === "principal" || user.role === "responder") return true;
     if (user.role === "teacher") return i.reporterIds.includes(user.id) || i.linkedSection === user.section || i.linkedSection === "ALL";
     if (i.drill) return false; // parents are not alarmed by drills
@@ -351,7 +514,7 @@ export function createApp(opts = {}) {
       if (!t) throw new HttpError(401, "unauthorized", "Please sign in again.");
       reporter = { id: t.id, name: t.name, room: t.room, section: t.section };
     } else {
-      reporter = { id: "principal", name: user.name, room: PRINCIPAL_ROOM, section: null };
+      reporter = { id: user.id, name: user.name, room: PRINCIPAL_ROOM, section: null };
     }
 
     // Location: only after the reporter confirms where they are does Location Risk change.
@@ -562,6 +725,34 @@ export function createApp(opts = {}) {
   }
   if (seedDemoIncident) seedDemo();
 
+  // Demo accounts (teachers/parents/principal/responder with a known demo password) exist ONLY in demo mode.
+  function seedDemoAccountsFn() {
+    const db = store.db;
+    if (db.accounts.length) return;
+    const mk = (email, role, name, extra = {}, id = null) => newAccount({ email, role, name, password: DEMO_PASSWORD, id, ...extra });
+    for (const r of db.roster) {
+      if (r.status !== "active") continue;
+      mk(`${r.id}@sinalhanes.deped.ph`, "teacher", r.name, { teacherId: r.id, section: r.section });
+    }
+    mk("principal@sinalhanes.deped.ph", "principal", "Dr. Santos", {}, "principal");
+    mk("responder@sinalhanes.deped.ph", "responder", "Brgy. Sinalhan / CDRRMO", {}, "responder");
+    for (const sec of sections()) mk(`parent-${slugify(sec)}@sinalhanes.deped.ph`, "parent", "Parent / PTA Representative", { section: sec });
+    audit("account_seeded", { detail: `${store.db.accounts.length} demo accounts seeded (demo mode)` });
+  }
+  if (seedDemoAccounts) seedDemoAccountsFn();
+
+  // First Super Admin: created once from the environment (one-time bootstrap).
+  // The password must be changed at first sign-in; it is never written to the audit log.
+  if (superAdminEmail && superAdminPassword) {
+    const email = normEmail(superAdminEmail);
+    if (!emailOk(email)) log("AGAP_SUPER_ADMIN_EMAIL is not a valid email – no Super Admin account created.");
+    else if (!findAccount(email)) {
+      newAccount({ email, role: "super_admin", name: "Super Admin", password: superAdminPassword, mustChange: true, id: "super-admin" });
+      audit("account_created", { by: "bootstrap", target: email, detail: "initial Super Admin (env bootstrap)" });
+      log(`Super Admin account created for ${email} – password change required at first sign-in.`);
+    }
+  }
+
   // ------------------------------------------------------------------- API
   async function api(req, res, url) {
     const p = url.pathname;
@@ -570,31 +761,104 @@ export function createApp(opts = {}) {
     if (p === "/api/health" && m === "GET") return send(res, 200, { ok: true, version: store.db.version, uptime: Math.round(process.uptime()) });
 
     if (p === "/api/config" && m === "GET")
-      return send(res, 200, { accessCodeRequired: Boolean(accessCode), demoReset: Boolean(allowReset), school: D.SCHOOL });
-
-    if (p === "/api/accounts" && m === "GET")
-      return send(res, 200, {
-        teachers: store.db.roster.map((r) => ({ id: r.id, name: r.name, section: r.section, room: r.room, active: r.status === "active" })),
-        sections: sections(),
-      });
+      return send(res, 200, { accessCodeRequired: Boolean(accessCode), demoReset: Boolean(allowReset), passwordMin: PASSWORD_MIN, school: D.SCHOOL });
 
     if (p === "/api/login" && m === "POST") {
       rateLimit(req, "login", 30);
       const body = await readJson(req);
       if (accessCode && !safeEqual(clean(body.code, 100), accessCode)) throw new HttpError(401, "bad_code", "Incorrect access code.");
-      let sub;
-      if (body.role === "principal") sub = "principal";
-      else if (body.role === "responder") sub = "responder";
-      else if (body.role === "teacher") sub = `teacher:${clean(body.accountId, 40)}`;
-      else if (body.role === "parent") sub = `parent:${clean(body.accountId, 60)}`;
-      else throw bad("Unknown role.");
-      const user = userFromSub(sub);
-      if (!user) throw new HttpError(404, "no_account", "That account is unavailable or inactive.");
-      return send(res, 200, { token: sign({ sub, exp: now() + TOKEN_TTL_MS }), user });
+      const email = normEmail(body.email);
+      const password = String(body.password ?? "");
+      // One generic error for "unknown email / wrong password / deactivated" – no account enumeration.
+      const generic = () => new HttpError(401, "invalid_credentials", "Invalid email or password.");
+      const t = now();
+      // Per-IP throttle on failed sign-ins (also blurs whether an account exists).
+      const failKey = `loginfail:${clientIp(req)}`;
+      const fails = (buckets.get(failKey) || []).filter((x) => t - x < 15 * 60000);
+      if (fails.length >= 15) throw new HttpError(429, "rate_limited", "Too many failed sign-in attempts. Try again in a few minutes.");
+      const noteFailure = () => { fails.push(t); buckets.set(failKey, fails); };
+
+      const acc = emailOk(email) ? findAccount(email) : null;
+      if (!acc) {
+        const d = dummyCredential(); // same scrypt cost as a real check – timing reveals nothing
+        checkPassword(password, d.salt, d.hash);
+        audit("login_failed", { target: email || "(empty)", detail: "no such account", req });
+        noteFailure();
+        throw generic();
+      }
+      if (acc.status !== "active") {
+        audit("login_failed", { target: acc.email, detail: "account deactivated", req });
+        noteFailure();
+        throw generic();
+      }
+      if (acc.lockedUntil > t) {
+        audit("login_failed", { target: acc.email, detail: "account locked", req });
+        noteFailure();
+        const mins = Math.max(1, Math.ceil((acc.lockedUntil - t) / 60000));
+        throw new HttpError(429, "account_locked", `Too many failed attempts. This account is locked for ${mins} more minute${mins === 1 ? "" : "s"}.`);
+      }
+      if (!checkPassword(password, acc.pwSalt, acc.pwHash)) {
+        acc.failed += 1;
+        if (acc.failed >= lockoutFailures) {
+          acc.lockedUntil = t + lockoutMinutes * 60000;
+          audit("account_locked", { target: acc.email, detail: `${acc.failed} failed sign-ins`, req });
+        }
+        store.save();
+        audit("login_failed", { target: acc.email, detail: "wrong password", req });
+        noteFailure();
+        throw generic();
+      }
+      const user = userFromAccount(acc); // roster row gone/inactive ⇒ generic failure too
+      if (!user) {
+        audit("login_failed", { target: acc.email, detail: "account unavailable", req });
+        noteFailure();
+        throw generic();
+      }
+      acc.failed = 0;
+      acc.lockedUntil = 0;
+      acc.lastLoginAt = t;
+      const token = issueSession(acc, req);
+      store.save();
+      audit("login_success", { by: acc.email, target: acc.email, req });
+      return send(res, 200, { token, user, mustChange: Boolean(acc.mustChange) });
+    }
+
+    if (p === "/api/logout" && m === "POST") {
+      const { session, account } = authenticate(req, url, p);
+      session.revokedAt = now();
+      closeStreamsFor(account.id);
+      store.save();
+      audit("logout", { by: account.email, target: account.email, req });
+      return send(res, 200, { ok: true });
+    }
+
+    // Single password field: used for the forced change after a rollover / temporary credentials.
+    if (p === "/api/password" && m === "POST") {
+      const { session, account } = authenticate(req, url, p);
+      const body = await readJson(req);
+      const problem = validatePassword(body.password);
+      if (problem) throw bad(problem, "weak_password");
+      const cred = hashPassword(body.password);
+      account.pwSalt = cred.salt;
+      account.pwHash = cred.hash;
+      const firstSet = account.mustChange;
+      account.mustChange = false;
+      account.temp = false;
+      account.failed = 0;
+      account.lockedUntil = 0;
+      revokeSessions(account.id, session.id); // every other device is signed out
+      store.save();
+      audit("password_change", { by: account.email, target: account.email, detail: firstSet ? "temporary password replaced" : "", req });
+      return send(res, 200, { ok: true });
+    }
+
+    if (p === "/api/me" && m === "GET") {
+      const { account, user } = authenticate(req, url, p);
+      return send(res, 200, { user, mustChange: Boolean(account.mustChange) });
     }
 
     if (p === "/api/stream" && m === "GET") {
-      const user = authenticate(req, url);
+      const { user, session } = authenticate(req, url, p);
       res.writeHead(200, {
         "Content-Type": "text/event-stream; charset=utf-8",
         "Cache-Control": "no-store, no-transform",
@@ -602,16 +866,138 @@ export function createApp(opts = {}) {
         "X-Accel-Buffering": "no",
       });
       res.write(`retry: 3000\nevent: hello\ndata: ${JSON.stringify({ version: store.db.version, role: user.role })}\n\n`);
-      sseClients.add(res);
+      const client = { res, accountId: session.accountId };
+      sseClients.add(client);
       const ka = setInterval(() => { try { res.write(": keepalive\n\n"); } catch { /* closed */ } }, 20000);
-      req.on("close", () => { clearInterval(ka); sseClients.delete(res); });
+      req.on("close", () => { clearInterval(ka); sseClients.delete(client); });
       return;
     }
 
     // Everything below needs a signed-in user.
-    const user = authenticate(req, url);
+    const { user } = authenticate(req, url, p);
     if (m !== "GET") rateLimit(req, "write", 120);
     runEscalations(); // deterministic, time-based escalation (also runs on a timer)
+
+    // ---- Super Admin console: accounts, audit trail, school year.
+    // Read/write here ONLY – this role can never edit live scores, dispatch or modes.
+    if (p === "/api/admin/accounts" && m === "GET") {
+      need(user, "super_admin");
+      const t = now();
+      return send(res, 200, { accounts: store.db.accounts.map((a) => publicAccount(a, t)) });
+    }
+
+    if (p === "/api/admin/accounts" && m === "POST") {
+      need(user, "super_admin");
+      const body = await readJson(req);
+      const email = normEmail(body.email);
+      if (!emailOk(email)) throw bad("Enter a valid email address.");
+      if (findAccount(email)) throw new HttpError(409, "email_taken", "An account with that email already exists.");
+      const role = clean(body.role, 20);
+      if (!ACCOUNT_ROLES.has(role)) throw bad("Choose which role this account gets.");
+      const name = clean(body.name, 80) || ({ responder: "Brgy. Sinalhan / CDRRMO", parent: "Parent / PTA Representative", super_admin: "Super Admin" }[role] || "");
+      if (!name) throw bad("Name is required.");
+      let section = null;
+      if (role === "parent") {
+        section = clean(body.section, 60);
+        if (!section) throw bad("Grade / section is required for a Parent/PTA account.");
+      }
+      // Optional password: left blank means the server issues temporary credentials (forced change at first sign-in).
+      let password = body.password === undefined || body.password === null || body.password === "" ? "" : String(body.password);
+      let temp = false;
+      let mustChange = false;
+      if (!password) { password = makeTempPassword(); temp = true; mustChange = true; }
+      else { const problem = validatePassword(password); if (problem) throw bad(problem, "weak_password"); }
+
+      let teacherId = null;
+      if (role === "teacher") {
+        const fields = parseTeacherFields(body);
+        const gps = /^-?\d{1,3}\.\d+, ?-?\d{1,3}\.\d+$/.test(String(body.gps || "")) ? String(body.gps) : DEFAULT_GPS;
+        const entry = { id: store.nextId("t"), registry: 30, ...fields, gps, status: body.status === "inactive" ? "inactive" : "active" };
+        store.db.roster.push(entry);
+        teacherId = entry.id;
+        section = entry.section;
+      }
+      const acc = newAccount({ email, role, name, password, mustChange, temp, teacherId, section });
+      store.save();
+      audit("account_created", { by: user.email, target: email, detail: `role ${role}${temp ? " (temporary credentials)" : ""}`, req });
+      if (teacherId) commit({ type: "roster_updated", id: teacherId });
+      return send(res, 201, { account: publicAccount(acc), tempPassword: temp ? password : null, teacherId });
+    }
+
+    let mact = p.match(/^\/api\/admin\/accounts\/([\w-]+)\/(reset-password|deactivate|activate|unlock)$/);
+    if (mact && m === "POST") {
+      need(user, "super_admin");
+      const acc = accountById(mact[1]);
+      if (!acc) throw new HttpError(404, "not_found", "Account not found.");
+      const action = mact[2];
+      const t = now();
+      if (action === "reset-password") {
+        const pw = makeTempPassword();
+        const cred = hashPassword(pw);
+        acc.pwSalt = cred.salt; acc.pwHash = cred.hash;
+        acc.mustChange = true; acc.temp = true; acc.failed = 0; acc.lockedUntil = 0;
+        const revoked = revokeSessions(acc.id);
+        store.save();
+        audit("password_reset", { by: user.email, target: acc.email, detail: `${revoked} session(s) revoked, temporary credentials issued`, req });
+        return send(res, 200, { ok: true, tempPassword: pw });
+      }
+      if (action === "deactivate") {
+        if (acc.id === user.id) throw bad("You cannot deactivate your own account.");
+        if (acc.role === "super_admin" && !store.db.accounts.some((a) => a.id !== acc.id && a.role === "super_admin" && a.status === "active"))
+          throw new HttpError(409, "last_admin", "At least one Super Admin account must stay active.");
+        acc.status = "inactive";
+        const revoked = revokeSessions(acc.id);
+        store.save();
+        audit("account_deactivated", { by: user.email, target: acc.email, detail: `${revoked} session(s) revoked`, req });
+        if (acc.teacherId) commit({ type: "roster_updated", id: acc.teacherId });
+        return send(res, 200, { ok: true });
+      }
+      if (action === "activate") {
+        acc.status = "active";
+        store.save();
+        audit("account_activated", { by: user.email, target: acc.email, req });
+        if (acc.teacherId) commit({ type: "roster_updated", id: acc.teacherId });
+        return send(res, 200, { ok: true });
+      }
+      // unlock – Super Admin can release a locked account early
+      const wasLocked = acc.lockedUntil > t;
+      acc.failed = 0; acc.lockedUntil = 0;
+      store.save();
+      audit("account_unlocked", { by: user.email, target: acc.email, detail: wasLocked ? "locked account released" : "failed counter cleared", req });
+      return send(res, 200, { ok: true, wasLocked });
+    }
+
+    if (p === "/api/admin/audit" && m === "GET") {
+      need(user, "super_admin"); // read-only view of the audit log
+      const limit = Math.min(500, Math.max(1, Number(url.searchParams.get("limit")) || 200));
+      return send(res, 200, { entries: store.db.audit.slice(-limit).reverse(), total: store.db.audit.length });
+    }
+
+    if (p === "/api/admin/school-year" && m === "GET") {
+      need(user, "super_admin");
+      return send(res, 200, { ...store.db.schoolYear, accounts: store.db.accounts.length });
+    }
+
+    if (p === "/api/admin/school-year/start" && m === "POST") {
+      need(user, "super_admin");
+      const t = now();
+      const issued = [];
+      for (const acc of store.db.accounts) {
+        if (acc.role === "super_admin") continue; // admins are not rolled over
+        const pw = makeTempPassword();
+        const cred = hashPassword(pw);
+        acc.pwSalt = cred.salt; acc.pwHash = cred.hash;
+        acc.mustChange = true; acc.temp = true; acc.failed = 0; acc.lockedUntil = 0;
+        revokeSessions(acc.id); // existing sessions die immediately
+        issued.push({ id: acc.id, email: acc.email, name: acc.name, role: acc.role, tempPassword: pw });
+      }
+      store.db.schoolYear = { count: (((store.db.schoolYear && store.db.schoolYear.count) || 0)) + 1, startedAt: t };
+      store.save();
+      audit("school_year_started", { by: user.email, detail: `new school year – ${issued.length} account(s) issued temporary credentials`, req });
+      commit({ type: "school_year" });
+      // Temporary credentials are returned ONCE to the Super Admin for distribution and are never logged.
+      return send(res, 200, { year: store.db.schoolYear.count, startedAt: t, accounts: issued });
+    }
 
     if (p === "/api/state" && m === "GET") return send(res, 200, stateFor(user));
 
@@ -654,6 +1040,7 @@ export function createApp(opts = {}) {
     // History: only closed incidents can be removed.
     // Principal = permanent delete for everyone. Other roles = remove from their own history only.
     if (p === "/api/history" && m === "DELETE") {
+      need(user, "teacher", "principal", "parent", "responder");
       const db = store.db;
       const mine = db.incidents.filter((i) => i.status === "RESOLVED" && canSee(i, user) && !isHiddenFor(i, user));
       if (user.role === "principal") {
@@ -668,6 +1055,7 @@ export function createApp(opts = {}) {
 
     let md = p.match(/^\/api\/incidents\/([\w-]+)$/);
     if (md && m === "DELETE") {
+      need(user, "teacher", "principal", "parent", "responder");
       const inc = store.db.incidents.find((i) => i.id === md[1] && canSee(i, user));
       if (!inc) throw new HttpError(404, "not_found", "Incident not found.");
       if (inc.status !== "RESOLVED") throw new HttpError(409, "not_closed", "Only closed incidents can be deleted from history.");
@@ -781,8 +1169,10 @@ export function createApp(opts = {}) {
       const entry = store.db.roster.find((r) => r.id === user.id);
       if (!entry) throw new HttpError(401, "unauthorized", "Please sign in again.");
       applyTeacherEdit(entry, parseTeacherFields(await readJson(req)));
+      const acc = teacherAccount(entry.id);
+      if (acc) { acc.name = entry.name; acc.section = entry.section; } // keep the account record in step with the roster
       commit({ type: "roster_updated", id: entry.id });
-      return send(res, 200, { user: userFromSub(`teacher:${entry.id}`) });
+      return send(res, 200, { user: userFromAccount(acc) || { id: entry.id, role: "teacher", name: entry.name, section: entry.section, room: entry.room, gps: entry.gps, registry: entry.registry, subtitle: `Teacher · ${entry.section}` } });
     }
 
     if (p === "/api/roster" && m === "POST") {
@@ -792,8 +1182,14 @@ export function createApp(opts = {}) {
       const gps = /^-?\d{1,3}\.\d+, ?-?\d{1,3}\.\d+$/.test(String(body.gps || "")) ? String(body.gps) : DEFAULT_GPS;
       const entry = { id: store.nextId("t"), registry: 30, ...fields, gps, status: body.status === "inactive" ? "inactive" : "active" };
       store.db.roster.push(entry);
+      // No self-registration: creating a roster row also provisions its sign-in account.
+      const email = `${entry.id}@sinalhanes.deped.ph`;
+      const tempPassword = makeTempPassword();
+      const acc = newAccount({ email, role: "teacher", name: entry.name, password: tempPassword, mustChange: true, temp: true, teacherId: entry.id, section: entry.section });
+      store.save();
+      audit("account_created", { by: user.email, target: email, detail: "teacher (via roster)", req });
       commit({ type: "roster_updated", id: entry.id });
-      return send(res, 201, { teacher: entry });
+      return send(res, 201, { teacher: entry, account: publicAccount(acc), tempPassword });
     }
 
     mt = p.match(/^\/api\/roster\/([\w-]+)$/);
@@ -803,6 +1199,12 @@ export function createApp(opts = {}) {
       if (!entry) throw new HttpError(404, "not_found", "Teacher not found.");
       if (m === "DELETE") {
         store.db.roster = store.db.roster.filter((r) => r.id !== entry.id);
+        const acc = teacherAccount(entry.id);
+        if (acc) {
+          acc.status = "inactive";
+          revokeSessions(acc.id);
+          audit("account_deactivated", { by: user.email, target: acc.email, detail: "removed from roster", req });
+        }
         commit({ type: "roster_updated", id: entry.id });
         return send(res, 200, { ok: true });
       }
@@ -810,6 +1212,16 @@ export function createApp(opts = {}) {
       const values = parseTeacherFields(body, { partial: true });
       if (body.status === "active" || body.status === "inactive") values.status = body.status;
       applyTeacherEdit(entry, values);
+      const acc = teacherAccount(entry.id);
+      if (acc) {
+        acc.name = entry.name;
+        acc.section = entry.section;
+        if (values.status && acc.status !== (values.status === "active" ? "active" : "inactive")) {
+          acc.status = values.status === "active" ? "active" : "inactive";
+          if (acc.status === "inactive") { revokeSessions(acc.id); audit("account_deactivated", { by: user.email, target: acc.email, detail: "roster status set to off duty", req }); }
+          else audit("account_activated", { by: user.email, target: acc.email, req });
+        }
+      }
       commit({ type: "roster_updated", id: entry.id });
       return send(res, 200, { teacher: entry });
     }
@@ -926,7 +1338,7 @@ export function createApp(opts = {}) {
     close() {
       if (tickTimer) clearInterval(tickTimer);
       store.flush();
-      for (const c of sseClients) { try { c.end(); } catch { /* ignore */ } }
+      for (const c of sseClients) { try { c.res.end(); } catch { /* ignore */ } }
       sseClients.clear();
       return new Promise((r) => server.close(() => r()));
     },
