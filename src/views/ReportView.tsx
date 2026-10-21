@@ -7,6 +7,7 @@ import { distanceInMeters, parseGps } from "../lib/format";
 import type { Incident, ReportPayload } from "../lib/types";
 import { ConfirmModal, Modal } from "../components/Modal";
 import { ResponseTracker, WaitingLine } from "../components/Incident";
+import { EtaLine, HeadcountPanel, RuleBadges } from "../components/Rules";
 import { SCHOOL_MAP_POINTS, SchoolMap, areaForMapPoint, type MapPoint } from "../components/SchoolMap";
 
 const CAT_ICON: Record<string, React.ElementType> = { fire: Flame, medical: Siren, flood: Waves, security: ShieldAlert };
@@ -36,13 +37,15 @@ export default function ReportView() {
   const [mismatchReason, setMismatchReason] = useState("");
   const [confirmCancel, setConfirmCancel] = useState(false);
   const [notice, setNotice] = useState<Notice>(null);
+  const taps = useRef(0); // passive interface-interaction counter (used for drill usability metrics)
   const noticeTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
   const pop = POPULATIONS.find((p) => p.id === popId) ?? null;
   const needSection = !isTeacher && pop && pop.id !== "wholeschool";
   const match = useMemo(() => searchCatalog(query), [query]);
   const hasQuery = query.trim().length >= 2;
-  const last: Incident | undefined = isTeacher ? incidents[0] : incidents.find((i) => i.reporterId === "principal");
+const last: Incident | undefined = incidents.find((i) => i.reporterId === user!.id);
+  const classAlerts = isTeacher ? incidents.filter((i) => i.status !== "RESOLVED" && i.id !== last?.id) : [];
 
   function flash(n: Notice) {
     setNotice(n);
@@ -76,6 +79,7 @@ export default function ReportView() {
       } else {
         flash({ kind: "sent", text: "🔴 Alert broadcast to Principal, Parent/PTA and Barangay Sinalhan / CDRRMO. Tracking is shown below — use “Cancel this alert” there if it was a mistake." });
       }
+      taps.current = 0;
       reset();
     } catch (e) {
       flash({ kind: "error", text: e instanceof Error ? e.message : "The alert could not be sent." });
@@ -87,6 +91,7 @@ export default function ReportView() {
     const payload: ReportPayload = {
       categoryId: sel.catId, subId: sel.subId, populationId: pop.id, ...loc,
       ...(needSection ? { section } : {}),
+      interactions: taps.current,
     };
     const label = `${sel.catLabel} — ${sel.subLabel}`;
     void sendNow(payload, label); // sends at once (or queues if offline). Mistakes: cancel from "Your last report".
@@ -133,11 +138,11 @@ export default function ReportView() {
   const ct = sel ? catTheme(sel.catId) : catTheme("other");
 
   return (
-    <div className="mx-auto w-full max-w-md px-3 py-3 space-y-3">
+    <div className="mx-auto w-full max-w-md px-3 py-3 space-y-3" onClickCapture={() => { taps.current += 1; }}>
       {/* Location header card */}
       <section className="bg-white rounded-2xl border border-slate-200 p-3">
         <div className="flex items-center gap-3">
-          <MapPin size={20} className="text-red-600 shrink-0" />
+          <MapPin size={20} className="text-brand-600 shrink-0" />
           <div className="flex-1 min-w-0">
             <p className="text-sm font-bold text-slate-800 truncate">📍 {room}</p>
             <p className="text-xs font-mono text-emerald-700">GPS Locked: {gps}</p>
@@ -150,7 +155,7 @@ export default function ReportView() {
         </div>
         <div className="flex flex-wrap items-center gap-2 mt-3">
           <button onClick={() => setArmed((v) => !v)} aria-pressed={armed}
-            className={`min-h-9 px-3 rounded-full text-xs font-semibold border ${armed ? "bg-orange-100 border-orange-300 text-orange-800" : "bg-orange-50 border-orange-200 text-orange-700"}`}>
+            className={`min-h-9 px-3 rounded-full text-xs font-semibold border ${armed ? "bg-blush-200 border-blush text-blush-800" : "bg-blush-50 border-blush-200 text-blush-700"}`}>
             {armed ? "✓ Mismatch armed — applies to next submit" : "⌖ Simulate location mismatch"}
           </button>
           <label className="min-h-9 px-3 rounded-full text-xs font-semibold border border-slate-200 bg-slate-50 text-slate-600 flex items-center gap-1.5">
@@ -169,7 +174,7 @@ export default function ReportView() {
           notice.kind === "sent" ? "bg-emerald-50 border-emerald-200 text-emerald-800"
           : notice.kind === "merged" ? "bg-sky-50 border-sky-200 text-sky-800"
           : notice.kind === "queued" ? "bg-slate-100 border-slate-300 text-slate-800"
-          : "bg-red-50 border-red-200 text-red-800"}`}>
+          : "bg-blush-100 border-blush-200 text-blush-800"}`}>
           {notice.kind === "queued" && <p className="font-bold flex items-center gap-1 mb-0.5"><WifiOff size={14} /> Not sent · No connection</p>}
           {notice.text}
         </div>
@@ -183,10 +188,29 @@ export default function ReportView() {
             {queue.map((q) => (
               <li key={q.clientId} className="flex items-center gap-2 bg-white rounded-xl px-3 py-2 text-sm">
                 <span className="flex-1 min-w-0 truncate">{q.label}</span>
-                <button onClick={() => cancelQueued(q.clientId)} className="text-xs font-bold text-red-600 min-h-9 px-2">Cancel</button>
+                <button onClick={() => cancelQueued(q.clientId)} className="text-xs font-bold text-blush-700 min-h-9 px-2">Cancel</button>
               </li>
             ))}
           </ul>
+        </section>
+      )}
+
+      {classAlerts.length > 0 && (
+        <section aria-label="Alerts for your class" className="space-y-2">
+          <h2 className="text-xs font-bold text-slate-500 uppercase tracking-wide">Active alert{classAlerts.length > 1 ? "s" : ""} affecting your class</h2>
+          {classAlerts.map((a) => {
+            const t = catTheme(a.category);
+            return (
+              <div key={a.id} className="rounded-2xl p-3 space-y-2" style={{ background: t.bg, border: `2px solid ${t.border}` }}>
+                <p className="text-xs font-extrabold uppercase tracking-wide" style={{ color: t.color }}>{t.emoji} {a.categoryLabel} · {a.subLabel}</p>
+                <p className="text-sm text-slate-600">📍 {a.room}</p>
+                <WaitingLine inc={a} />
+                <RuleBadges inc={a} />
+                <EtaLine inc={a} />
+                <HeadcountPanel inc={a} />
+              </div>
+            );
+          })}
         </section>
       )}
 
@@ -198,7 +222,7 @@ export default function ReportView() {
             <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
             <input value={query} onChange={(e) => setQuery(e.target.value)} onKeyDown={(e) => e.key === "Enter" && onSearchEnter()}
               placeholder="Quick search: earthquake, faint, fire…" aria-label="Quick keyword search" inputMode="search"
-              className="w-full min-h-11 rounded-xl border border-slate-300 bg-white pl-9 pr-9 text-base outline-none focus:border-red-500" />
+              className="w-full min-h-11 rounded-xl border border-slate-300 bg-white pl-9 pr-9 text-base outline-none focus:border-brand-500" />
             {query && <button onClick={() => setQuery("")} aria-label="Clear search" className="absolute right-2 top-1/2 -translate-y-1/2 p-1.5 text-slate-400"><X size={16} /></button>}
           </div>
           {hasQuery && match.subs.size === 0 && !match.other && <p className="text-xs text-slate-500 mb-2">No match — use “Other / General Emergency” below.</p>}
@@ -231,7 +255,7 @@ export default function ReportView() {
             })}
           </div>
           <button onClick={pickOther} className="w-full min-h-12 text-white rounded-2xl mt-2 text-base font-bold"
-            style={{ background: catTheme("other").gradient, outline: hasQuery && match.other ? "3px solid #f97316" : undefined }}>
+            style={{ background: catTheme("other").gradient, outline: hasQuery && match.other ? "3px solid #425B9A" : undefined }}>
             {catTheme("other").emoji} Other / General Emergency <span className="font-mono opacity-80">(Sev = 4)</span>
           </button>
         </section>
@@ -281,7 +305,7 @@ export default function ReportView() {
             </div>
           )}
           <button onClick={beginSubmit} disabled={checking} className="w-full min-h-14 text-white rounded-2xl text-base font-extrabold tracking-wide disabled:opacity-70"
-            style={{ background: checking ? "#94A3B8" : "linear-gradient(135deg,#DC2626,#991B1B)" }}>
+            style={{ background: checking ? "#BCC9E3" : "#FF95A5", color: "#1D2848", boxShadow: "0 6px 18px rgba(255,149,165,.55)" }}>
             {checking ? "⌖ CHECKING LOCATION…" : "🔴 SUBMIT EMERGENCY ALERT"}
           </button>
           <button onClick={() => setStep(2)} className="text-sm text-slate-500 mt-3 font-semibold min-h-10">← Back</button>
@@ -295,9 +319,12 @@ export default function ReportView() {
           <section className="rounded-2xl p-3" style={{ background: t.bg, border: `2px solid ${t.border}` }}>
             <p className="text-xs font-extrabold uppercase tracking-wide mb-1.5" style={{ color: t.color }}>{t.emoji} Your last report · {last.categoryLabel}</p>
             <WaitingLine inc={last} />
+            <div className="mt-2"><RuleBadges inc={last} /></div>
             <div className="mt-3"><ResponseTracker status={last.status} category={last.category} compact /></div>
+            <div className="mt-2"><EtaLine inc={last} /></div>
+            {last.status !== "RESOLVED" && <div className="mt-3"><HeadcountPanel inc={last} /></div>}
             {last.canCancel && (
-              <button onClick={() => setConfirmCancel(true)} className="mt-3 w-full min-h-11 rounded-xl bg-white text-red-700 border border-red-200 font-bold text-sm">
+              <button onClick={() => setConfirmCancel(true)} className="mt-3 w-full min-h-11 rounded-xl bg-white text-blush-700 border border-blush-200 font-bold text-sm">
                 ✕ Cancel this alert
               </button>
             )}
@@ -327,15 +354,17 @@ function ProfileModal({ onClose }: { onClose: () => void }) {
   const [name, setName] = useState(user!.name);
   const [section, setSection] = useState(user!.section ?? "");
   const [room, setRoom] = useState(user!.room ?? "");
+  const [registry, setRegistry] = useState(String(user!.registry ?? ""));
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
   async function save() {
     setBusy(true); setErr("");
-    try { await saveProfile({ name, section, room }); onClose(); }
+    try { await saveProfile({ name, section, room, ...(registry !== "" ? { registry: Number(registry) } : {}) }); onClose(); }
     catch (e) { setErr(e instanceof Error ? e.message : "Could not save."); setBusy(false); }
   }
   const fields: [string, string, (v: string) => void, string][] = [
     ["Name", name, setName, "Ms. Reyes"], ["Grade / Section", section, setSection, "Grade 3 - Sec A"], ["Default Room", room, setRoom, "Bldg A | Flr 2 | Rm 204"],
+    ["Today's registry (number of pupils)", registry, (v: string) => setRegistry(v.replace(/\D/g, "").slice(0, 3)), "28"],
   ];
   return (
     <Modal title="Edit Profile / Room" onClose={onClose}>
@@ -344,13 +373,13 @@ function ProfileModal({ onClose }: { onClose: () => void }) {
           <div key={label}>
             <label className="text-xs font-semibold text-slate-600">{label}
               <input value={val} onChange={(e) => set(e.target.value)} placeholder={ph}
-                className="w-full mt-1 min-h-11 border border-slate-300 rounded-xl px-3 text-base outline-none focus:border-red-500 font-normal" />
+                className="w-full mt-1 min-h-11 border border-slate-300 rounded-xl px-3 text-base outline-none focus:border-brand-500 font-normal" />
             </label>
           </div>
         ))}
-        {err && <p className="text-sm text-red-700" role="alert">{err}</p>}
-        <p className="text-xs text-slate-500">Saving updates the Principal's roster right away.</p>
-        <button onClick={save} disabled={busy} className="w-full min-h-12 bg-red-600 text-white rounded-xl font-bold disabled:opacity-60">{busy ? "Saving…" : "Save Changes"}</button>
+        {err && <p className="text-sm text-blush-700" role="alert">{err}</p>}
+        <p className="text-xs text-slate-500">The registry is the number of pupils expected in your class today; it is what the evacuation headcount is compared with. Saving updates the Principal's roster right away.</p>
+        <button onClick={save} disabled={busy} className="w-full min-h-12 bg-brand-600 text-white rounded-xl font-bold disabled:opacity-60">{busy ? "Saving…" : "Save Changes"}</button>
       </div>
     </Modal>
   );
@@ -363,10 +392,10 @@ function MismatchModal({ reason, savedRoom, onClose, onConfirm }: {
   const area = areaForMapPoint(pos);
   return (
     <Modal title="Location Mismatch" onClose={onClose}>
-      <div className="rounded-xl border border-orange-200 bg-orange-50 px-3 py-2.5 mb-3">
-        <p className="text-sm font-extrabold text-orange-800 flex items-center gap-1.5"><MapPin size={15} /> Your GPS doesn't match your saved room</p>
-        <p className="text-sm text-orange-800 mt-1">Please confirm where you actually are. Location Risk is scored from the place you confirm.</p>
-        {reason && <p className="text-xs text-orange-700 mt-1.5">{reason}</p>}
+      <div className="rounded-xl border border-blush-200 bg-blush-50 px-3 py-2.5 mb-3">
+        <p className="text-sm font-extrabold text-blush-800 flex items-center gap-1.5"><MapPin size={15} /> Your GPS doesn't match your saved room</p>
+        <p className="text-sm text-blush-800 mt-1">Please confirm where you actually are. Location Risk is scored from the place you confirm.</p>
+        {reason && <p className="text-xs text-blush-700 mt-1.5">{reason}</p>}
       </div>
       <label className="text-xs font-semibold text-slate-600">Where are you right now?
         <select value={area?.id ?? ""} onChange={(e) => setPos(e.target.value ? SCHOOL_MAP_POINTS[e.target.value] : OUTSIDE_POINT)}
@@ -375,10 +404,10 @@ function MismatchModal({ reason, savedRoom, onClose, onConfirm }: {
           {NON_CLASSROOM_AREAS.map((a: { id: string; label: string }) => <option key={a.id} value={a.id}>{a.label}</option>)}
         </select>
       </label>
-      <p className="text-xs text-slate-500 mt-2 mb-1.5">Or drag the orange pointer on the map.</p>
+      <p className="text-xs text-slate-500 mt-2 mb-1.5">Or drag the pink pointer on the map.</p>
       <SchoolMap room={savedRoom} showDetected detectedPosition={pos} onDetectedPositionChange={setPos} />
       <button onClick={() => onConfirm(area ? { locationKind: "area", areaId: area.id } : { locationKind: "unverified" })}
-        className="w-full min-h-12 bg-red-600 text-white rounded-xl font-bold mt-3">
+        className="w-full min-h-12 bg-brand-600 text-white rounded-xl font-bold mt-3">
         {area ? `Confirm: ${area.label}` : "Confirm (location not listed)"}
       </button>
     </Modal>

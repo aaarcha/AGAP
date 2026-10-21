@@ -119,14 +119,14 @@ export function SchoolMap({
 
           {/* Building A */}
           <g>
-            <rect x="13" y="15" width="32" height="28" rx="1.5" fill="#FECACA" stroke="#B91C1C" strokeWidth="1" />
+            <rect x="13" y="15" width="32" height="28" rx="1.5" fill="#DCE3F1" stroke="#34487D" strokeWidth="1" />
             <rect x="16" y="20" width="8" height="7" fill="#FFF7ED" stroke="#EA580C" strokeWidth=".45" />
             <rect x="27" y="20" width="8" height="7" fill="#FFF7ED" stroke="#EA580C" strokeWidth=".45" />
             <rect x="38" y="20" width="4" height="7" fill="#FFF7ED" stroke="#EA580C" strokeWidth=".45" />
             <rect x="16" y="30" width="8" height="7" fill="#FFF7ED" stroke="#EA580C" strokeWidth=".45" />
             <rect x="27" y="30" width="8" height="7" fill="#FFF7ED" stroke="#EA580C" strokeWidth=".45" />
             <rect x="38" y="30" width="4" height="7" fill="#FFF7ED" stroke="#EA580C" strokeWidth=".45" />
-            <text x="29" y="18.2" textAnchor="middle" fontSize="3" fill="#991B1B" fontWeight="800">BUILDING A</text>
+            <text x="29" y="18.2" textAnchor="middle" fontSize="3" fill="#283762" fontWeight="800">BUILDING A</text>
             <text x="29" y="41" textAnchor="middle" fontSize="2.2" fill="#9A3412">Classrooms · Rooms 204–210</text>
           </g>
 
@@ -162,9 +162,9 @@ export function SchoolMap({
           </g>
 
           {/* Saved classroom marker */}
-          <circle cx={savedPoint.x} cy={savedPoint.y} r="5" fill="#DC2626" opacity=".15" />
-          <circle cx={savedPoint.x} cy={savedPoint.y} r="2.4" fill="#DC2626" stroke="white" strokeWidth="1" />
-          <text x={savedPoint.x} y={savedPoint.y - 4.5} textAnchor="middle" fontSize="2.7" fill="#B91C1C" fontWeight="800">SAVED ROOM</text>
+          <circle cx={savedPoint.x} cy={savedPoint.y} r="5" fill="#425B9A" opacity=".15" />
+          <circle cx={savedPoint.x} cy={savedPoint.y} r="2.4" fill="#425B9A" stroke="white" strokeWidth="1" />
+          <text x={savedPoint.x} y={savedPoint.y - 4.5} textAnchor="middle" fontSize="2.7" fill="#34487D" fontWeight="800">SAVED ROOM</text>
 
           {/* Detected device GPS marker; drag it to adjust the map-confirmed position */}
           {detectedPoint && (
@@ -173,7 +173,7 @@ export function SchoolMap({
                 cx={detectedPoint.x}
                 cy={detectedPoint.y}
                 r="7"
-                fill="#F97316"
+                fill="#E0647E"
                 opacity=".18"
                 style={{ cursor: "grab" }}
                 onPointerDown={(event) => {
@@ -185,7 +185,7 @@ export function SchoolMap({
                 cx={detectedPoint.x}
                 cy={detectedPoint.y}
                 r="3"
-                fill="#F97316"
+                fill="#E0647E"
                 stroke="white"
                 strokeWidth="1"
                 style={{ cursor: "grab" }}
@@ -194,20 +194,20 @@ export function SchoolMap({
                   beginMarkerDrag(event);
                 }}
               />
-              <text x={detectedPoint.x - 1} y={detectedPoint.y - 4} textAnchor="end" fontSize="2.7" fill="#C2410C" fontWeight="800">DETECTED GPS</text>
+              <text x={detectedPoint.x - 1} y={detectedPoint.y - 4} textAnchor="end" fontSize="2.7" fill="#A8304A" fontWeight="800">DETECTED GPS</text>
             </>
           )}
         </svg>
         {showDetected && (
-          <div className="absolute left-2 bottom-2 rounded-full bg-white/90 border border-orange-200 px-2 py-1 text-xs font-semibold text-orange-700 shadow-sm pointer-events-none">
-            Drag the orange GPS pointer to adjust
+          <div className="absolute left-2 bottom-2 rounded-full bg-white/90 border border-blush-200 px-2 py-1 text-xs font-semibold text-blush-700 shadow-sm pointer-events-none">
+            Drag the pink GPS pointer to adjust
           </div>
         )}
       </div>
 
       <div className="flex items-center gap-3 px-2.5 py-1.5 border-t border-slate-100 text-xs text-slate-500">
-        <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-red-600" /> Saved classroom</span>
-        {showDetected && <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-orange-500" /> Detected GPS</span>}
+        <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-brand-600" /> Saved classroom</span>
+        {showDetected && <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-blush" /> Detected GPS</span>}
       </div>
     </div>
   );

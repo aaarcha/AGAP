@@ -87,6 +87,7 @@ export const OUTCOME_LABEL = {
   resolved: "Resolved",
   false_alarm: "False alarm",
   cancelled: "Cancelled by reporter",
+  drill: "Drill ended",
 };
 
 export const STATUS_ORDER = ["SENT", "SEEN", "EN_ROUTE", "ON_SITE", "RESOLVED"];
@@ -109,8 +110,10 @@ export function computeScore(severity, vulnerability, locationRisk, timeSensitiv
   return total / 100;
 }
 
-export function bandFor(score, status) {
+export function bandFor(score, status, overrideReasons) {
   if (status === "RESOLVED") return "RESOLVED";
+  // Non-compensatory override: a critical life-safety condition is never diluted by the weighted sum.
+  if (overrideReasons && overrideReasons.length) return "CRITICAL";
   if (score >= 4.0) return "CRITICAL";
   if (score >= 3.0) return "HIGH";
   return "MODERATE";
@@ -209,13 +212,86 @@ export function agencyFor(category) {
 
 export const DISCLAIMERS = {
   footer:
-    "AGAP is a reporting and coordination tool. It does not replace school DRRM drills, alarms, or RA 10121 / DepEd Order 21 s.2015 procedures.",
+    "This is a reporting and coordination tool. It does not replace school DRRM drills, alarms, or RA 10121 / DepEd Order 21 s.2015 procedures.",
   illustrative:
     "Illustrative example weights — pending final Expert Panel session (Principal, DRRM coordinator, Barangay Sinalhan official, CDRRMO liaison).",
   scope: "Testing scope: Sinalhan Elementary School only; Android-focused PWA design.",
   noAutoDetect:
-    "AGAP does not detect incidents automatically and does not replace RA 10121 / DepEd Order 21 s.2015 procedures.",
+    "This system does not detect incidents automatically and does not replace RA 10121 / DepEd Order 21 s.2015 procedures.",
   noAgencyLink:
-    "AGAP does not connect directly to these agencies — contacting them remains a manual step by Barangay Sinalhan / CDRRMO staff.",
+    "This system does not connect directly to these agencies — contacting them remains a manual step by Barangay Sinalhan / CDRRMO staff.",
   crExample: "Example judgment set, not real panel data.",
 };
+
+// ---------------------------------------------------------------------------------------------
+// Priority rules added on top of the AHP–SAW weighted sum (all deterministic, no machine learning)
+// All numeric values below are ILLUSTRATIVE defaults to be validated by the expert panel.
+// ---------------------------------------------------------------------------------------------
+
+// Feature: Hazard Mode – raises Location Risk for ground-floor / low-lying zones.
+export const HAZARD_LOCATION_BOOST = 2;
+export const HAZARD_KINDS = [
+  { id: "flood", label: "Flood warning" },
+  { id: "typhoon", label: "Typhoon signal" },
+];
+export const LOW_LYING_AREAS = ["canteen", "quadrangle", "coveredcourt"];
+
+export function floorOf(room) {
+  const m = /Flr\s*(\d+)/i.exec(String(room || ""));
+  return m ? Number(m[1]) : null;
+}
+// Ground-floor rooms and open ground-level areas count as low-lying.
+export function isLowLying({ locationKind, areaId, savedRoom }) {
+  if (locationKind === "area" && LOW_LYING_AREAS.includes(areaId)) return true;
+  return floorOf(savedRoom) === 1;
+}
+
+// Feature: time-based escalation. Minutes without acknowledgement before each tier is alerted.
+export const ESCALATION_TIERS = ["Principal", "Barangay Sinalhan", "CDRRMO"];
+export const DEFAULT_ESCALATION_MINUTES = [3, 6];
+
+export const OVERRIDE_LABEL = {
+  SEVERITY_5: "Severity 5",
+  HEADCOUNT_MISMATCH: "Headcount mismatch",
+};
+
+// One place that decides location risk, time sensitivity, score and override flags.
+export function scoreIncident(inc, { hazardActive = false } = {}) {
+  const hazardApplied = Boolean(hazardActive && inc.lowLying);
+  const locationRisk = hazardApplied ? Math.min(5, inc.baseLocationRisk + HAZARD_LOCATION_BOOST) : inc.baseLocationRisk;
+  const mismatch = (inc.headcounts || []).some((h) => h.present !== h.expected);
+  const timeSensitivity = mismatch ? 5 : Math.min(5, inc.baseTimeSensitivity + (inc.escalationLevel || 0));
+  const score = computeScore(inc.severity, inc.vulnerability, locationRisk, timeSensitivity);
+  const overrideReasons = [];
+  if (inc.severity >= 5) overrideReasons.push("SEVERITY_5");
+  if (mismatch) overrideReasons.push("HEADCOUNT_MISMATCH");
+  return { locationRisk, timeSensitivity, score, overrideReasons, hazardApplied };
+}
+
+// Feature: responder ETA by transport mode and approach-route status.
+export const TRANSPORT_MODES = [
+  { id: "walking", label: "On foot (Barangay Tanod)", kmh: 4.5 },
+  { id: "motorcycle", label: "Motorcycle", kmh: 25 },
+  { id: "vehicle", label: "Vehicle / ambulance", kmh: 30 },
+];
+export const ROUTE_STATUSES = [
+  { id: "passable", label: "Passable" },
+  { id: "flooded", label: "Flooded" },
+  { id: "blocked", label: "Blocked" },
+];
+// Fraction of normal speed on each route status (blocked = no usable route).
+export const ROUTE_SPEED_FACTOR = {
+  passable: { walking: 1, motorcycle: 1, vehicle: 1 },
+  flooded: { walking: 0.75, motorcycle: 0.5, vehicle: 0.4 },
+  blocked: null,
+};
+export function computeEta({ mode, distanceKm, route = "passable" }) {
+  const m = TRANSPORT_MODES.find((x) => x.id === mode);
+  if (!m || !(distanceKm > 0)) return null;
+  const factors = ROUTE_SPEED_FACTOR[route];
+  if (!factors) return { blocked: true, minutes: null };
+  return { blocked: false, minutes: Math.max(1, Math.round((distanceKm / (m.kmh * factors[mode])) * 60)) };
+}
+
+// Feature: drill metrics are in milliseconds; helper for labelling.
+export const DRILL_METRICS = ["timeToReport", "timeToAck", "timeToOnSite", "timeToHeadcount", "interactions"];

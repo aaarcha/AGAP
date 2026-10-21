@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 import { Bell, LogOut, Wifi, WifiOff, X, Download } from "lucide-react";
 import { DISCLAIMERS } from "../../shared/domain.js";
+import { BRAND } from "../lib/brand";
 import { useApp } from "../lib/store";
 import { usePwaInstall } from "../lib/pwa";
 import { catTheme } from "../lib/theme";
@@ -9,10 +10,10 @@ export function Header({ title, subtitle }: { title: string; subtitle?: string }
   const { user, logout, connected, live, notifPermission, enableNotifications } = useApp();
   return (
     <header className="sticky top-0 z-30 text-white pt-[env(safe-area-inset-top)]"
-      style={{ background: "linear-gradient(135deg,#DC2626 0%,#991B1B 100%)", boxShadow: "0 2px 12px rgba(185,28,28,.45)" }}>
+      style={{ background: "linear-gradient(135deg,#425B9A 0%,#283762 100%)", boxShadow: "0 2px 12px rgba(40,55,98,.40)" }}>
       <div className="mx-auto max-w-6xl flex items-center gap-3 px-3 py-2">
-        <div className="w-10 h-10 rounded-xl overflow-hidden shrink-0 bg-white border border-white/30">
-          <img src="/icons/logo-256.png" alt="AGAP" className="w-full h-full object-contain p-0.5" width={40} height={40} />
+        <div className="w-10 h-10 rounded-xl overflow-hidden shrink-0 bg-cream border border-white/30">
+          <img src="/icons/logo-256.png" alt="" className="w-full h-full object-contain p-0.5" width={40} height={40} />
         </div>
         <div className="flex-1 min-w-0">
           <p className="text-base font-black leading-tight truncate tracking-tight">{title}</p>
@@ -68,7 +69,7 @@ export function AlertToasts() {
     <div className="fixed top-[max(0.5rem,env(safe-area-inset-top))] inset-x-0 z-[60] px-2 flex flex-col gap-2 items-center pointer-events-none" aria-live="assertive">
       {alerts.map((a) => {
         const ct = catTheme(a.category ?? "other");
-        const bg = a.kind === "clear" ? "linear-gradient(135deg,#16A34A,#166534)" : a.kind === "error" ? "linear-gradient(135deg,#DC2626,#7F1D1D)" : a.kind === "info" ? "linear-gradient(135deg,#475569,#1E293B)" : ct.gradient;
+        const bg = a.kind === "clear" ? "linear-gradient(135deg,#16A34A,#166534)" : a.kind === "error" ? "linear-gradient(135deg,#C2415C,#7A1F35)" : a.kind === "info" ? "linear-gradient(135deg,#475569,#1E293B)" : ct.gradient;
         return (
           <div key={a.id} className="pointer-events-auto w-full max-w-md rounded-2xl overflow-hidden shadow-2xl text-white animate-slide-down" style={{ background: bg }} role="alert">
             <div className="flex items-start gap-2 px-3 py-2.5">
@@ -91,16 +92,16 @@ export function InstallBanner() {
   if (!canInstall && !iosHint) return null;
   return (
     <div className="fixed bottom-[calc(4.5rem+env(safe-area-inset-bottom))] md:bottom-4 inset-x-0 z-40 px-3 flex justify-center pointer-events-none">
-      <div className="pointer-events-auto w-full max-w-md bg-slate-900 text-white rounded-2xl shadow-2xl p-3 flex items-center gap-3">
+      <div className="pointer-events-auto w-full max-w-md bg-brand-900 text-white rounded-2xl shadow-2xl p-3 flex items-center gap-3">
         <img src="/icons/icon-192.png" alt="" width={40} height={40} className="rounded-lg shrink-0" />
         <div className="flex-1 min-w-0">
-          <p className="text-sm font-bold">Install AGAP</p>
+          <p className="text-sm font-bold">Install app</p>
           <p className="text-xs text-slate-300 leading-snug">
             {canInstall ? "Add it to your home screen to open it like an app, even with a weak signal." : "Tap Share, then “Add to Home Screen”."}
           </p>
         </div>
         {canInstall && (
-          <button onClick={install} className="min-h-10 px-3 rounded-xl bg-red-600 text-sm font-bold flex items-center gap-1"><Download size={14} />Install</button>
+          <button onClick={install} className="min-h-10 px-3 rounded-xl bg-brand-600 text-sm font-bold flex items-center gap-1"><Download size={14} />Install</button>
         )}
         <button onClick={dismiss} aria-label="Not now" className="p-2 text-slate-400"><X size={16} /></button>
       </div>
@@ -118,9 +119,9 @@ export function TabBar<T extends string>({ tab, setTab, tabs }: {
       <button key={t.id} onClick={() => setTab(t.id)} aria-current={active ? "page" : undefined}
         className={layout === "bottom"
           ? "flex-1 flex flex-col items-center justify-center gap-0.5 py-2 min-h-14"
-          : `flex items-center gap-2 px-4 py-3 text-sm font-bold border-b-2 ${active ? "border-red-600 text-red-600" : "border-transparent text-slate-500 hover:text-slate-800"}`}>
-        <Icon size={layout === "bottom" ? 20 : 16} className={active ? "text-red-600" : "text-slate-400"} />
-        <span className={layout === "bottom" ? `text-xs font-bold ${active ? "text-red-600" : "text-slate-500"}` : ""}>{t.label}</span>
+          : `flex items-center gap-2 px-4 py-3 text-sm font-bold border-b-2 ${active ? "border-brand-600 text-brand-600" : "border-transparent text-slate-500 hover:text-slate-800"}`}>
+        <Icon size={layout === "bottom" ? 20 : 16} className={active ? "text-brand-600" : "text-slate-400"} />
+        <span className={layout === "bottom" ? `text-xs font-bold ${active ? "text-brand-600" : "text-slate-500"}` : ""}>{t.label}</span>
       </button>
     );
   };

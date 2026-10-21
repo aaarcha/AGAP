@@ -3,11 +3,12 @@ import { ChevronRight } from "lucide-react";
 import { DISCLAIMERS, SCHOOL } from "../../shared/domain.js";
 import { api } from "../lib/api";
 import { useApp } from "../lib/store";
+import { BRAND } from "../lib/brand";
 import type { Role } from "../lib/types";
 
 interface Accounts { teachers: { id: string; name: string; section: string; room: string; active: boolean }[]; sections: string[] }
 
-const ROLE_COLOR: Record<Role, string> = { teacher: "#EF4444", principal: "#DC2626", parent: "#0EA5E9", responder: "#F97316" };
+const ROLE_COLOR: Record<Role, string> = { teacher: "#FF95A5", principal: "#76C0EC", parent: "#FFF6DC", responder: "#94A8D0" };
 
 export default function LoginView() {
   const { login, config } = useApp();
@@ -44,14 +45,14 @@ export default function LoginView() {
   const subBtn = "w-full text-left rounded-xl px-3 min-h-12 bg-white/5 hover:bg-white/10 text-white text-sm disabled:opacity-50";
 
   return (
-    <div className="min-h-dvh flex flex-col text-white" style={{ background: "radial-gradient(ellipse 120% 60% at 50% 0%, #3B0000 0%, #0F172A 55%, #020617 100%)" }}>
+    <div className="min-h-dvh flex flex-col text-white" style={{ background: "radial-gradient(ellipse 120% 60% at 50% 0%, #425B9A 0%, #1D2848 55%, #0F1830 100%)" }}>
       <div className="flex-1 w-full max-w-md mx-auto px-5 pt-[max(2rem,env(safe-area-inset-top))] pb-6 flex flex-col">
         <div className="flex flex-col items-center text-center pt-4 pb-6">
-          <div className="w-28 h-28 rounded-3xl overflow-hidden bg-white border-2 border-white/10 shadow-2xl" style={{ boxShadow: "0 0 40px 12px rgba(220,38,38,.35)" }}>
-            <img src="/icons/logo-256.png" alt="AGAP logo" width={112} height={112} className="w-full h-full object-contain p-1" />
+          <div className="w-28 h-28 rounded-3xl overflow-hidden bg-cream border-2 border-white/10 shadow-2xl" style={{ boxShadow: "0 0 40px 12px rgba(118,192,236,.35)" }}>
+            <img src="/icons/logo-256.png" alt="" width={112} height={112} className="w-full h-full object-contain p-1" />
           </div>
-          <h1 className="text-3xl font-black tracking-tight mt-4">AGAP</h1>
-          <p className="text-sm text-slate-300 font-medium">Automated Guidance and Emergency Prioritization</p>
+          <h1 className="text-2xl font-black tracking-tight mt-4">{BRAND.name}</h1>
+          <p className="text-sm text-slate-300 font-medium">Emergency reporting and incident prioritization</p>
           <p className="text-xs text-slate-400 font-semibold mt-2">{SCHOOL.name} · DepEd ID {SCHOOL.depedId}</p>
         </div>
 
@@ -59,7 +60,7 @@ export default function LoginView() {
         <div className="space-y-2">
           {config?.accessCodeRequired && (
             <input value={code} onChange={(e) => setCode(e.target.value)} type="password" autoComplete="off" placeholder="School access code" aria-label="School access code"
-              className="w-full min-h-12 rounded-xl px-4 bg-white text-slate-900 text-base outline-none focus:ring-2 focus:ring-red-500" />
+              className="w-full min-h-12 rounded-xl px-4 bg-white text-slate-900 text-base outline-none focus:ring-2 focus:ring-accent" />
           )}
 
           <div>
@@ -94,7 +95,7 @@ export default function LoginView() {
           <Card role="responder" name="Brgy. Sinalhan / CDRRMO" sub="Responder · priority dispatch queue" onClick={() => go("responder")} />
         </div>
 
-        {error && <p role="alert" className="mt-3 rounded-xl bg-red-950/60 border border-red-500/40 text-red-200 text-sm px-3 py-2">{error}</p>}
+        {error && <p role="alert" className="mt-3 rounded-xl bg-blush/15 border border-blush/50 text-blush text-sm px-3 py-2">{error}</p>}
 
         <div className="mt-auto pt-8 space-y-1.5 text-center">
           <p className="text-xs text-slate-400">{DISCLAIMERS.scope}</p>

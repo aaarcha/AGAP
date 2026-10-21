@@ -32,7 +32,7 @@ export function ConfirmModal({ title, message, confirmLabel, danger, onConfirm, 
       <div className="flex gap-2 mt-4">
         <button onClick={onClose} className="flex-1 min-h-11 rounded-xl bg-slate-100 text-slate-700 font-bold text-sm">Cancel</button>
         <button onClick={() => { onConfirm(); onClose(); }}
-          className={`flex-1 min-h-11 rounded-xl text-white font-bold text-sm ${danger ? "bg-red-600" : "bg-slate-800"}`}>{confirmLabel}</button>
+          className={`flex-1 min-h-11 rounded-xl font-bold text-sm ${danger ? "bg-blush text-brand-900" : "bg-brand-700 text-white"}`}>{confirmLabel}</button>
       </div>
     </Modal>
   );

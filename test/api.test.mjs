@@ -358,3 +358,226 @@ test("old resolved incidents are pruned only after the retention window", async 
   assert.equal((await s.call("GET", "/api/state", { token: principal2 })).json.incidents.length, 0, "pruned after retention");
   await s.close();
 });
+
+// ---------------------------------------------------------------- new priority-rule features
+const hc = (call, tok, id, body) => call("POST", `/api/incidents/${id}/headcount`, { token: tok, body });
+
+test("headcount: aggregate counts only; a mismatch forces CRITICAL and clears when corrected", async () => {
+  const s = await boot();
+  const teacher = await s.login("teacher", "t1"); // registry 28
+  const principal = await s.login("principal");
+  const parent = await s.login("parent", "Grade 3 - Sec A");
+  const { incident } = (await s.call("POST", "/api/incidents", { token: teacher, body: report({ categoryId: "medical", subId: "heatstroke", populationId: "individual" }) })).json;
+  assert.equal(incident.score, 2.6);
+  assert.equal(incident.accountability.status, "pending");
+
+  const bad = await hc(s.call, teacher, incident.id, { present: 27 });
+  assert.equal(bad.status, 200);
+  assert.equal(bad.json.incident.accountability.status, "mismatch");
+  assert.deepEqual(bad.json.incident.overrideReasons, ["HEADCOUNT_MISMATCH"]);
+  assert.equal(bad.json.incident.timeSensitivity, 5);
+  assert.ok(bad.json.incident.score > 2.6, "mismatch raises the score");
+  const pv = (await s.call("GET", "/api/state", { token: parent })).json.incidents[0];
+  assert.deepEqual(pv.overrideReasons, ["HEADCOUNT_MISMATCH"]);
+  assert.deepEqual(pv.headcounts.map((h) => [h.present, h.expected]), [[27, 28]]);
+  assert.equal(pv.headcounts[0].by, undefined, "parents never see who entered the count");
+
+  const fixed = await hc(s.call, teacher, incident.id, { present: 28 });
+  assert.equal(fixed.json.incident.accountability.status, "verified");
+  assert.deepEqual(fixed.json.incident.overrideReasons, []);
+  assert.equal(fixed.json.incident.score, 2.6, "override cleared, score back to normal");
+
+  assert.equal((await hc(s.call, teacher, incident.id, { present: -1 })).status, 400);
+  assert.equal((await hc(s.call, teacher, incident.id, { present: "abc" })).status, 400);
+  assert.equal((await hc(s.call, parent, incident.id, { present: 28 })).status, 403);
+  const t2 = await s.login("teacher", "t2");
+  assert.equal((await hc(s.call, t2, incident.id, { present: 30 })).status, 404, "other sections cannot touch it");
+  const pr = await hc(s.call, principal, incident.id, { section: "Grade 3 - Sec A", present: 26, expected: 28 });
+  assert.equal(pr.status, 200);
+  assert.equal(pr.json.incident.accountability.status, "mismatch");
+  await s.close();
+});
+
+test("headcount: whole-school incidents need every active section before they read as verified", async () => {
+  const s = await boot();
+  const t1 = await s.login("teacher", "t1");
+  const t2 = await s.login("teacher", "t2");
+  const t3 = await s.login("teacher", "t3");
+  const { incident } = (await s.call("POST", "/api/incidents", { token: t1, body: report({ populationId: "wholeschool" }) })).json;
+  assert.equal(incident.accountability.total, 3);
+  assert.equal((await hc(s.call, t1, incident.id, { present: 28 })).json.incident.accountability.status, "partial");
+  assert.equal((await hc(s.call, t2, incident.id, { present: 30 })).json.incident.accountability.status, "partial");
+  const last = await hc(s.call, t3, incident.id, { present: 29 });
+  assert.equal(last.json.incident.accountability.status, "verified");
+  assert.equal(last.json.incident.accountability.reported, 3);
+  await s.close();
+});
+
+test("critical override: Severity 5 is CRITICAL even when the weighted score is below 4.0", async () => {
+  const s = await boot();
+  const teacher = await s.login("teacher", "t1");
+  const responder = await s.login("responder");
+  const gas = (await s.call("POST", "/api/incidents", { token: teacher, body: report({ categoryId: "fire", subId: "gas", populationId: "individual" }) })).json.incident;
+  assert.equal(gas.score, 3.6, "0.5×5 + 0.29×2 + 0.11×2 + 0.10×3");
+  assert.deepEqual(gas.overrideReasons, ["SEVERITY_5"]);
+  const ranked = (await s.call("GET", "/api/state", { token: responder })).json.incidents[0];
+  assert.deepEqual(ranked.overrideReasons, ["SEVERITY_5"]);
+  const normal = (await s.call("POST", "/api/incidents", { token: teacher, body: report({ categoryId: "medical", subId: "severe_injury", populationId: "classroom", locationKind: "area", areaId: "hallway" }) })).json.incident;
+  assert.deepEqual(normal.overrideReasons, []);
+  await s.close();
+});
+
+test("hazard mode: raises Location Risk only for ground-floor / low-lying zones, live, and reverts", async () => {
+  const s = await boot();
+  const t1 = await s.login("teacher", "t1"); // Flr 2
+  const t3 = await s.login("teacher", "t3"); // Flr 1
+  const principal = await s.login("principal");
+  const parent = await s.login("parent", "Grade 5 - Sec A");
+  const upper = (await s.call("POST", "/api/incidents", { token: t1, body: report({ categoryId: "flood", subId: "flash_flood" }) })).json.incident;
+  const ground = (await s.call("POST", "/api/incidents", { token: t3, body: report({ categoryId: "flood", subId: "flash_flood" }) })).json.incident;
+  assert.equal(ground.locationRisk, 2);
+  assert.equal((await s.call("PUT", "/api/modes/hazard", { token: t1, body: { active: true } })).status, 403);
+
+  const on = await s.call("PUT", "/api/modes/hazard", { token: principal, body: { active: true, kind: "typhoon", note: "Signal no. 2" } });
+  assert.equal(on.status, 200);
+  const st = (await s.call("GET", "/api/state", { token: principal })).json;
+  const byId = Object.fromEntries(st.incidents.map((i) => [i.id, i]));
+  assert.equal(byId[ground.id].locationRisk, 4, "ground floor: 2 + boost 2");
+  assert.equal(byId[ground.id].score, 3.9, "0.5×4 + 0.29×4 + 0.11×4 + 0.10×3");
+  assert.equal(byId[upper.id].locationRisk, 2, "upper floor unchanged");
+  assert.equal(st.modes.hazard.active, true);
+  assert.equal((await s.call("GET", "/api/state", { token: parent })).json.modes.hazard.kind, "typhoon", "everyone sees the advisory");
+
+  const canteen = (await s.call("POST", "/api/incidents", { token: t1, body: report({ categoryId: "medical", subId: "heatstroke", populationId: "individual", locationKind: "area", areaId: "canteen" }) })).json.incident;
+  assert.equal(canteen.locationRisk, 5, "low-lying area base 3 + 2");
+  const cr = (await s.call("POST", "/api/incidents", { token: t1, body: report({ categoryId: "medical", subId: "severe_injury", populationId: "individual", locationKind: "area", areaId: "cr" }) })).json.incident;
+  assert.equal(cr.locationRisk, 5, "CR base 5 is already capped");
+
+  await s.call("PUT", "/api/modes/hazard", { token: principal, body: { active: false } });
+  const after = Object.fromEntries((await s.call("GET", "/api/state", { token: principal })).json.incidents.map((i) => [i.id, i]));
+  assert.equal(after[ground.id].locationRisk, 2);
+  assert.equal(after[canteen.id].locationRisk, 3);
+  await s.close();
+});
+
+test("time-based escalation: unacknowledged tickets climb tiers, raise the score and stop once acknowledged", async () => {
+  let t = Date.now();
+  const s = await boot({ now: () => t, escalationMinutes: [3, 6], autoTick: false });
+  const teacher = await s.login("teacher", "t1");
+  const responder = await s.login("responder");
+  const a = (await s.call("POST", "/api/incidents", { token: teacher, body: report({ categoryId: "medical", subId: "heatstroke", populationId: "individual" }) })).json.incident;
+  const b = (await s.call("POST", "/api/incidents", { token: teacher, body: report({ categoryId: "fire", subId: "electrical", populationId: "individual", locationKind: "area", areaId: "hallway" }) })).json.incident;
+  assert.equal(a.score, 2.6);
+
+  t += 2 * 60000;
+  assert.equal((await s.call("GET", "/api/state", { token: responder })).json.incidents.find((i) => i.id === a.id).escalationLevel, 0);
+  await s.call("POST", `/api/incidents/${b.id}/ack`, { token: responder, body: {} }); // b is acknowledged in time
+
+  t += 1.5 * 60000; // 3.5 min
+  let st = (await s.call("GET", "/api/state", { token: responder })).json.incidents;
+  const a1 = st.find((i) => i.id === a.id), b1 = st.find((i) => i.id === b.id);
+  assert.equal(a1.escalationLevel, 1);
+  assert.equal(a1.timeSensitivity, 4);
+  assert.equal(a1.score, 2.7);
+  assert.equal(b1.escalationLevel, 0, "acknowledged tickets are not escalated");
+
+  t += 3 * 60000; // 6.5 min
+  st = (await s.call("GET", "/api/state", { token: responder })).json.incidents;
+  const a2 = st.find((i) => i.id === a.id);
+  assert.equal(a2.escalationLevel, 2);
+  assert.equal(a2.timeSensitivity, 5);
+  assert.equal(a2.score, 2.8);
+  assert.match(a2.log.at(-1).note, /escalated to CDRRMO/);
+  t += 20 * 60000;
+  assert.equal((await s.call("GET", "/api/state", { token: responder })).json.incidents.find((i) => i.id === a.id).escalationLevel, 2, "max tier reached");
+  await s.close();
+});
+
+test("drill mode: parents are not alarmed, metrics are captured, ending the drill closes tickets and stores a summary", async () => {
+  let t = Date.now();
+  const s = await boot({ now: () => t, autoTick: false });
+  const teacher = await s.login("teacher", "t1");
+  const principal = await s.login("principal");
+  const responder = await s.login("responder");
+  const parent = await s.login("parent", "Grade 3 - Sec A");
+  assert.equal((await s.call("PUT", "/api/modes/drill", { token: teacher, body: { active: true } })).status, 403);
+  await s.call("PUT", "/api/modes/drill", { token: principal, body: { active: true, label: "Quarterly earthquake drill" } });
+  t += 12000;
+  const { incident } = (await s.call("POST", "/api/incidents", { token: teacher, body: { ...report({ categoryId: "flood", subId: "structural_eq", populationId: "wholeschool" }), interactions: 4 } })).json;
+  assert.equal((await s.call("GET", "/api/state", { token: parent })).json.incidents.length, 0, "parents never see drill tickets");
+  assert.equal((await s.call("GET", "/api/state", { token: parent })).json.modes.drill.active, true, "…but are told a drill is on");
+  const seen = (await s.call("GET", "/api/state", { token: responder })).json.incidents[0];
+  assert.equal(seen.drill, true);
+  assert.equal(seen.metrics.toReportMs, 12000);
+  assert.equal(seen.metrics.interactions, 4);
+  t += 20000;
+  await s.call("POST", `/api/incidents/${incident.id}/ack`, { token: responder, body: {} });
+  t += 30000;
+  await s.call("POST", `/api/incidents/${incident.id}/onsite`, { token: responder });
+  await hc(s.call, teacher, incident.id, { present: 28 });
+  const end = await s.call("PUT", "/api/modes/drill", { token: principal, body: { active: false } });
+  assert.equal(end.json.summary.incidents, 1);
+  assert.equal(end.json.summary.avgToReportMs, 12000);
+  assert.equal(end.json.summary.avgToAckMs, 20000);
+  assert.equal(end.json.summary.avgToOnSiteMs, 50000);
+  assert.equal(end.json.summary.avgInteractions, 4);
+  const st = (await s.call("GET", "/api/state", { token: principal })).json;
+  assert.equal(st.drills.length, 1);
+  assert.equal(st.modes.drill.active, false);
+  assert.equal(st.incidents[0].status, "RESOLVED");
+  assert.equal(st.incidents[0].outcome, "drill");
+  // real incidents after the drill are normal again and visible to parents
+  await s.call("POST", "/api/incidents", { token: teacher, body: report() });
+  assert.equal((await s.call("GET", "/api/state", { token: parent })).json.incidents.length, 1);
+  await s.close();
+});
+
+test("responder ETA by transport mode, re-estimated when the approach route status changes", async () => {
+  let t = Date.now();
+  const s = await boot({ now: () => t, autoTick: false });
+  const teacher = await s.login("teacher", "t1");
+  const responder = await s.login("responder");
+  const principal = await s.login("principal");
+  const parent = await s.login("parent", "Grade 3 - Sec A");
+  const { incident } = (await s.call("POST", "/api/incidents", { token: teacher, body: report() })).json;
+  assert.equal((await s.call("POST", `/api/incidents/${incident.id}/ack`, { token: responder, body: { mode: "jet", distanceKm: 1 } })).status, 400);
+  assert.equal((await s.call("POST", `/api/incidents/${incident.id}/ack`, { token: responder, body: { mode: "walking" } })).status, 400);
+  const ack = await s.call("POST", `/api/incidents/${incident.id}/ack`, { token: responder, body: { mode: "walking", distanceKm: 1.5 } });
+  assert.equal(ack.status, 200);
+  assert.equal(ack.json.incident.eta.minutes, 20, "1.5 km at 4.5 km/h");
+  assert.equal((await s.call("GET", "/api/state", { token: parent })).json.incidents[0].eta.minutes, 20);
+
+  assert.equal((await s.call("PUT", "/api/modes/route", { token: teacher, body: { status: "flooded" } })).status, 403);
+  assert.equal((await s.call("PUT", "/api/modes/route", { token: principal, body: { status: "sunk" } })).status, 400);
+  t += 10 * 60000; // half way there
+  await s.call("PUT", "/api/modes/route", { token: principal, body: { status: "flooded", note: "Knee-deep at the bridge" } });
+  let inc = (await s.call("GET", "/api/state", { token: responder })).json.incidents[0];
+  assert.equal(inc.eta.routeStatus, "flooded");
+  assert.equal(inc.eta.minutes, 27, "1.5 km at 4.5×0.75 km/h");
+  assert.equal(Math.round((inc.eta.arriveBy - t) / 60000), 14, "about half of the new total remains");
+  await s.call("PUT", "/api/modes/route", { token: responder, body: { status: "blocked" } });
+  inc = (await s.call("GET", "/api/state", { token: responder })).json.incidents[0];
+  assert.equal(inc.eta.blocked, true);
+  assert.equal(inc.eta.arriveBy, null);
+  await s.call("PUT", "/api/modes/route", { token: responder, body: { status: "passable" } });
+  t += 5 * 60000;
+  await s.call("POST", `/api/incidents/${incident.id}/onsite`, { token: responder });
+  inc = (await s.call("GET", "/api/state", { token: principal })).json.incidents[0];
+  assert.equal(inc.metrics.toOnSiteMs, 15 * 60000, "end-to-end: report → on site");
+  assert.equal(inc.status, "ON_SITE");
+  await s.close();
+});
+
+test("registry (today's class count) can be edited by the teacher and the principal", async () => {
+  const s = await boot();
+  const teacher = await s.login("teacher", "t1");
+  const principal = await s.login("principal");
+  const r = await s.call("PUT", "/api/profile", { token: teacher, body: { name: "Ms. Reyes", section: "Grade 3 - Sec A", room: "Bldg A | Flr 2 | Rm 204", registry: 25 } });
+  assert.equal(r.json.user.registry, 25);
+  assert.equal((await s.call("PUT", "/api/profile", { token: teacher, body: { name: "Ms. Reyes", section: "Grade 3 - Sec A", room: "x", registry: 9999 } })).status, 400);
+  await s.call("PUT", "/api/roster/t2", { token: principal, body: { registry: 27 } });
+  assert.equal((await s.call("GET", "/api/state", { token: principal })).json.roster.find((x) => x.id === "t2").registry, 27);
+  const { incident } = (await s.call("POST", "/api/incidents", { token: teacher, body: report() })).json;
+  assert.equal((await hc(s.call, teacher, incident.id, { present: 25 })).json.incident.accountability.status, "verified");
+  await s.close();
+});

@@ -2,6 +2,7 @@ import { useState } from "react";
 import { SCHOOL } from "../shared/domain.js";
 import { useApp } from "./lib/store";
 import { AlertToasts, ConnectionBanner, Footer, Header, InstallBanner, TabBar } from "./components/Chrome";
+import { ModeBanners } from "./components/Rules";
 import LoginView from "./views/LoginView";
 import ReportView from "./views/ReportView";
 import ParentView from "./views/ParentView";
@@ -16,8 +17,8 @@ export default function App() {
 
   if (!ready) {
     return (
-      <div className="min-h-dvh flex items-center justify-center bg-slate-950">
-        <img src="/icons/logo-256.png" alt="Loading AGAP" width={96} height={96} className="rounded-3xl animate-pulse" />
+      <div className="min-h-dvh flex items-center justify-center bg-brand-900">
+        <img src="/icons/logo-256.png" alt="Loading" width={96} height={96} className="rounded-3xl animate-pulse" />
       </div>
     );
   }
@@ -26,14 +27,15 @@ export default function App() {
     return (<><LoginView /><AlertToasts /><InstallBanner /></>);
   }
 
-  const title = { teacher: "AGAP · Teacher", principal: "AGAP · Principal", parent: "AGAP · Parent/PTA", responder: "AGAP · Responder" }[user.role];
+  const title = { teacher: "Teacher", principal: "Principal", parent: "Parent/PTA", responder: "Responder" }[user.role];
   const subtitle = user.role === "principal" ? SCHOOL.name : user.role === "responder" ? "Barangay Sinalhan + CDRRMO" : user.subtitle;
   const hasTabs = user.role === "principal" || user.role === "responder";
 
   return (
-    <div className="min-h-dvh flex flex-col bg-slate-50 text-slate-900">
+    <div className="min-h-dvh flex flex-col bg-cream text-brand-900">
       <Header title={title} subtitle={subtitle} />
       <ConnectionBanner />
+      <ModeBanners />
       {user.role === "principal" && <TabBar tab={pTab} setTab={setPTab} tabs={PRINCIPAL_TABS} />}
       {user.role === "responder" && <TabBar tab={rTab} setTab={setRTab} tabs={RESPONDER_TABS} />}
       <main className={`flex-1 w-full ${hasTabs ? "pb-20 md:pb-4" : "pb-4"}`}>

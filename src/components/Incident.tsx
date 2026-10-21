@@ -6,9 +6,10 @@ import { BAND_STYLE, catTheme } from "../lib/theme";
 import { clockTime, elapsed } from "../lib/format";
 import type { Incident, Status } from "../lib/types";
 import { ConfirmModal, Modal } from "./Modal";
+import { AckModal, EtaLine, HeadcountPanel, RuleBadges } from "./Rules";
 
 export function ScoreReadout({ inc }: { inc: Incident }) {
-  const band = bandFor(inc.score, inc.status);
+  const band = bandFor(inc.score, inc.status, inc.overrideReasons);
   const st = BAND_STYLE[inc.status === "RESOLVED" ? "RESOLVED" : band];
   return (
     <div className="flex items-center gap-2">
@@ -28,7 +29,7 @@ export function ScoreReadout({ inc }: { inc: Incident }) {
 
 export function ResponseTracker({ status, category, compact }: { status: Status; category?: string; compact?: boolean }) {
   const idx = STATUS_ORDER.indexOf(status);
-  const color = status === "RESOLVED" ? "#16A34A" : category ? catTheme(category).pill : "#DC2626";
+  const color = status === "RESOLVED" ? "#16A34A" : category ? catTheme(category).pill : "#425B9A";
   const size = compact ? 20 : 24;
   return (
     <ol className="flex items-start w-full" aria-label="Response progress">
@@ -54,8 +55,8 @@ export function ResponseTracker({ status, category, compact }: { status: Status;
 
 export function WaitingLine({ inc }: { inc: Pick<Incident, "status" | "outcome"> }) {
   const map: Record<Status, { text: string; color: string; Icon: React.ElementType }> = {
-    SENT: { text: "Waiting for response from Barangay Sinalhan / CDRRMO…", color: "#B91C1C", Icon: Clock },
-    SEEN: { text: "Seen by school / responders — awaiting dispatch", color: "#C2410C", Icon: Eye },
+    SENT: { text: "Waiting for response from Barangay Sinalhan / CDRRMO…", color: "#A8304A", Icon: Clock },
+    SEEN: { text: "Seen by school / responders — awaiting dispatch", color: "#425B9A", Icon: Eye },
     EN_ROUTE: { text: "Responder acknowledged — en route", color: "#B45309", Icon: Navigation },
     ON_SITE: { text: "Responder is on site", color: "#0F766E", Icon: Siren },
     RESOLVED: { text: inc.outcome === "false_alarm" ? "Cancelled — false alarm" : inc.outcome === "cancelled" ? "Cancelled by the reporter" : "Marked resolved", color: "#15803D", Icon: CheckCircle2 },
@@ -69,7 +70,7 @@ export function WaitingLine({ inc }: { inc: Pick<Incident, "status" | "outcome">
 }
 
 const ACTION_LABEL: Record<string, string> = {
-  reported: "Reported", cancelled: "Cancelled", merged: "Corroborated", escalated: "Escalated", seen: "Seen", en_route: "En route",
+  reported: "Reported", cancelled: "Cancelled", headcount: "Headcount", override: "Override", hazard: "Hazard mode", route: "Route", drill_end: "Drill ended", merged: "Corroborated", escalated: "Escalated", seen: "Seen", en_route: "En route",
   on_site: "On site", resolved: "Resolved", false_alarm: "False alarm",
 };
 
@@ -80,6 +81,7 @@ export function IncidentCard({ inc, showActions, showLog }: { inc: Incident; sho
   const [confirm, setConfirm] = useState<"resolved" | "false_alarm" | null>(null);
   const [logOpen, setLogOpen] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [ackOpen, setAckOpen] = useState(false);
 
   // First time a principal/responder sees a "Sent" ticket, tell the server it was seen.
   useEffect(() => { if (showActions && inc.status === "SENT") markSeen(inc.id); }, [showActions, inc.id, inc.status, markSeen]);
@@ -87,6 +89,10 @@ export function IncidentCard({ inc, showActions, showLog }: { inc: Incident; sho
   async function run(action: "ack" | "onsite" | "resolve", outcome?: "resolved" | "false_alarm") {
     setBusy(true);
     try { await act(inc.id, action, outcome ? { outcome } : undefined); } finally { setBusy(false); }
+  }
+  async function ack(v: { mode?: string; distanceKm?: number }) {
+    setBusy(true);
+    try { await act(inc.id, "ack", v); } finally { setBusy(false); }
   }
 
   const btn = "flex-1 min-w-[9rem] min-h-11 rounded-xl px-3 text-sm font-bold disabled:opacity-60";
@@ -98,7 +104,8 @@ export function IncidentCard({ inc, showActions, showLog }: { inc: Incident; sho
         {inc.confirmedBy > 1 && (
           <span className="ml-auto text-xs font-bold px-2 py-0.5 rounded-full text-white" style={{ background: ct.pill }}>✔ Confirmed by {inc.confirmedBy} reports</span>
         )}
-        {closed && <span className={`${inc.confirmedBy > 1 ? "" : "ml-auto"} text-xs font-bold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700`}>{inc.outcome === "false_alarm" ? "FALSE ALARM" : inc.outcome === "cancelled" ? "CANCELLED" : "RESOLVED"}</span>}
+        {inc.drill && <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-accent-100 text-accent-700">🧪 DRILL</span>}
+        {closed && <span className={`${inc.confirmedBy > 1 || inc.drill ? "" : "ml-auto"} text-xs font-bold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700`}>{inc.outcome === "false_alarm" ? "FALSE ALARM" : inc.outcome === "cancelled" ? "CANCELLED" : inc.outcome === "drill" ? "DRILL ENDED" : "RESOLVED"}</span>}
       </div>
 
       <div className="p-3 space-y-2">
@@ -111,14 +118,17 @@ export function IncidentCard({ inc, showActions, showLog }: { inc: Incident; sho
         </div>
         <p className="text-sm text-slate-600">📍 {inc.room}</p>
         {inc.populationLabel && <p className="text-xs text-slate-500">Affected: {inc.populationLabel}{inc.linkedSection !== "ALL" ? ` · ${inc.linkedSection}` : " · whole school"}</p>}
+        <RuleBadges inc={{ ...inc, drill: false }} />
         <ResponseTracker status={inc.status} category={inc.category} compact />
         <WaitingLine inc={inc} />
+        <EtaLine inc={inc} />
         <p className="text-xs font-semibold" style={{ color: ct.color }}>↗ Recommended agency: {agencyFor(inc.category)}</p>
+        {showActions && <HeadcountPanel inc={inc} />}
 
         {showActions && !closed && (
           <div className="flex flex-wrap gap-2 pt-1">
             {(inc.status === "SENT" || inc.status === "SEEN") && (
-              <button disabled={busy} onClick={() => run("ack")} className={`${btn} text-white`} style={{ background: ct.gradient }}>🔴 Acknowledge &amp; En Route</button>
+              <button disabled={busy} onClick={() => setAckOpen(true)} className={`${btn} text-white`} style={{ background: ct.gradient }}>🚑 Acknowledge &amp; En Route</button>
             )}
             {inc.status !== "ON_SITE" && (
               <button disabled={busy} onClick={() => run("onsite")} className={`${btn} bg-teal-700 text-white`}>Mark On-Site</button>
@@ -144,6 +154,7 @@ export function IncidentCard({ inc, showActions, showLog }: { inc: Incident; sho
         )}
       </div>
 
+      {ackOpen && <AckModal inc={inc} onClose={() => setAckOpen(false)} onConfirm={ack} />}
       {confirm && (
         <ConfirmModal
           title={confirm === "resolved" ? "Mark as resolved?" : "Cancel as false alarm?"}
@@ -200,10 +211,10 @@ export function EscalationTable() {
 
 export function ContactDrrmModal({ onClose }: { onClose: () => void }) {
   const contacts = [
-    { label: "National Emergency Hotline", detail: "Police · Fire · Medical", number: "911", color: "#DC2626", verified: true },
-    { label: "CDRRMO Santa Rosa", detail: "City disaster response dispatch", number: "(049) 534-2291", color: "#0284C7", verified: false },
-    { label: "Philippine Red Cross", detail: "Medical and rescue assistance", number: "143", color: "#E11D48", verified: true },
-    { label: "Bureau of Fire Protection", detail: "Fire and rescue response", number: "160", color: "#EA580C", verified: false },
+    { label: "National Emergency Hotline", detail: "Police · Fire · Medical", number: "911", color: "#A8304A", verified: true },
+    { label: "CDRRMO Santa Rosa", detail: "City disaster response dispatch", number: "(049) 534-2291", color: "#2477AA", verified: false },
+    { label: "Philippine Red Cross", detail: "Medical and rescue assistance", number: "143", color: "#C2415C", verified: true },
+    { label: "Bureau of Fire Protection", detail: "Fire and rescue response", number: "160", color: "#425B9A", verified: false },
   ];
   return (
     <Modal title="Contact School DRRM Desk" onClose={onClose}>
@@ -226,7 +237,7 @@ export function ContactDrrmModal({ onClose }: { onClose: () => void }) {
           </a>
         ))}
       </div>
-      <p className="text-xs text-slate-400 mt-3 leading-relaxed">Tapping a number opens your phone's dialer. AGAP does not place calls automatically.</p>
+      <p className="text-xs text-slate-400 mt-3 leading-relaxed">Tapping a number opens your phone's dialer. This app does not place calls automatically.</p>
     </Modal>
   );
 }

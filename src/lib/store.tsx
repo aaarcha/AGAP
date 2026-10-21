@@ -2,8 +2,9 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import { api, ApiError, clearToken, getToken, setToken } from "./api";
 import { notificationsSupported, showSystemNotification } from "./pwa";
 import { STATUS_LABEL } from "../../shared/domain.js";
+import { ESCALATION_TIERS, HAZARD_KINDS } from "../../shared/domain.js";
 import type {
-  AlertItem, AppConfig, Incident, QueuedReport, ReportPayload, Role, RosterEntry, ServerState, Status, User,
+  AlertItem, AppConfig, DrillSummary, Incident, Modes, QueuedReport, ReportPayload, Role, RosterEntry, ServerState, Status, User,
 } from "./types";
 
 const QUEUE_KEY = "agap.queue";
@@ -11,7 +12,13 @@ const CACHE_KEY = "agap.cache";
 const SIM_KEY = "agap.simulateOffline";
 
 type SubmitResult = { status: "sent" | "queued"; merged?: boolean; confirmedBy?: number };
-export interface TeacherValues { name: string; section: string; room: string; status?: "active" | "inactive" }
+export interface TeacherValues { name: string; section: string; room: string; status?: "active" | "inactive"; registry?: number }
+export interface AckInput { mode?: string; distanceKm?: number }
+const DEFAULT_MODES: Modes = {
+  hazard: { active: false, kind: "flood", note: "", since: null, by: null },
+  drill: { active: false, label: "", startedAt: null },
+  route: { status: "passable" },
+};
 
 interface Ctx {
   user: User | null;
@@ -20,6 +27,9 @@ interface Ctx {
   incidents: Incident[];
   roster: RosterEntry[];
   sections: string[];
+  modes: Modes;
+  drills: DrillSummary[];
+  escalationMinutes: number[];
   now: number;
   online: boolean;
   simulateOffline: boolean;
@@ -36,7 +46,11 @@ interface Ctx {
   refresh: () => Promise<void>;
   submit: (payload: ReportPayload, label: string) => Promise<SubmitResult>;
   cancelQueued: (clientId: string) => void;
-  act: (id: string, action: "ack" | "onsite" | "resolve", body?: { outcome?: "resolved" | "false_alarm" }) => Promise<void>;
+  act: (id: string, action: "ack" | "onsite" | "resolve", body?: { outcome?: "resolved" | "false_alarm" } & AckInput) => Promise<void>;
+  recordHeadcount: (id: string, v: { present: number; expected?: number; section?: string }) => Promise<void>;
+  setHazard: (active: boolean, kind?: string, note?: string) => Promise<void>;
+  setDrill: (active: boolean, label?: string) => Promise<DrillSummary | null>;
+  setRoute: (status: string, note?: string) => Promise<void>;
   markSeen: (id: string) => void;
   cancelReport: (id: string) => Promise<void>;
   deleteIncident: (id: string) => Promise<void>;
@@ -71,6 +85,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [incidents, setIncidents] = useState<Incident[]>([]);
   const [roster, setRoster] = useState<RosterEntry[]>([]);
   const [sections, setSections] = useState<string[]>([]);
+  const [modes, setModes] = useState<Modes>(DEFAULT_MODES);
+  const [drills, setDrills] = useState<DrillSummary[]>([]);
+  const [escalationMinutes, setEscalationMinutes] = useState<number[]>([3, 6]);
   const [now, setNow] = useState(Date.now());
   const [online, setOnline] = useState(typeof navigator === "undefined" ? true : navigator.onLine);
   const [simulateOffline, setSim] = useState(() => sessionStorage.getItem(SIM_KEY) === "1");
@@ -83,7 +100,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   const offset = useRef(0);
   const reqSeq = useRef(0);
-  const prev = useRef<Map<string, { status: Status; confirmedBy: number }> | null>(null);
+  const prev = useRef<Map<string, { status: Status; confirmedBy: number; level: number; acc: string; critical: number }> | null>(null);
+  const prevModes = useRef<Modes | null>(null);
   const ownActs = useRef<Map<string, number>>(new Map());
   const seenSent = useRef<Set<string>>(new Set());
   const flushing = useRef(false);
@@ -125,6 +143,12 @@ export function AppProvider({ children }: { children: ReactNode }) {
           }
           continue;
         }
+        if (role !== "parent" && i.escalationLevel > p.level && i.status !== "RESOLVED") {
+          pushAlert({ kind: "new", category: i.category, title: `⏫ Escalated to ${ESCALATION_TIERS[i.escalationLevel]}`, body: `${i.subLabel} · ${i.room} — not acknowledged in time` }, true);
+        }
+        if (role !== "parent" && i.accountability.status === "mismatch" && p.acc !== "mismatch" && i.status !== "RESOLVED") {
+          pushAlert({ kind: "new", category: i.category, title: "⚠ Headcount mismatch — Critical", body: `${i.subLabel} · ${i.room}: pupils not fully accounted for` }, true);
+        }
         if (i.confirmedBy > p.confirmedBy && (role === "principal" || role === "responder") && !mine) {
           pushAlert({ kind: "update", category: i.category, title: `Confirmed by ${i.confirmedBy} reports`, body: `${i.subLabel} · ${i.room}` });
         }
@@ -146,7 +170,24 @@ export function AppProvider({ children }: { children: ReactNode }) {
         }
       }
     }
-    prev.current = new Map(s.incidents.map((i) => [i.id, { status: i.status, confirmedBy: i.confirmedBy }]));
+    prev.current = new Map(s.incidents.map((i) => [i.id, { status: i.status, confirmedBy: i.confirmedBy, level: i.escalationLevel, acc: i.accountability.status, critical: i.overrideReasons.length }]));
+
+    // Mode changes (hazard / drill / approach route) are announced to everyone who can see them.
+    const pm = prevModes.current;
+    const m = s.modes;
+    if (pm) {
+      if (m.hazard.active !== pm.hazard.active) {
+        const kind = HAZARD_KINDS.find((k: { id: string; label: string }) => k.id === m.hazard.kind)?.label ?? "Hazard";
+        pushAlert({ kind: m.hazard.active ? "new" : "clear", title: m.hazard.active ? `🌧 ${kind} — Hazard Mode ON` : "🟢 Hazard Mode OFF", body: m.hazard.active ? (role === "parent" ? "Stay safe. Avoid flooded roads." : "Location Risk raised for ground-floor and low-lying zones.") : "Normal scoring restored." }, true);
+      }
+      if (m.drill.active !== pm.drill.active) {
+        pushAlert({ kind: "info", title: m.drill.active ? "🧪 Drill started" : "Drill ended", body: m.drill.active ? (role === "parent" ? "A school safety drill is in progress. This is only a drill." : `${m.drill.label} — reports are recorded as drill data.`) : "Drill metrics were saved." });
+      }
+      if (role !== "parent" && m.route.status !== pm.route.status) {
+        pushAlert({ kind: "info", title: `Approach route: ${m.route.status}`, body: "Responder ETAs were re-estimated." });
+      }
+    }
+    prevModes.current = m;
   }
 
   function applyState(s: ServerState) {
@@ -156,6 +197,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
     setIncidents(s.incidents);
     setRoster(s.roster);
     setSections(s.sections);
+    setModes(s.modes ?? DEFAULT_MODES);
+    setDrills(s.drills ?? []);
+    if (s.rules?.escalationMinutes) setEscalationMinutes(s.rules.escalationMinutes);
     setNow(s.serverTime);
     try { localStorage.setItem(CACHE_KEY, JSON.stringify(s)); } catch { /* storage full */ }
   }
@@ -163,6 +207,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   // ---- session ------------------------------------------------------------
   const resetLocal = useCallback(() => {
     prev.current = null;
+    prevModes.current = null;
     seenSent.current.clear();
     setIncidents([]); setRoster([]); setSections([]); setLive(false);
     localStorage.removeItem(CACHE_KEY);
@@ -205,6 +250,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
           const cached = JSON.parse(localStorage.getItem(CACHE_KEY) || "null") as ServerState | null;
           if (cached?.me) {
             setUser(cached.me); setIncidents(cached.incidents); setRoster(cached.roster); setSections(cached.sections);
+            if (cached.modes) setModes(cached.modes);
           }
         } catch { /* ignore bad cache */ }
         await refresh();
@@ -305,7 +351,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   const cancelQueued = useCallback((clientId: string) => writeQueue(readQueue().filter((q) => q.clientId !== clientId)), [writeQueue]);
 
-  const act = useCallback(async (id: string, action: "ack" | "onsite" | "resolve", body?: { outcome?: "resolved" | "false_alarm" }) => {
+  const act = useCallback(async (id: string, action: "ack" | "onsite" | "resolve", body?: { outcome?: "resolved" | "false_alarm" } & AckInput) => {
     ownActs.current.set(id, Date.now());
     try {
       await api("POST", `/api/incidents/${id}/${action}`, body ?? {});
@@ -320,6 +366,19 @@ export function AppProvider({ children }: { children: ReactNode }) {
     }
     await refresh();
   }, [pushAlert, refresh]);
+
+  // Throws on validation errors so the form can show the server's message.
+  const recordHeadcount = useCallback(async (id: string, v: { present: number; expected?: number; section?: string }) => {
+    await api("POST", `/api/incidents/${id}/headcount`, v);
+    await refresh();
+  }, [refresh]);
+  const setHazard = useCallback(async (active: boolean, kind?: string, note?: string) => { await api("PUT", "/api/modes/hazard", { active, kind, note }); await refresh(); }, [refresh]);
+  const setDrill = useCallback(async (active: boolean, label?: string) => {
+    const r = await api<{ summary: DrillSummary | null }>("PUT", "/api/modes/drill", { active, label });
+    await refresh();
+    return r.summary;
+  }, [refresh]);
+  const setRoute = useCallback(async (status: string, note?: string) => { await api("PUT", "/api/modes/route", { status, note }); await refresh(); }, [refresh]);
 
   const markSeen = useCallback((id: string) => {
     if (seenSent.current.has(id) || !connectedRef.current) return;
@@ -370,9 +429,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const queue = useMemo(() => queueAll.filter((q) => q.userId === user?.id), [queueAll, user?.id]);
 
   const value: Ctx = {
-    user, ready, config, incidents, roster, sections, now, online, simulateOffline, setSimulateOffline, connected, live,
+    user, ready, config, incidents, roster, sections, modes, drills, escalationMinutes, now, online, simulateOffline, setSimulateOffline, connected, live,
     queue, alerts, dismissAlert, notifPermission, enableNotifications, login, logout, refresh, submit, cancelQueued,
-    act, markSeen, cancelReport, deleteIncident, clearHistory, saveProfile, addTeacher, editTeacher, deleteTeacher, resetDemo,
+    act, recordHeadcount, setHazard, setDrill, setRoute, markSeen, cancelReport, deleteIncident, clearHistory, saveProfile, addTeacher, editTeacher, deleteTeacher, resetDemo,
   };
   return <AppCtx.Provider value={value}>{children}</AppCtx.Provider>;
 }

@@ -25,6 +25,7 @@ const app = createApp({
   allowReset: env.ALLOW_DEMO_RESET !== "0",
   seedDemoIncident: env.SEED_DEMO_INCIDENT === "1",
   historyDays: Number(env.HISTORY_DAYS) || 90,
+  escalationMinutes: env.ESCALATION_MINUTES ? env.ESCALATION_MINUTES.split(",").map(Number).filter((n) => n > 0) : undefined,
   log: (...a) => console.error("[agap]", ...a),
 });
 

@@ -1,4 +1,4 @@
-// AGAP service worker. __VERSION__ and __PRECACHE__ are filled in by vite.config.ts at build time.
+// Service worker. __VERSION__ and __PRECACHE__ are filled in by vite.config.ts at build time.
 // Strategy: app shell is cached so the installed app opens offline; /api/* is NEVER cached
 // (emergency data must always come live from the server).
 const VERSION = "__VERSION__";
