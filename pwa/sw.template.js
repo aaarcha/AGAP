@@ -2,7 +2,7 @@
 // Strategy: app shell is cached so the installed app opens offline; /api/* is NEVER cached
 // (emergency data must always come live from the server).
 const VERSION = "__VERSION__";
-const CACHE = `agap-shell-${VERSION}`;
+const CACHE = `aspire-shell-${VERSION}`;
 const PRECACHE = __PRECACHE__;
 
 self.addEventListener("install", (event) => {
@@ -14,8 +14,7 @@ self.addEventListener("install", (event) => {
 self.addEventListener("activate", (event) => {
   event.waitUntil(
     caches
-      .keys()
-      .then((keys) => Promise.all(keys.filter((k) => k.startsWith("agap-shell-") && k !== CACHE).map((k) => caches.delete(k))))
+      .keys()        .then((keys) => Promise.all(keys.filter((k) => k.startsWith("aspire-shell-") && k !== CACHE).map((k) => caches.delete(k))))
       .then(() => self.clients.claim()),
   );
 });

@@ -1,3 +1,18 @@
+import type { LocationSetBy } from "./types";
+
+// How the final location of a ticket was established, in plain words.
+export const LOCATION_SET_BY_LABEL: Record<LocationSetBy, string> = {
+  saved_room: "Saved room",
+  gps_detected: "Detected by GPS",
+  selected_room: "Selected by reporter",
+  selected_area: "Selected by reporter",
+  unverified: "Not verified",
+};
+
+export function locationSetByLabel(inc: { locationSetBy?: LocationSetBy }): string {
+  return LOCATION_SET_BY_LABEL[inc.locationSetBy ?? "saved_room"];
+}
+
 export function elapsed(ts: number, now: number): string {
   const m = Math.max(0, Math.floor((now - ts) / 60000));
   if (m < 1) return "just now";
@@ -42,6 +57,13 @@ export function duration(from: number, to: number): string {
   if (m < 60) return `${m} min`;
   const h = Math.floor(m / 60);
   return `${h} hr ${m % 60} min`;
+}
+
+// Plain words for the two critical-override reasons (no scoring jargon).
+export function plainOverride(reason: string): string {
+  if (reason === "SEVERITY_5") return "high-hazard emergency type";
+  if (reason === "HEADCOUNT_MISMATCH") return "headcount mismatch";
+  return reason.replace(/_/g, " ").toLowerCase();
 }
 
 // "45 s", "3 min 20 s", "1 h 05 min" – for response-time metrics.

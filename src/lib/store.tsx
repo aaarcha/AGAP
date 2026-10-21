@@ -7,13 +7,14 @@ import type {
   AlertItem, AppConfig, DrillSummary, Incident, LoginResult, Modes, QueuedReport, ReportPayload, RosterEntry, ServerState, Status, User,
 } from "./types";
 
-const QUEUE_KEY = "agap.queue";
-const CACHE_KEY = "agap.cache";
-const SIM_KEY = "agap.simulateOffline";
+const QUEUE_KEY = "aspire.queue";
+const CACHE_KEY = "aspire.cache";
 
 type SubmitResult = { status: "sent" | "queued"; merged?: boolean; confirmedBy?: number };
 export interface TeacherValues { name: string; section: string; room: string; status?: "active" | "inactive"; registry?: number }
 export interface AckInput { mode?: string; distanceKm?: number }
+
+export type LocationSetBy = "saved_room" | "gps_detected" | "selected_room" | "selected_area" | "unverified";
 const DEFAULT_MODES: Modes = {
   hazard: { active: false, kind: "flood", note: "", since: null, by: null },
   drill: { active: false, label: "", startedAt: null },
@@ -32,8 +33,6 @@ interface Ctx {
   escalationMinutes: number[];
   now: number;
   online: boolean;
-  simulateOffline: boolean;
-  setSimulateOffline: (v: boolean) => void;
   connected: boolean;
   live: boolean;
   queue: QueuedReport[];
@@ -44,7 +43,8 @@ interface Ctx {
   /** true while the signed-in account must set a new password (first sign-in / yearly rollover) */
   mustChange: boolean;
   login: (email: string, password: string, code?: string) => Promise<boolean>;
-  changePassword: (password: string) => Promise<void>;
+  changePassword: (password: string, currentPassword?: string) => Promise<void>;
+  changeSavedRoom: (roomId: string) => Promise<void>;
   logout: (message?: string) => void;
   refresh: () => Promise<void>;
   submit: (payload: ReportPayload, label: string) => Promise<SubmitResult>;
@@ -62,7 +62,6 @@ interface Ctx {
   addTeacher: (v: TeacherValues) => Promise<void>;
   editTeacher: (id: string, v: TeacherValues) => Promise<void>;
   deleteTeacher: (id: string) => Promise<void>;
-  resetDemo: () => Promise<void>;
 }
 
 const AppCtx = createContext<Ctx | null>(null);
@@ -93,7 +92,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [escalationMinutes, setEscalationMinutes] = useState<number[]>([3, 6]);
   const [now, setNow] = useState(Date.now());
   const [online, setOnline] = useState(typeof navigator === "undefined" ? true : navigator.onLine);
-  const [simulateOffline, setSim] = useState(() => sessionStorage.getItem(SIM_KEY) === "1");
   const [live, setLive] = useState(false);
   const [queueAll, setQueueAll] = useState<QueuedReport[]>(readQueue);
   const [alerts, setAlerts] = useState<AlertItem[]>([]);
@@ -112,7 +110,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const userRef = useRef<User | null>(null);
   userRef.current = user;
 
-  const connected = online && !simulateOffline;
+  const connected = online;
   const connectedRef = useRef(connected);
   connectedRef.current = connected;
 
@@ -182,7 +180,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     if (pm) {
       if (m.hazard.active !== pm.hazard.active) {
         const kind = HAZARD_KINDS.find((k: { id: string; label: string }) => k.id === m.hazard.kind)?.label ?? "Hazard";
-        pushAlert({ kind: m.hazard.active ? "new" : "clear", title: m.hazard.active ? `🌧 ${kind} — Hazard Mode ON` : "🟢 Hazard Mode OFF", body: m.hazard.active ? (role === "parent" ? "Stay safe. Avoid flooded roads." : "Location Risk raised for ground-floor and low-lying zones.") : "Normal scoring restored." }, true);
+        pushAlert({ kind: m.hazard.active ? "new" : "clear", title: m.hazard.active ? `🌧 ${kind} — Hazard Mode ON` : "🟢 Hazard Mode OFF", body: m.hazard.active ? (role === "parent" ? "Stay safe. Avoid flooded roads." : "Ground-floor and low-lying areas are now prioritised.") : "Back to normal priority." }, true);
       }
       if (m.drill.active !== pm.drill.active) {
         pushAlert({ kind: "info", title: m.drill.active ? "🧪 Drill started" : "Drill ended", body: m.drill.active ? (role === "parent" ? "A school safety drill is in progress. This is only a drill." : `${m.drill.label} — reports are recorded as drill data.`) : "Drill metrics were saved." });
@@ -257,8 +255,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
   }, [refresh, resetLocal]);
 
   // Single password field: no confirmation step, just the new password.
-  const changePassword = useCallback(async (password: string) => {
-    await api("POST", "/api/password", { password });
+  const changePassword = useCallback(async (password: string, currentPassword?: string) => {
+    await api("POST", "/api/password", { password, ...(currentPassword ? { currentPassword } : {}) });
     setMustChange(false);
     await refresh();
   }, [refresh]);
@@ -343,7 +341,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   // ---- live updates: SSE + polling fallback -----------------------------------
   const refreshTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   useEffect(() => {
-    if (!user || simulateOffline) { setLive(false); return; }
+    if (!user) { setLive(false); return; }
     const token = getToken();
     if (!token) return;
     const soon = () => { clearTimeout(refreshTimer.current); refreshTimer.current = setTimeout(() => void refresh(), 80); };
@@ -359,14 +357,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
       document.removeEventListener("visibilitychange", onVisible);
       setLive(false);
     };
-  }, [user?.id, simulateOffline]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [user?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ---- actions -------------------------------------------------------------
-  const setSimulateOffline = useCallback((v: boolean) => {
-    setSim(v);
-    sessionStorage.setItem(SIM_KEY, v ? "1" : "0");
-  }, []);
-
   const submit = useCallback(async (payload: ReportPayload, label: string): Promise<SubmitResult> => {
     const me = userRef.current;
     if (!me) throw new Error("Not signed in.");
@@ -452,9 +445,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
     await refresh();
   }, [refresh]);
   const addTeacher = useCallback(async (v: TeacherValues) => { await api("POST", "/api/roster", v); await refresh(); }, [refresh]);
+  const changeSavedRoom = useCallback(async (roomId: string) => { await api("PUT", "/api/profile/room", { roomId }); await refresh(); }, [refresh]);
   const editTeacher = useCallback(async (id: string, v: TeacherValues) => { await api("PUT", `/api/roster/${id}`, v); await refresh(); }, [refresh]);
   const deleteTeacher = useCallback(async (id: string) => { await api("DELETE", `/api/roster/${id}`); await refresh(); }, [refresh]);
-  const resetDemo = useCallback(async () => { await api("POST", "/api/admin/reset"); await refresh(); }, [refresh]);
 
   const enableNotifications = useCallback(async () => {
     if (!notificationsSupported()) return;
@@ -464,9 +457,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const queue = useMemo(() => queueAll.filter((q) => q.userId === user?.id), [queueAll, user?.id]);
 
   const value: Ctx = {
-    user, ready, config, incidents, roster, sections, modes, drills, escalationMinutes, now, online, simulateOffline, setSimulateOffline, connected, live,
+    user, ready, config, incidents, roster, sections, modes, drills, escalationMinutes, now, online, connected, live,
     queue, alerts, dismissAlert, notifPermission, enableNotifications, mustChange, login, changePassword, logout, refresh, submit, cancelQueued,
-    act, recordHeadcount, setHazard, setDrill, setRoute, markSeen, cancelReport, deleteIncident, clearHistory, saveProfile, addTeacher, editTeacher, deleteTeacher, resetDemo,
+    act, recordHeadcount, setHazard, setDrill, setRoute, markSeen, cancelReport,  deleteIncident, clearHistory, saveProfile, addTeacher, editTeacher, deleteTeacher, changeSavedRoom,
   };
   return <AppCtx.Provider value={value}>{children}</AppCtx.Provider>;
 }

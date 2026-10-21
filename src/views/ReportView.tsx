@@ -1,42 +1,45 @@
-import { useMemo, useRef, useState } from "react";
-import { Flame, MapPin, Search, Settings, ShieldAlert, Siren, Waves, Wifi, WifiOff, X } from "lucide-react";
-import { CATEGORIES, NON_CLASSROOM_AREAS, OTHER, POPULATIONS, PRINCIPAL_ROOM, searchCatalog } from "../../shared/domain.js";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ChevronDown, Flame, MapPin, RefreshCw, Search, Settings, ShieldAlert, Siren, Waves, WifiOff, X } from "lucide-react";
+import { CATEGORIES, OTHER, POPULATIONS, PRINCIPAL_ROOM, searchCatalog } from "../../shared/domain.js";
+import { featureLabel, gpsToMapPoint, nearestCampusFeatureForLocation, roomById } from "../../shared/campus.js";
 import { useApp } from "../lib/store";
 import { catTheme } from "../lib/theme";
-import { distanceInMeters, parseGps } from "../lib/format";
+import { locationSetByLabel } from "../lib/format";
 import type { Incident, ReportPayload } from "../lib/types";
 import { ConfirmModal, Modal } from "../components/Modal";
-import { ResponseTracker, WaitingLine } from "../components/Incident";
-import { EtaLine, HeadcountPanel, RuleBadges } from "../components/Rules";
-import { SCHOOL_MAP_POINTS, SchoolMap, areaForMapPoint, type MapPoint } from "../components/SchoolMap";
+import { WaitingLine } from "../components/Incident";
+import { HeadcountPanel, RuleBadges } from "../components/Rules";
+import { CampusPicker, type DetectedPlace, type PickedPlace } from "../components/CampusPicker";
 
 const CAT_ICON: Record<string, React.ElementType> = { fire: Flame, medical: Siren, flood: Waves, security: ShieldAlert };
-const CLASSROOM_RADIUS_METERS = 75;
-const GPS_PREF = "agap.useLiveGps";
-const OUTSIDE_POINT: MapPoint = { x: 91, y: 12 };
+// Above this accuracy radius the fix is too coarse to name a place.
+const POOR_ACCURACY_METERS = 100;
+// The fix has to sit right on the classroom before that classroom is named (~11 m).
+const ROOM_MATCH_UNITS = 3;
 
 type Notice = { kind: "sent" | "merged" | "queued" | "error"; text: string } | null;
 type Sel = { catId: string; catLabel: string; subId: string; subLabel: string } | null;
-type Loc = Pick<ReportPayload, "locationKind" | "areaId">;
+type Loc = Pick<ReportPayload, "locationKind" | "areaId" | "roomId" | "locationSetBy">;
 
 export default function ReportView() {
-  const { user, incidents, sections, connected, simulateOffline, setSimulateOffline, submit, queue, cancelQueued, cancelReport } = useApp();
+  const { user, incidents, sections, submit, queue, cancelQueued, cancelReport, changeSavedRoom } = useApp();
   const isTeacher = user!.role === "teacher";
   const room = isTeacher ? user!.room ?? "Unassigned room" : PRINCIPAL_ROOM;
-  const gps = isTeacher ? user!.gps ?? "14.312, 121.115" : "14.312, 121.115";
 
   const [step, setStep] = useState<1 | 2 | 3>(1);
   const [sel, setSel] = useState<Sel>(null);
   const [popId, setPopId] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [section, setSection] = useState("");
-  const [armed, setArmed] = useState(false);
-  const [useLiveGps, setUseLiveGps] = useState(() => localStorage.getItem(GPS_PREF) === "1");
-  const [checking, setChecking] = useState(false);
-  const [modal, setModal] = useState<"profile" | "mismatch" | null>(null);
-  const [mismatchReason, setMismatchReason] = useState("");
+  const [moreOpen, setMoreOpen] = useState(false);
+  const [modal, setModal] = useState<"profile" | null>(null);
+  const [pickerOpen, setPickerOpen] = useState(false);
   const [confirmCancel, setConfirmCancel] = useState(false);
   const [notice, setNotice] = useState<Notice>(null);
+  // Where the report is filed from: the reporter's own pick, or the GPS-detected place.
+  const [picked, setPicked] = useState<PickedPlace | null>(null);
+  const [detected, setDetected] = useState<DetectedPlace | null>(null);
+  const [gps, setGps] = useState<"idle" | "checking" | "done" | "failed">("idle");
   const taps = useRef(0); // passive interface-interaction counter (used for drill usability metrics)
   const noticeTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
@@ -44,15 +47,144 @@ export default function ReportView() {
   const needSection = !isTeacher && pop && pop.id !== "wholeschool";
   const match = useMemo(() => searchCatalog(query), [query]);
   const hasQuery = query.trim().length >= 2;
-const last: Incident | undefined = incidents.find((i) => i.reporterId === user!.id);
-  const classAlerts = isTeacher ? incidents.filter((i) => i.status !== "RESOLVED" && i.id !== last?.id) : [];
+  const last: Incident | undefined = incidents.find((i) => i.reporterId === user!.id);
+
+  // Group-scope alert that still needs this teacher's section counted.
+  const headcountTask = isTeacher
+    ? incidents.find((i) =>
+        i.status !== "RESOLVED" &&
+        (i.linkedSection === "ALL" || i.linkedSection === user!.section) &&
+        i.accountability.status !== "not_required" &&
+        !i.headcounts.some((h) => h.section === user!.section))
+    : undefined;
 
   function flash(n: Notice) {
     setNotice(n);
     clearTimeout(noticeTimer.current);
     if (n && n.kind !== "queued") noticeTimer.current = setTimeout(() => setNotice(null), 9000);
   }
-  function reset() { setStep(1); setSel(null); setPopId(null); setQuery(""); setSection(""); }
+  function reset() {
+    setStep(1); setSel(null); setPopId(null); setQuery(""); setSection(""); setMoreOpen(false);
+    setPicked(null); setDetected(null); setGps("idle");
+  }
+
+  /**
+   * The automatic location check. It only ever adds detail: a denial, a timeout
+   * or a coarse fix leaves the saved room in place and never holds up the alert.
+   */
+  const checkLocation = useCallback(() => {
+    if (typeof navigator === "undefined" || !navigator.geolocation) { setGps("failed"); return; }
+    setGps("checking");
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        const point = gpsToMapPoint(pos.coords.latitude, pos.coords.longitude);
+        if (!point || pos.coords.accuracy > POOR_ACCURACY_METERS) { setGps("failed"); return; }
+        const feature = nearestCampusFeatureForLocation(point);
+        if (!feature) { setDetected({ kind: "offsite", label: "GPS position (on map)", point }); setGps("done"); return; }
+        if ("buildingId" in feature) {
+          const d = Math.hypot(point.x - feature.point.x, point.y - feature.point.y);
+          setDetected(d <= ROOM_MATCH_UNITS
+            ? { kind: "room", label: featureLabel(feature), point, roomId: feature.id, buildingId: feature.buildingId }
+            : { kind: "building", label: feature.buildingLabel, point, buildingId: feature.buildingId });
+        } else {
+          setDetected({ kind: "area", label: feature.label, point, areaId: feature.id });
+        }
+        setGps("done");
+      },
+      () => { setGps("failed"); },
+      { enableHighAccuracy: true, timeout: 7000, maximumAge: 30000 },
+    );
+  }, []);
+
+  // Tap 3 checks the location; the alert itself is never held up by the check.
+  useEffect(() => { if (step === 3) checkLocation(); }, [step, checkLocation]);
+
+  /** The final location of the report and how it was set. */
+  const location = useMemo(() => {
+    const saved: Loc = { locationKind: "saved", locationSetBy: "saved_room" };
+    if (picked?.kind === "room") {
+      const r = roomById(picked.roomId);
+      return {
+        headline: r?.legacy ?? picked.label,
+        caption: "Selected by you for this report.",
+        how: "Selected by reporter",
+        loc: { locationKind: "room", roomId: picked.roomId, locationSetBy: "selected_room" } as Loc,
+      };
+    }
+    if (picked?.kind === "area") {
+      return {
+        headline: picked.label,
+        caption: "Selected by you · common areas carry their own Location Risk.",
+        how: "Selected by reporter",
+        loc: { locationKind: "area", areaId: picked.areaId, locationSetBy: "selected_area" } as Loc,
+      };
+    }
+    if (picked?.kind === "unverified") {
+      return {
+        headline: "Location not verified",
+        caption: `Your saved room (${room}) is kept on the ticket for reference.`,
+        how: "Not verified",
+        loc: { locationKind: "unverified", locationSetBy: "unverified" } as Loc,
+      };
+    }
+    if (picked?.kind === "saved") {
+      return { headline: `Saved room: ${room}`, caption: "Your default classroom.", how: "Saved room", loc: saved };
+    }
+    if (detected?.kind === "room" && detected.roomId) {
+      return {
+        headline: `Detected near: ${detected.label}`,
+        caption: "Detected by GPS — this room will be on the ticket.",
+        how: "Detected by GPS",
+        loc: { locationKind: "room", roomId: detected.roomId, locationSetBy: "gps_detected" } as Loc,
+      };
+    }
+    if (detected?.kind === "area") {
+      return {
+        headline: `Detected near: ${detected.label}`,
+        caption: `Detected by GPS — your saved room (${room}) will be filed unless you change it.`,
+        how: "Saved room",
+        loc: saved,
+      };
+    }
+    if (detected?.kind === "building") {
+      return {
+        headline: `Detected near: ${detected.label}`,
+        caption: `Detected by GPS — your saved room (${room}) will be filed unless you change it.`,
+        how: "Saved room",
+        loc: saved,
+      };
+    }
+    if (detected?.kind === "offsite") {
+      return {
+        headline: "Detected: GPS position (on map)",
+        caption: `No known campus place nearby — your saved room (${room}) will be filed.`,
+        how: "Saved room",
+        loc: saved,
+      };
+    }
+    if (gps === "checking") {
+      return {
+        headline: "Checking your location…",
+        caption: "The alert can be sent while this runs — nothing is held up.",
+        how: "Saved room",
+        loc: saved,
+      };
+    }
+    if (gps === "failed") {
+      return {
+        headline: "Location not verified",
+        caption: `GPS was unavailable or too coarse — your saved room (${room}) will be filed.`,
+        how: "Saved room",
+        loc: saved,
+      };
+    }
+    return {
+      headline: `Saved room: ${room}`,
+      caption: "Your default classroom — it will be filed unless you change it.",
+      how: "Saved room",
+      loc: saved,
+    };
+  }, [picked, detected, gps, room]);
 
   function pick(catId: string, catLabel: string, subId: string, subLabel: string) {
     setSel({ catId, catLabel, subId, subLabel }); setStep(2);
@@ -73,11 +205,11 @@ const last: Incident | undefined = incidents.find((i) => i.reporterId === user!.
     try {
       const r = await submit(payload, label);
       if (r.status === "queued") {
-        flash({ kind: "queued", text: "Not sent. No connection. Use the school's emergency steps now (alarm, PA system, runner, landline). Your report is saved on this device and will send automatically when you're back online." });
+        flash({ kind: "queued", text: "Not sent — no connection. Use the school's emergency steps now (alarm, PA system, runner, landline). Saved on this device and sent automatically when you're back online." });
       } else if (r.merged) {
-        flash({ kind: "merged", text: `This matches an open ticket for the same place. Your report was added as corroboration (now confirmed by ${r.confirmedBy} reports) — responders were not alerted twice.` });
+        flash({ kind: "merged", text: `This matches an open ticket for the same place. Added as corroboration (now ${r.confirmedBy} reports) — responders were not alerted twice.` });
       } else {
-        flash({ kind: "sent", text: "🔴 Alert broadcast to Principal, Parent/PTA and Barangay Sinalhan / CDRRMO. Tracking is shown below — use “Cancel this alert” there if it was a mistake." });
+        flash({ kind: "sent", text: "🔴 Alert broadcast to Principal, Parent/PTA and Barangay Sinalhan / CDRRMO. Tracking is shown below — cancel it there if this was a mistake." });
       }
       taps.current = 0;
       reset();
@@ -89,93 +221,64 @@ const last: Incident | undefined = incidents.find((i) => i.reporterId === user!.
   function proceed(loc: Loc) {
     if (!sel || !pop) return;
     const payload: ReportPayload = {
-      categoryId: sel.catId, subId: sel.subId, populationId: pop.id, ...loc,
+      categoryId: sel.catId, subId: sel.subId, populationId: pop.id,
+      locationKind: loc.locationKind,
+      ...(loc.areaId ? { areaId: loc.areaId } : {}),
+      ...(loc.roomId ? { roomId: loc.roomId } : {}),
+      ...(loc.locationSetBy ? { locationSetBy: loc.locationSetBy } : {}),
       ...(needSection ? { section } : {}),
       interactions: taps.current,
     };
-    const label = `${sel.catLabel} — ${sel.subLabel}`;
-    void sendNow(payload, label); // sends at once (or queues if offline). Mistakes: cancel from "Your last report".
+    void sendNow(payload, `${sel.catLabel} — ${sel.subLabel}`); // sends at once (or queues if offline).
   }
 
+  // Tap 3 sends straight away: the location check never blocks the alert.
   function beginSubmit() {
     setNotice(null);
     if (needSection && !section) { flash({ kind: "error", text: "Choose which section is affected before sending." }); return; }
-    if (armed) {
-      setMismatchReason("Simulated mismatch: your device location doesn't match your saved room.");
-      setModal("mismatch");
-      return;
-    }
-    if (!useLiveGps) { proceed({ locationKind: "saved" }); return; }
-
-    if (!navigator.geolocation) {
-      setMismatchReason("This device doesn't provide location access. Confirm where you are.");
-      setModal("mismatch");
-      return;
-    }
-    setChecking(true);
-    navigator.geolocation.getCurrentPosition(
-      (p) => {
-        setChecking(false);
-        const saved = parseGps(gps);
-        const d = saved ? distanceInMeters(saved, p.coords) : Infinity;
-        if (d <= CLASSROOM_RADIUS_METERS) proceed({ locationKind: "saved" });
-        else {
-          setMismatchReason(`Your GPS doesn't match your saved room (about ${Math.round(d)} m away). Please confirm where you actually are.`);
-          setModal("mismatch");
-        }
-      },
-      (err) => {
-        setChecking(false);
-        setMismatchReason(err.code === err.PERMISSION_DENIED
-          ? "Location permission was denied. Please confirm where you actually are."
-          : "Your location couldn't be read. Please confirm where you actually are.");
-        setModal("mismatch");
-      },
-      { enableHighAccuracy: true, timeout: 7000, maximumAge: 30000 },
-    );
+    proceed(location.loc);
   }
 
   const ct = sel ? catTheme(sel.catId) : catTheme("other");
 
   return (
-    <div className="mx-auto w-full max-w-md px-3 py-3 space-y-3" onClickCapture={() => { taps.current += 1; }}>
-      {/* Location header card */}
-      <section className="bg-white rounded-2xl border border-slate-200 p-3">
-        <div className="flex items-center gap-3">
-          <MapPin size={20} className="text-brand-600 shrink-0" />
-          <div className="flex-1 min-w-0">
-            <p className="text-sm font-bold text-slate-800 truncate">📍 {room}</p>
-            <p className="text-xs font-mono text-emerald-700">GPS Locked: {gps}</p>
+    <div className="mx-auto w-full max-w-md space-y-3 px-3 py-3" onClickCapture={() => { taps.current += 1; }}>
+      {/* Location card — always visible, never blocks sending */}
+      <section className="rounded-2xl border border-slate-200 bg-white p-3" aria-label="Location of this report">
+        <div className="flex items-start gap-3">
+          <MapPin size={20} className="mt-0.5 shrink-0 text-brand-600" />
+          <div className="min-w-0 flex-1">
+            <p className="text-sm font-bold text-slate-800">{location.headline}</p>
+            <p className="mt-0.5 text-xs text-slate-500">{location.caption}</p>
+            <p className="mt-0.5 text-[11px] font-semibold uppercase tracking-wide text-slate-400">How it was set: {location.how}</p>
           </div>
-          {isTeacher && (
-            <button onClick={() => setModal("profile")} className="min-h-10 px-3 rounded-xl bg-slate-100 text-slate-700 text-xs font-bold flex items-center gap-1.5">
-              <Settings size={14} /> Edit Profile / Room
+          <div className="flex shrink-0 flex-col items-stretch gap-1.5">
+            <button onClick={() => setPickerOpen(true)}
+              className="min-h-12 rounded-xl bg-brand-700 px-3 text-xs font-bold text-white">
+              Change location
             </button>
-          )}
+            {isTeacher && (
+              <button onClick={() => setModal("profile")} aria-label="Edit profile and default room"
+                className="flex min-h-12 items-center justify-center rounded-xl bg-slate-100 px-3 text-slate-600">
+                <Settings size={16} />
+              </button>
+            )}
+          </div>
         </div>
-        <div className="flex flex-wrap items-center gap-2 mt-3">
-          <button onClick={() => setArmed((v) => !v)} aria-pressed={armed}
-            className={`min-h-9 px-3 rounded-full text-xs font-semibold border ${armed ? "bg-blush-200 border-blush text-blush-800" : "bg-blush-50 border-blush-200 text-blush-700"}`}>
-            {armed ? "✓ Mismatch armed — applies to next submit" : "⌖ Simulate location mismatch"}
+        {gps === "failed" && (
+          <button onClick={checkLocation} className="mt-2 inline-flex min-h-12 items-center gap-1.5 text-xs font-bold text-brand-700">
+            <RefreshCw size={14} /> Check location again
           </button>
-          <label className="min-h-9 px-3 rounded-full text-xs font-semibold border border-slate-200 bg-slate-50 text-slate-600 flex items-center gap-1.5">
-            <input type="checkbox" checked={useLiveGps} onChange={(e) => { setUseLiveGps(e.target.checked); localStorage.setItem(GPS_PREF, e.target.checked ? "1" : "0"); }} />
-            Verify with device GPS
-          </label>
-          <button onClick={() => setSimulateOffline(!simulateOffline)} aria-pressed={simulateOffline}
-            className={`ml-auto min-h-9 px-3 rounded-full text-xs font-semibold border flex items-center gap-1 ${connected ? "text-emerald-700 bg-emerald-50 border-emerald-200" : "text-slate-600 bg-slate-100 border-slate-300"}`}>
-            {connected ? <Wifi size={13} /> : <WifiOff size={13} />}{connected ? "Online" : "No connection"}
-          </button>
-        </div>
+        )}
       </section>
 
       {notice && (
         <div role="status" className={`rounded-2xl border px-3 py-2.5 text-sm ${
-          notice.kind === "sent" ? "bg-emerald-50 border-emerald-200 text-emerald-800"
-          : notice.kind === "merged" ? "bg-sky-50 border-sky-200 text-sky-800"
-          : notice.kind === "queued" ? "bg-slate-100 border-slate-300 text-slate-800"
-          : "bg-blush-100 border-blush-200 text-blush-800"}`}>
-          {notice.kind === "queued" && <p className="font-bold flex items-center gap-1 mb-0.5"><WifiOff size={14} /> Not sent · No connection</p>}
+          notice.kind === "sent" ? "border-emerald-200 bg-emerald-50 text-emerald-800"
+          : notice.kind === "merged" ? "border-sky-200 bg-sky-50 text-sky-800"
+          : notice.kind === "queued" ? "border-slate-300 bg-slate-100 text-slate-800"
+          : "border-blush-200 bg-blush-100 text-blush-800"}`}>
+          {notice.kind === "queued" && <p className="mb-0.5 flex items-center gap-1 font-bold"><WifiOff size={14} /> Not sent · No connection</p>}
           {notice.text}
         </div>
       )}
@@ -183,69 +286,64 @@ const last: Incident | undefined = incidents.find((i) => i.reporterId === user!.
       {queue.length > 0 && (
         <section className="rounded-2xl border border-slate-300 bg-slate-100 p-3">
           <p className="text-sm font-bold text-slate-700">{queue.length} report(s) waiting to send</p>
-          <p className="text-xs text-slate-600 mt-0.5">They send automatically when the connection is back.</p>
+          <p className="mt-0.5 text-xs text-slate-600">They send automatically when the connection is back.</p>
           <ul className="mt-2 space-y-1.5">
             {queue.map((q) => (
-              <li key={q.clientId} className="flex items-center gap-2 bg-white rounded-xl px-3 py-2 text-sm">
-                <span className="flex-1 min-w-0 truncate">{q.label}</span>
-                <button onClick={() => cancelQueued(q.clientId)} className="text-xs font-bold text-blush-700 min-h-9 px-2">Cancel</button>
+              <li key={q.clientId} className="flex items-center gap-2 rounded-xl bg-white px-3 py-2 text-sm">
+                <span className="min-w-0 flex-1 truncate">{q.label}</span>
+                <button onClick={() => cancelQueued(q.clientId)} className="min-h-12 px-3 text-xs font-bold text-blush-700">Cancel</button>
               </li>
             ))}
           </ul>
         </section>
       )}
 
-      {classAlerts.length > 0 && (
-        <section aria-label="Alerts for your class" className="space-y-2">
-          <h2 className="text-xs font-bold text-slate-500 uppercase tracking-wide">Active alert{classAlerts.length > 1 ? "s" : ""} affecting your class</h2>
-          {classAlerts.map((a) => {
-            const t = catTheme(a.category);
-            return (
-              <div key={a.id} className="rounded-2xl p-3 space-y-2" style={{ background: t.bg, border: `2px solid ${t.border}` }}>
-                <p className="text-xs font-extrabold uppercase tracking-wide" style={{ color: t.color }}>{t.emoji} {a.categoryLabel} · {a.subLabel}</p>
-                <p className="text-sm text-slate-600">📍 {a.room}</p>
-                <WaitingLine inc={a} />
-                <RuleBadges inc={a} />
-                <EtaLine inc={a} />
-                <HeadcountPanel inc={a} />
-              </div>
-            );
-          })}
+      {/* Group-scope headcount request: priority card above the tiles */}
+      {headcountTask && (
+        <section className="space-y-2 rounded-2xl border-2 border-blush-200 bg-white p-3" aria-label="Headcount needed">
+          <div>
+            <p className="text-xs font-extrabold uppercase tracking-wide text-blush-700">Headcount needed now</p>
+            <p className="mt-0.5 text-sm font-bold text-slate-800">
+              {catTheme(headcountTask.category).emoji} {headcountTask.categoryLabel} · 📍 {headcountTask.room}
+            </p>
+            <p className="text-xs text-slate-500">Count your pupils so the principal can account for everyone.</p>
+          </div>
+          <HeadcountPanel inc={headcountTask} />
         </section>
       )}
 
-      {/* Step 1 */}
+      {/* Step 1 — incident type */}
       {step === 1 && (
         <section>
-          <h2 className="text-xs font-bold text-slate-500 mb-2 uppercase tracking-wide">Tap 1 · What is happening?</h2>
+          <h2 className="mb-2 text-xs font-bold uppercase tracking-wide text-slate-500">Tap 1 · What is happening?</h2>
           <div className="relative mb-3">
             <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
             <input value={query} onChange={(e) => setQuery(e.target.value)} onKeyDown={(e) => e.key === "Enter" && onSearchEnter()}
               placeholder="Quick search: earthquake, faint, fire…" aria-label="Quick keyword search" inputMode="search"
-              className="w-full min-h-11 rounded-xl border border-slate-300 bg-white pl-9 pr-9 text-base outline-none focus:border-brand-500" />
-            {query && <button onClick={() => setQuery("")} aria-label="Clear search" className="absolute right-2 top-1/2 -translate-y-1/2 p-1.5 text-slate-400"><X size={16} /></button>}
+              className="min-h-12 w-full rounded-xl border border-slate-300 bg-white pl-9 pr-9 text-base outline-none focus:border-brand-500" />
+            {query && <button onClick={() => setQuery("")} aria-label="Clear search" className="absolute right-0 top-1/2 flex h-12 w-12 -translate-y-1/2 items-center justify-center text-slate-400"><X size={16} /></button>}
           </div>
-          {hasQuery && match.subs.size === 0 && !match.other && <p className="text-xs text-slate-500 mb-2">No match — use “Other / General Emergency” below.</p>}
+          {hasQuery && match.subs.size === 0 && !match.other && <p className="mb-2 text-xs text-slate-500">No match — use “Other / General Emergency” below.</p>}
           <div className="grid grid-cols-2 gap-2">
             {CATEGORIES.map((c) => {
               const Icon = CAT_ICON[c.id];
               const t = catTheme(c.id);
               const catHit = hasQuery && match.cats.has(c.id);
               return (
-                <div key={c.id} className="rounded-2xl overflow-hidden bg-white transition-shadow"
+                <div key={c.id} className="overflow-hidden rounded-2xl bg-white transition-shadow"
                   style={{ border: `2px solid ${catHit ? t.pill : t.border}`, boxShadow: catHit ? `0 0 0 3px ${t.pill}33` : undefined, opacity: hasQuery && !catHit ? 0.45 : 1 }}>
                   <div className="flex items-center gap-1.5 px-2.5 py-2" style={{ background: t.bg }}>
                     <Icon size={16} style={{ color: t.color }} />
                     <span className="text-sm font-extrabold" style={{ color: t.color }}>{c.label}</span>
                   </div>
-                  <div className="p-1.5 space-y-1">
+                  <div className="space-y-1 p-1.5">
                     {c.subs.map((s) => {
                       const hit = hasQuery && match.subs.has(`${c.id}:${s.id}`);
                       return (
                         <button key={s.id} onClick={() => pick(c.id, c.label, s.id, s.label)}
-                          className="w-full min-h-11 text-left text-sm rounded-lg px-2 py-1.5 font-medium text-slate-700 hover:bg-slate-50 active:bg-slate-100"
+                          className="min-h-12 w-full rounded-lg px-2 py-1.5 text-left text-sm font-medium text-slate-700 hover:bg-slate-50 active:bg-slate-100"
                           style={hit ? { background: t.bg, outline: `2px solid ${t.pill}`, fontWeight: 700 } : undefined}>
-                          {s.label} <span className="font-mono text-xs text-slate-400">(Sev {s.severity})</span>
+                          {s.label}
                         </button>
                       );
                     })}
@@ -254,82 +352,93 @@ const last: Incident | undefined = incidents.find((i) => i.reporterId === user!.
               );
             })}
           </div>
-          <button onClick={pickOther} className="w-full min-h-12 text-white rounded-2xl mt-2 text-base font-bold"
+          <button onClick={pickOther} className="mt-2 min-h-14 w-full rounded-2xl text-base font-bold text-white"
             style={{ background: catTheme("other").gradient, outline: hasQuery && match.other ? "3px solid #425B9A" : undefined }}>
-            {catTheme("other").emoji} Other / General Emergency <span className="font-mono opacity-80">(Sev = 4)</span>
+            {catTheme("other").emoji} Other / General Emergency
           </button>
         </section>
       )}
 
-      {/* Step 2 */}
+      {/* Step 2 — who is affected, plain words */}
       {step === 2 && sel && (
         <section>
-          <h2 className="text-xs font-bold text-slate-500 mb-2 uppercase tracking-wide">Tap 2 · Who is affected?</h2>
-          <div className="flex items-center gap-2 rounded-xl px-3 py-2 mb-3" style={{ background: ct.bg, border: `1px solid ${ct.border}` }}>
+          <h2 className="mb-2 text-xs font-bold uppercase tracking-wide text-slate-500">Tap 2 · Who is affected?</h2>
+          <div className="mb-3 flex items-center gap-2 rounded-xl px-3 py-2" style={{ background: ct.bg, border: `1px solid ${ct.border}` }}>
             <span aria-hidden>{ct.emoji}</span>
             <p className="text-sm font-bold" style={{ color: ct.color }}>{sel.catLabel}</p>
             <span className="text-slate-400">→</span>
-            <p className="text-sm text-slate-600 truncate">{sel.subLabel}</p>
+            <p className="truncate text-sm text-slate-600">{sel.subLabel}</p>
           </div>
           <div className="space-y-2">
             {POPULATIONS.map((p) => (
               <button key={p.id} onClick={() => { setPopId(p.id); setStep(3); }}
-                className="w-full min-h-14 flex items-center justify-between bg-white rounded-2xl px-4 hover:bg-slate-50" style={{ border: `2px solid ${ct.border}` }}>
+                className="flex min-h-14 w-full items-center justify-between rounded-2xl bg-white px-4 hover:bg-slate-50" style={{ border: `2px solid ${ct.border}` }}>
                 <span className="text-base font-semibold text-slate-700">{p.label}</span>
-                <span className="font-mono text-sm" style={{ color: ct.color }}>Vuln {p.vuln}</span>
               </button>
             ))}
           </div>
-          <button onClick={() => setStep(1)} className="text-sm text-slate-500 mt-3 font-semibold min-h-10">← Back</button>
+          <button onClick={() => setStep(1)} className="mt-3 min-h-12 text-sm font-semibold text-slate-500">← Back</button>
         </section>
       )}
 
-      {/* Step 3 */}
+      {/* Step 3 — confirm location automatically and send */}
       {step === 3 && sel && pop && (
         <section>
-          <h2 className="text-xs font-bold text-slate-500 mb-2 uppercase tracking-wide">Tap 3 · Confirm &amp; send</h2>
-          <div className="rounded-2xl p-3 space-y-1 mb-3" style={{ background: ct.bg, border: `2px solid ${ct.border}` }}>
+          <h2 className="mb-2 text-xs font-bold uppercase tracking-wide text-slate-500">Tap 3 · Confirm &amp; send</h2>
+          <div className="mb-3 space-y-1 rounded-2xl p-3" style={{ background: ct.bg, border: `2px solid ${ct.border}` }}>
             <p className="text-base font-extrabold" style={{ color: ct.color }}>{ct.emoji} {sel.catLabel} — {sel.subLabel}</p>
             <p className="text-sm text-slate-600">{pop.label}</p>
-            <p className="text-sm text-slate-500">📍 {room}</p>
+            <p className="text-sm text-slate-500">📍 {location.headline}</p>
           </div>
+
           {needSection && (
             <div className="mb-3">
-              <label htmlFor="sec" className="text-xs font-semibold text-slate-600">Which section is affected?</label>
-              <select id="sec" value={section} onChange={(e) => setSection(e.target.value)}
-                className="w-full mt-1 min-h-11 rounded-xl border border-slate-300 bg-white px-3 text-base">
-                <option value="">Choose a section…</option>
-                {sections.map((s) => <option key={s} value={s}>{s}</option>)}
-              </select>
-              <p className="text-xs text-slate-500 mt-1">Only the parents/PTA of this section are notified.</p>
+              <button onClick={() => setMoreOpen((v) => !v)} aria-expanded={moreOpen}
+                className="flex min-h-12 w-full items-center justify-between text-sm font-bold text-brand-700">
+                More details <ChevronDown size={16} className={moreOpen ? "rotate-180" : ""} />
+              </button>
+              {moreOpen && (
+                <div className="mt-1">
+                  <label htmlFor="sec" className="text-xs font-semibold text-slate-600">Which section is affected?</label>
+                  <select id="sec" value={section} onChange={(e) => setSection(e.target.value)}
+                    className="mt-1 min-h-12 w-full rounded-xl border border-slate-300 bg-white px-3 text-base">
+                    <option value="">Choose a section…</option>
+                    {sections.map((s) => <option key={s} value={s}>{s}</option>)}
+                  </select>
+                  <p className="mt-1 text-xs text-slate-500">Only the parents/PTA of this section are notified.</p>
+                </div>
+              )}
             </div>
           )}
-          <button onClick={beginSubmit} disabled={checking} className="w-full min-h-14 text-white rounded-2xl text-base font-extrabold tracking-wide disabled:opacity-70"
-            style={{ background: checking ? "#BCC9E3" : "#FF95A5", color: "#1D2848", boxShadow: "0 6px 18px rgba(255,149,165,.55)" }}>
-            {checking ? "⌖ CHECKING LOCATION…" : "🔴 SUBMIT EMERGENCY ALERT"}
+
+          <button onClick={beginSubmit}
+            className="min-h-16 w-full rounded-2xl text-base font-extrabold tracking-wide text-brand-900"
+            style={{ background: "#FF95A5", boxShadow: "0 6px 18px rgba(255,149,165,.55)" }}>
+            🔴 SEND EMERGENCY ALERT
           </button>
-          <button onClick={() => setStep(2)} className="text-sm text-slate-500 mt-3 font-semibold min-h-10">← Back</button>
+          <p className="mt-1.5 text-center text-xs text-slate-500">The location above is on the ticket. Tap “Change location” to correct it.</p>
+          <button onClick={() => setStep(2)} className="mt-2 min-h-12 text-sm font-semibold text-slate-500">← Back</button>
         </section>
       )}
 
-      {/* Last report status */}
+      {/* Status of the teacher's own last report */}
       {last && step === 1 && (() => {
         const t = catTheme(last.category);
         return (
           <section className="rounded-2xl p-3" style={{ background: t.bg, border: `2px solid ${t.border}` }}>
-            <p className="text-xs font-extrabold uppercase tracking-wide mb-1.5" style={{ color: t.color }}>{t.emoji} Your last report · {last.categoryLabel}</p>
+            <p className="mb-1.5 text-xs font-extrabold uppercase tracking-wide" style={{ color: t.color }}>Your last report · {last.categoryLabel}</p>
+            <p className="text-xs text-slate-600">📍 {last.room} · {locationSetByLabel(last)}</p>
             <WaitingLine inc={last} />
             <div className="mt-2"><RuleBadges inc={last} /></div>
-            <div className="mt-3"><ResponseTracker status={last.status} category={last.category} compact /></div>
-            <div className="mt-2"><EtaLine inc={last} /></div>
+
             {last.status !== "RESOLVED" && <div className="mt-3"><HeadcountPanel inc={last} /></div>}
             {last.canCancel && (
-              <button onClick={() => setConfirmCancel(true)} className="mt-3 w-full min-h-11 rounded-xl bg-white text-blush-700 border border-blush-200 font-bold text-sm">
+              <button onClick={() => setConfirmCancel(true)} className="mt-3 min-h-12 w-full rounded-xl border border-blush-200 bg-white text-sm font-bold text-blush-700">
                 ✕ Cancel this alert
               </button>
             )}
             {last.confirmedBy > 1 && last.status !== "RESOLVED" && (
-              <p className="text-xs text-slate-500 mt-2">Confirmed by {last.confirmedBy} reports — only the Principal or responders can close this one.</p>
+              <p className="mt-2 text-xs text-slate-500">Confirmed by {last.confirmedBy} reports — only the Principal or responders can close it.</p>
             )}
             {confirmCancel && (
               <ConfirmModal title="Cancel this alert?" danger confirmLabel="Yes, cancel alert" onClose={() => setConfirmCancel(false)}
@@ -341,9 +450,16 @@ const last: Incident | undefined = incidents.find((i) => i.reporterId === user!.
       })()}
 
       {modal === "profile" && <ProfileModal onClose={() => setModal(null)} />}
-      {modal === "mismatch" && (
-        <MismatchModal reason={mismatchReason} savedRoom={room} onClose={() => setModal(null)}
-          onConfirm={(loc) => { setModal(null); setArmed(false); proceed(loc); }} />
+
+      {pickerOpen && (
+        <CampusPicker
+          savedRoom={room}
+          detected={detected}
+          picked={picked}
+          onPick={setPicked}
+          onClose={() => setPickerOpen(false)}
+          onSaveDefault={isTeacher ? changeSavedRoom : undefined}
+        />
       )}
     </div>
   );
@@ -373,43 +489,15 @@ function ProfileModal({ onClose }: { onClose: () => void }) {
           <div key={label}>
             <label className="text-xs font-semibold text-slate-600">{label}
               <input value={val} onChange={(e) => set(e.target.value)} placeholder={ph}
-                className="w-full mt-1 min-h-11 border border-slate-300 rounded-xl px-3 text-base outline-none focus:border-brand-500 font-normal" />
+                className="mt-1 min-h-12 w-full rounded-xl border border-slate-300 px-3 text-base font-normal outline-none focus:border-brand-500" />
             </label>
           </div>
         ))}
-        {err && <p className="text-sm text-blush-700" role="alert">{err}</p>}
-        <p className="text-xs text-slate-500">The registry is the number of pupils expected in your class today; it is what the evacuation headcount is compared with. Saving updates the Principal's roster right away.</p>
-        <button onClick={save} disabled={busy} className="w-full min-h-12 bg-brand-600 text-white rounded-xl font-bold disabled:opacity-60">{busy ? "Saving…" : "Save Changes"}</button>
+        {err && <p role="alert" className="text-sm text-blush-700">{err}</p>}
+        <p className="text-xs text-slate-500">Registry = pupils expected today. It is the baseline for the headcount.</p>
+        <p className="text-xs text-slate-500">To pick the classroom from the campus map, use “Change location” on the report screen.</p>
+        <button onClick={() => void save()} disabled={busy} className="min-h-12 w-full rounded-xl bg-brand-600 font-bold text-white disabled:opacity-60">{busy ? "Saving…" : "Save Changes"}</button>
       </div>
-    </Modal>
-  );
-}
-
-function MismatchModal({ reason, savedRoom, onClose, onConfirm }: {
-  reason: string; savedRoom: string; onClose: () => void; onConfirm: (loc: Loc) => void;
-}) {
-  const [pos, setPos] = useState<MapPoint>(OUTSIDE_POINT);
-  const area = areaForMapPoint(pos);
-  return (
-    <Modal title="Location Mismatch" onClose={onClose}>
-      <div className="rounded-xl border border-blush-200 bg-blush-50 px-3 py-2.5 mb-3">
-        <p className="text-sm font-extrabold text-blush-800 flex items-center gap-1.5"><MapPin size={15} /> Your GPS doesn't match your saved room</p>
-        <p className="text-sm text-blush-800 mt-1">Please confirm where you actually are. Location Risk is scored from the place you confirm.</p>
-        {reason && <p className="text-xs text-blush-700 mt-1.5">{reason}</p>}
-      </div>
-      <label className="text-xs font-semibold text-slate-600">Where are you right now?
-        <select value={area?.id ?? ""} onChange={(e) => setPos(e.target.value ? SCHOOL_MAP_POINTS[e.target.value] : OUTSIDE_POINT)}
-          className="w-full mt-1 min-h-11 rounded-xl border border-slate-300 bg-white px-3 text-base font-normal">
-          <option value="">Somewhere else / not listed</option>
-          {NON_CLASSROOM_AREAS.map((a: { id: string; label: string }) => <option key={a.id} value={a.id}>{a.label}</option>)}
-        </select>
-      </label>
-      <p className="text-xs text-slate-500 mt-2 mb-1.5">Or drag the pink pointer on the map.</p>
-      <SchoolMap room={savedRoom} showDetected detectedPosition={pos} onDetectedPositionChange={setPos} />
-      <button onClick={() => onConfirm(area ? { locationKind: "area", areaId: area.id } : { locationKind: "unverified" })}
-        className="w-full min-h-12 bg-brand-600 text-white rounded-xl font-bold mt-3">
-        {area ? `Confirm: ${area.label}` : "Confirm (location not listed)"}
-      </button>
     </Modal>
   );
 }

@@ -1,33 +1,29 @@
 import { useState } from "react";
-import { ClipboardList, FlaskConical, History, SlidersHorizontal, Siren, Users } from "lucide-react";
-import { CONSISTENCY, DISCLAIMERS, SCHOOL, WEIGHTS } from "../../shared/domain.js";
+import { ChevronRight, ClipboardList, History as HistoryIcon, Info, Menu, ShieldAlert, Siren, User, Users } from "lucide-react";
 import { useApp } from "../lib/store";
 import { startOfToday } from "../lib/format";
-import { BAND_STYLE } from "../lib/theme";
-import { ConfirmModal } from "../components/Modal";
-import { EscalationTable } from "../components/Incident";
-import { IllustrativeTag } from "../components/Chrome";
 import HistorySection from "../components/History";
 import ReportView from "./ReportView";
 import RosterPanel from "./RosterPanel";
 import SafetyView from "./SafetyView";
+import AccountView from "./AccountView";
+import AboutView from "./AboutView";
 import { IncidentQueue } from "./ResponderView";
 
 export const PRINCIPAL_TABS = [
   { id: "command" as const, label: "Command", icon: ClipboardList },
   { id: "report" as const, label: "Report", icon: Siren },
-  { id: "safety" as const, label: "Safety", icon: FlaskConical },
-  { id: "history" as const, label: "History", icon: History },
-  { id: "roster" as const, label: "Roster", icon: Users },
-  { id: "weights" as const, label: "Weights", icon: SlidersHorizontal },
+  { id: "safety" as const, label: "Safety", icon: ShieldAlert },
+  { id: "history" as const, label: "History", icon: HistoryIcon },
+  { id: "more" as const, label: "More", icon: Menu },
 ];
 export type PrincipalTab = (typeof PRINCIPAL_TABS)[number]["id"];
 
 function Stat({ value, label, tone }: { value: string | number; label: string; tone: string }) {
   return (
-    <div className="bg-white border border-slate-200 rounded-2xl p-3 text-center">
+    <div className="rounded-2xl border border-slate-200 bg-white p-3 text-center">
       <p className={`font-mono text-2xl font-extrabold leading-none ${tone}`}>{value}</p>
-      <p className="text-xs text-slate-500 mt-1.5">{label}</p>
+      <p className="mt-1.5 text-xs text-slate-500">{label}</p>
     </div>
   );
 }
@@ -39,68 +35,49 @@ function Command() {
   const today = incidents.filter((i) => !i.drill && i.createdAt >= startOfToday(now)).reduce((n, i) => n + i.confirmedBy, 0);
   const staff = roster.filter((r) => r.status === "active").length;
   return (
-    <div className="mx-auto w-full max-w-6xl px-3 py-3 space-y-4">
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
-        <Stat value={active} label={`Active incidents${critical ? ` · ${critical} critical override` : ""}`} tone="text-brand-600" />
-        <Stat value={today} label="Total reports today" tone="text-slate-700" />
+    <div className="mx-auto w-full max-w-6xl space-y-4 px-3 py-3">
+      <div className="grid grid-cols-3 gap-2">
+        <Stat value={active} label={critical ? `Active · ${critical} critical` : "Active incidents"} tone="text-brand-600" />
+        <Stat value={today} label="Reports today" tone="text-slate-700" />
         <Stat value={staff} label="Active staff" tone="text-emerald-600" />
-        <Stat value={SCHOOL.depedId} label="Sinalhan ES · DepEd ID" tone="text-slate-700 !text-xl" />
       </div>
-      <IncidentQueue incidents={incidents} title="Active Incident Command Queue" empty="No active incidents." />
+      <IncidentQueue incidents={incidents} title="Active incident command queue" empty="No active incidents." />
     </div>
   );
 }
 
-function Weights() {
-  const { config, resetDemo } = useApp();
-  const [confirmReset, setConfirmReset] = useState(false);
-  const rows: [string, number][] = [
-    ["Severity", WEIGHTS.severity], ["Vulnerability", WEIGHTS.vulnerability], ["Location Risk", WEIGHTS.locationRisk], ["Time Sensitivity", WEIGHTS.timeSensitivity],
-  ];
-  const bands: [string, string][] = [["CRITICAL", "≥ 4.0"], ["HIGH", "3.0 – 3.99"], ["MODERATE", "< 3.0"], ["RESOLVED", "closed by Principal or Responder"]];
+function BackBar({ title, onBack }: { title: string; onBack: () => void }) {
   return (
-    <div className="mx-auto w-full max-w-6xl px-3 py-3 grid gap-3 lg:grid-cols-2 items-start">
-      <div className="space-y-3">
-        <section className="bg-white border border-slate-200 rounded-2xl p-4">
-          <h2 className="text-xs font-bold text-slate-500 uppercase tracking-wide mb-2">AHP → SAW Urgency Engine (view only)</h2>
-          {rows.map(([l, w]) => (
-            <div key={l} className="flex items-center justify-between py-1">
-              <span className="text-sm text-slate-700">{l}</span>
-              <span className="font-mono text-base font-bold text-brand-600">{w.toFixed(2)}</span>
-            </div>
-          ))}
-          <p className="font-mono text-xs text-slate-500 mt-2 break-words">Urgency = 0.50×Severity + 0.29×Vulnerability + 0.11×LocationRisk + 0.10×TimeSensitivity</p>
-          <IllustrativeTag text={DISCLAIMERS.illustrative} />
-        </section>
-        <section className="bg-white border border-slate-200 rounded-2xl p-4">
-          <p className="text-sm font-semibold text-slate-700">Consistency Ratio: <span className="font-mono text-brand-600">CR ≈ {CONSISTENCY.cr}</span></p>
-          <p className="text-xs text-slate-500 mt-0.5">λmax ≈ {CONSISTENCY.lambdaMax}, CI ≈ {CONSISTENCY.ci}, RI = {CONSISTENCY.ri} (n = {CONSISTENCY.n})</p>
-          <IllustrativeTag text={DISCLAIMERS.crExample} />
-        </section>
-        <section className="bg-white border border-slate-200 rounded-2xl p-4">
-          <h2 className="text-xs font-bold text-slate-500 uppercase tracking-wide mb-1">Score bands</h2>
-          {bands.map(([l, r]) => (
-            <div key={l} className="flex items-center justify-between text-sm py-1">
-              <span className="font-bold" style={{ color: BAND_STYLE[l].color }}>{l}</span><span className="font-mono text-slate-500 text-right">{r}</span>
-            </div>
-          ))}
-          <IllustrativeTag text="Score bands are illustrative examples pending the real expert panel session — not final results." />
-        </section>
-        <section className="bg-white border border-slate-200 rounded-2xl p-4 space-y-1.5">
-          <h2 className="text-xs font-bold text-slate-500 uppercase tracking-wide mb-1">Scope &amp; honesty labels</h2>
-          <p className="text-sm text-slate-600">{DISCLAIMERS.scope}</p>
-          <p className="text-sm text-slate-600">{DISCLAIMERS.noAutoDetect}</p>
-          {config?.demoReset && (
-            <div className="pt-3 mt-2 border-t border-slate-100">
-              <p className="text-xs text-slate-500 mb-2">Demo tools — clears every incident and restores the sample roster for all devices.</p>
-              <button onClick={() => setConfirmReset(true)} className="min-h-10 px-4 rounded-xl bg-slate-100 text-slate-700 text-sm font-bold">Reset demo data</button>
-            </div>
-          )}
-        </section>
-      </div>
-      <EscalationTable />
-      {confirmReset && <ConfirmModal title="Reset demo data?" danger confirmLabel="Reset" onClose={() => setConfirmReset(false)} onConfirm={() => void resetDemo()}
-        message="All incidents will be deleted and the roster returns to the sample teachers. Everyone signed in as a removed teacher will be signed out." />}
+    <div className="mx-auto flex w-full max-w-6xl items-center gap-2 px-3 pt-3">
+      <button onClick={onBack} className="min-h-12 rounded-xl bg-white px-3 text-sm font-bold text-brand-700 shadow-sm">← More</button>
+      <p className="text-sm font-bold text-slate-600">{title}</p>
+    </div>
+  );
+}
+
+function More() {
+  const [screen, setScreen] = useState<"menu" | "roster" | "about" | "account">("menu");
+  const items = [
+    { id: "roster" as const, label: "Teacher roster", hint: "Sections, rooms and registries", icon: Users },
+    { id: "about" as const, label: "About ASPIRE", hint: "Purpose, privacy, version", icon: Info },
+    { id: "account" as const, label: "Account", hint: "Password and sign out", icon: User },
+  ];
+  if (screen === "roster") return <><BackBar title="Teacher roster" onBack={() => setScreen("menu")} /><RosterPanel /></>;
+  if (screen === "about") return <><BackBar title="About ASPIRE" onBack={() => setScreen("menu")} /><AboutView /></>;
+  if (screen === "account") return <><BackBar title="Account" onBack={() => setScreen("menu")} /><AccountView /></>;
+  return (
+    <div className="mx-auto w-full max-w-md space-y-2 px-3 py-3">
+      {items.map((it) => (
+        <button key={it.id} onClick={() => setScreen(it.id)}
+          className="flex min-h-16 w-full items-center gap-3 rounded-2xl border border-slate-200 bg-white px-4 text-left">
+          <it.icon size={20} className="shrink-0 text-brand-600" />
+          <span className="min-w-0 flex-1">
+            <span className="block text-sm font-bold text-slate-800">{it.label}</span>
+            <span className="block text-xs text-slate-500">{it.hint}</span>
+          </span>
+          <ChevronRight size={18} className="shrink-0 text-slate-400" />
+        </button>
+      ))}
     </div>
   );
 }
@@ -112,8 +89,7 @@ export default function PrincipalView({ tab }: { tab: PrincipalTab }) {
       {tab === "report" && <ReportView />}
       {tab === "safety" && <SafetyView />}
       {tab === "history" && <div className="mx-auto w-full max-w-3xl px-3 py-3"><HistorySection title="Incident history (official record)" /></div>}
-      {tab === "roster" && <RosterPanel />}
-      {tab === "weights" && <Weights />}
+      {tab === "more" && <More />}
     </>
   );
 }

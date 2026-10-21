@@ -1,9 +1,10 @@
 import { useState } from "react";
 import { Eye, EyeOff } from "lucide-react";
-import { DISCLAIMERS, SCHOOL } from "../../shared/domain.js";
+import { SCHOOL } from "../../shared/domain.js";
 import { useApp } from "../lib/store";
 import { BRAND } from "../lib/brand";
-import { api } from "../lib/api";
+import { Modal } from "../components/Modal";
+import AboutView from "./AboutView";
 
 export default function LoginView() {
   const { login, mustChange, changePassword, config } = useApp();
@@ -20,6 +21,7 @@ export default function LoginView() {
   const [changing, setChanging] = useState(false);
   const [changeError, setChangeError] = useState("");
   const [changed, setChanged] = useState(false);
+  const [about, setAbout] = useState(false);
 
   async function handlePasswordChange(e: React.FormEvent) {
     e.preventDefault();
@@ -82,12 +84,12 @@ export default function LoginView() {
                 disabled={changing}
                 required
                 placeholder="At least 8 characters"
-                className="w-full min-h-14 rounded-xl px-4 bg-white text-slate-900 text-base outline-none focus:ring-2 focus:ring-accent"
+                className="w-full min-h-14 rounded-xl px-4 pr-12 bg-white text-slate-900 text-base outline-none focus:ring-2 focus:ring-accent"
               />
               <button
                 type="button"
                 onClick={() => setShowNew(!showNew)}
-                className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 hover:text-brand-600"
+                className="absolute right-0 top-1/2 flex h-14 w-12 -translate-y-1/2 items-center justify-center text-slate-500 hover:text-brand-600"
                 aria-label={showNew ? "Hide password" : "Show password"}
               >
                 {showNew ? <Eye size={18} /> : <EyeOff size={18} />}
@@ -105,7 +107,7 @@ export default function LoginView() {
             </button>
           </form>
 
-          <p className="text-xs text-slate-400 text-center mt-6">{DISCLAIMERS.noAutoDetect}</p>
+          <button type="button" onClick={() => setAbout(true)} className="mt-6 min-h-12 text-xs font-semibold text-slate-400 underline">About ASPIRE</button>
         </div>
       </div>
     );
@@ -148,7 +150,6 @@ export default function LoginView() {
           <div>
             <label className="block text-sm font-medium text-slate-300 mb-1.5" htmlFor="email" aria-label="Email or username">
               Email or username
-              <span className="text-slate-500 text-xs">required</span>
             </label>
             <input
               id="email"
@@ -167,7 +168,6 @@ export default function LoginView() {
           <div className="relative">
             <label className="block text-sm font-medium text-slate-300 mb-1.5" htmlFor="password" aria-label="Password">
               Password
-              <span className="text-slate-500 text-xs">required</span>
             </label>
             <input
               id="password"
@@ -178,13 +178,13 @@ export default function LoginView() {
               disabled={busy}
               required
               placeholder="Enter your password"
-              className="w-full min-h-14 rounded-xl px-4 bg-white text-slate-900 text-base outline-none focus:ring-2 focus:ring-accent focus:outline-none"
+              className="w-full min-h-14 rounded-xl px-4 pr-12 bg-white text-slate-900 text-base outline-none focus:ring-2 focus:ring-accent focus:outline-none"
               aria-label={showPassword ? "Password (visible)" : "Password (masked)"}
             />
             <button
               type="button"
               onClick={toggle}
-              className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 hover:text-brand-600 focus:outline-none focus:ring-2 focus:ring-accent focus:ring-opacity-50"
+              className="absolute right-0 top-1/2 flex h-14 w-12 -translate-y-1/2 items-center justify-center text-slate-500 hover:text-brand-600 focus:outline-none focus:ring-2 focus:ring-accent focus:ring-opacity-50"
               aria-label={showPassword ? "Hide password" : "Show password"}
             >
               {showPassword ? <Eye size={18} /> : <EyeOff size={18} />}
@@ -203,13 +203,18 @@ export default function LoginView() {
           </button>
         </form>
 
-        <div className="mt-auto pt-8 space-y-1.5 text-center">
-          <p className="text-xs text-slate-400">{DISCLAIMERS.scope}</p>
-          <p className="text-xs text-slate-500">{DISCLAIMERS.noAutoDetect}</p>
-          <p className="text-xs text-slate-500">AHP weights and score bands shown are illustrative examples pending the real expert panel session — not final results.</p>
-          <p className="text-xs text-slate-600 pt-1">{DISCLAIMERS.footer}</p>
+        <div className="mt-auto pt-8 text-center">
+          <button type="button" onClick={() => setAbout(true)} className="min-h-12 px-3 text-xs font-semibold text-slate-400 underline">
+            About ASPIRE
+          </button>
         </div>
       </div>
+
+      {about && (
+        <Modal title="About ASPIRE" onClose={() => setAbout(false)} wide>
+          <AboutView />
+        </Modal>
+      )}
     </div>
   );
 }
