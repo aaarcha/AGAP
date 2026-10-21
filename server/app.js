@@ -8,6 +8,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 import zlib from "node:zlib";
 import * as D from "../shared/domain.js";
+import * as C from "../shared/campus.js";
 import { createStore } from "./store.js";
 
 class HttpError extends Error {
@@ -42,7 +43,7 @@ const PRINCIPAL_ROOM = D.PRINCIPAL_ROOM;
 // Demo-mode credentials – only seeded when SEED_DEMO_INCIDENT / SEED_DEMO_ACCOUNTS is on.
 export const DEMO_PASSWORD = "Sinalhan-Demo-2026!";
 export const DEMO_ADMIN_EMAIL = "admin@sinalhanes.deped.ph";
-export const DEMO_ADMIN_PASSWORD = "Agap-Admin-2026!";
+export const DEMO_ADMIN_PASSWORD = "Aspire-Admin-2026!";
 
 const ACCOUNT_ROLES = new Set(["teacher", "principal", "responder", "parent", "super_admin"]);
 const ADMIN_ROLES = new Set(["super_admin", "principal"]); // role-based idle timeout: short for admins
@@ -86,7 +87,8 @@ export function createApp(opts = {}) {
     secret = crypto.randomBytes(32).toString("hex"),
     accessCode = "",
     staticDir = "",
-    allowReset = true,
+    allowReset = false,
+    schoolPhone = "",
     seedDemoIncident = false,
     seedDemoAccounts = false,
     superAdminEmail = "",
@@ -206,6 +208,14 @@ export function createApp(opts = {}) {
       status: a.status, mustChange: Boolean(a.mustChange), temp: Boolean(a.temp),
       locked: a.lockedUntil > t, lockedUntil: a.lockedUntil, failed: a.failed,
       lastLoginAt: a.lastLoginAt, createdAt: a.createdAt,
+      teacher: a.teacherId ? {
+        id: roster?.id ?? a.teacherId,
+        name: roster?.name ?? a.name,
+        section: roster?.section ?? null,
+        room: roster?.room ?? null,
+        gps: roster?.gps ?? null,
+        registry: roster?.registry ?? null,
+      } : null,
     };
   }
 
@@ -355,14 +365,22 @@ export function createApp(opts = {}) {
     );
   }
 
-  // Which class sections must report a headcount for this incident.
-  function expectedSections(i) {
-    if (i.linkedSection !== "ALL") return [i.linkedSection];
+  // Headcount verification applies only to group-scope reports: an individual
+  // report needs none, a classroom report needs its own section, and a
+  // whole-school report needs every active section.
+  function activeSections() {
     return [...new Set(store.db.roster.filter((r) => r.status === "active").map((r) => r.section))];
+  }
+  function expectedSections(i) {
+    const pop = D.populationIdOf(i);
+    if (pop === "individual") return [];
+    if (pop === "classroom" && i.linkedSection && i.linkedSection !== "ALL") return [i.linkedSection];
+    return activeSections();
   }
 
   function accountabilityOf(i) {
     const need = expectedSections(i);
+    if (need.length === 0) return { status: "not_required", reported: 0, total: 0 };
     const have = need.filter((sec) => i.headcounts.some((h) => h.section === sec));
     const mismatch = i.headcounts.some((h) => h.present !== h.expected);
     let status = "pending";
@@ -399,6 +417,7 @@ export function createApp(opts = {}) {
       status: i.status,
       confirmedBy: i.confirmedBy,
       linkedSection: i.linkedSection,
+      populationId: D.populationIdOf(i),
       populationLabel: i.populationLabel,
       outcome: i.outcome,
       resolvedAt: i.resolvedAt,
@@ -425,6 +444,11 @@ export function createApp(opts = {}) {
       log: i.log,
       metrics: metricsOf(i),
       canCancel: canCancel(i, user),
+      // Final location of the ticket and how it was established (GPS-detected,
+      // selected by the reporter, or the saved room).
+      locationKind: i.locationKind || "saved",
+      locationSetBy: i.locationSetBy || "saved_room",
+      locationNote: i.locationNote || null,
     };
     return { ...base, ...extra };
   }
@@ -517,22 +541,41 @@ export function createApp(opts = {}) {
       reporter = { id: user.id, name: user.name, room: PRINCIPAL_ROOM, section: null };
     }
 
-    // Location: only after the reporter confirms where they are does Location Risk change.
+    // Location: the reporter's chosen place decides Location Risk and whether the
+    // ticket is low-lying. Location kind "room" keeps the same Location Risk as a
+    // saved room; only the floor of the chosen room drives Hazard Mode.
     const kind = body.locationKind || "saved";
     let room = reporter.room;
     let locationRisk = D.LOCATION_RISK_SAVED_ROOM;
-    const lowLying = D.isLowLying({ locationKind: body.locationKind || "saved", areaId: body.areaId, savedRoom: reporter.room });
+    let locationSetBy = "saved_room";
+    let locationNote = "Saved room";
+    let lowLyingRoom = reporter.room;
     if (kind === "area") {
       const area = D.NON_CLASSROOM_AREAS.find((a) => a.id === body.areaId);
       if (!area) throw bad("Unknown area.");
       room = `${area.label} (reassigned from ${reporter.room})`;
       locationRisk = area.risk;
+      locationSetBy = "selected_area";
+      locationNote = `Selected area · ${area.label}`;
     } else if (kind === "unverified") {
       room = `Unverified location (saved room: ${reporter.room})`;
       locationRisk = D.LOCATION_RISK_UNVERIFIED;
+      locationSetBy = "unverified";
+      locationNote = "Location not verified";
+    } else if (kind === "room") {
+      const selected = C.roomById(body.roomId || "");
+      if (!selected) throw bad("Unknown room.");
+      room = selected.legacy;
+      locationRisk = D.LOCATION_RISK_SAVED_ROOM;
+      // A classroom the reporter picked, or one the phone's GPS pinned down.
+      const byGps = body.locationSetBy === "gps_detected";
+      locationSetBy = byGps ? "gps_detected" : "selected_room";
+      locationNote = byGps ? `Detected by GPS · ${selected.legacy}` : `Selected by reporter · ${selected.legacy}`;
+      lowLyingRoom = selected.legacy;
     } else if (kind !== "saved") {
       throw bad("Unknown locationKind.");
     }
+    const lowLying = D.isLowLying({ locationKind: kind, areaId: body.areaId, savedRoom: lowLyingRoom });
 
     // Which parents see it: the reporter's section, everyone for whole floor/school.
     let linkedSection;
@@ -563,6 +606,14 @@ export function createApp(opts = {}) {
       if (!dup.reporterIds.includes(reporter.id)) dup.reporterIds.push(reporter.id);
       dup.clientIds.push(clientId);
       dup.log.push({ at: t, by: reporter.name, role: user.role, action: "merged", note: `Corroborating report #${dup.confirmedBy}` });
+      // A corroboration with a wider population raises the ticket's scope
+      // (individual → classroom → whole school), which also widens who must headcount.
+      const scope = { individual: 0, classroom: 1, wholeschool: 2 };
+      if (scope[pop.id] > scope[D.populationIdOf(dup)]) {
+        dup.populationId = pop.id;
+        dup.populationLabel = pop.label;
+        dup.log.push({ at: t, by: "System", role: "system", action: "merged", note: `Scope raised to ${pop.label} — headcount now applies` });
+      }
       if (linkedSection === "ALL") dup.linkedSection = "ALL";
       const before = dup.score;
       const higherSeverity = cat.severity > dup.severity;
@@ -607,11 +658,15 @@ export function createApp(opts = {}) {
       enRouteAt: null,
       onSiteAt: null,
       room,
+      populationId: pop.id,
       populationLabel: pop.label,
       reporterId: reporter.id,
       reporterIds: [reporter.id],
       reporterName: reporter.name,
       linkedSection,
+      locationKind: kind,
+      locationSetBy,
+      locationNote,
       createdAt: t,
       status: "SENT",
       confirmedBy: 1,
@@ -712,7 +767,8 @@ export function createApp(opts = {}) {
       subLabel: "Flash Flood", severity: 4, vulnerability: 4, locationRisk: 2, timeSensitivity: 3,
       baseLocationRisk: 2, baseTimeSensitivity: 3, lowLying: true, escalationLevel: 0, escalatedAt: null, headcounts: [], overrideReasons: [],
       firstHeadcountAt: null, drill: false, drillId: null, interactions: 3, eta: null, enRouteAt: t - 3 * 60000, onSiteAt: null,
-      score: D.computeScore(4, 4, 2, 3), room: "Bldg B | Flr 1 | Rm 105", populationLabel: "Classroom / Section",
+      score: D.computeScore(4, 4, 2, 3), room: "Bldg B | Flr 1 | Rm 105",      populationId: "classroom",
+      populationLabel: "Classroom / Section",
       reporterId: "t3", reporterIds: ["t3"], reporterName: "Ms. Bautista", linkedSection: "Grade 5 - Sec A",
       createdAt: t - 6 * 60000, status: "EN_ROUTE", confirmedBy: 2, acknowledgedBy: "Brgy. Sinalhan / CDRRMO",
       outcome: null, resolvedAt: null, resolvedBy: null, hiddenBy: [],
@@ -745,7 +801,7 @@ export function createApp(opts = {}) {
   // The password must be changed at first sign-in; it is never written to the audit log.
   if (superAdminEmail && superAdminPassword) {
     const email = normEmail(superAdminEmail);
-    if (!emailOk(email)) log("AGAP_SUPER_ADMIN_EMAIL is not a valid email – no Super Admin account created.");
+    if (!emailOk(email)) log("ASPIRE_SUPER_ADMIN_EMAIL is not a valid email – no Super Admin account created.");
     else if (!findAccount(email)) {
       newAccount({ email, role: "super_admin", name: "Super Admin", password: superAdminPassword, mustChange: true, id: "super-admin" });
       audit("account_created", { by: "bootstrap", target: email, detail: "initial Super Admin (env bootstrap)" });
@@ -761,11 +817,12 @@ export function createApp(opts = {}) {
     if (p === "/api/health" && m === "GET") return send(res, 200, { ok: true, version: store.db.version, uptime: Math.round(process.uptime()) });
 
     if (p === "/api/config" && m === "GET")
-      return send(res, 200, { accessCodeRequired: Boolean(accessCode), demoReset: Boolean(allowReset), passwordMin: PASSWORD_MIN, school: D.SCHOOL });
+      return send(res, 200, { accessCodeRequired: Boolean(accessCode), demoReset: Boolean(allowReset), passwordMin: PASSWORD_MIN, school: { ...D.SCHOOL, phone: schoolPhone } });
 
     if (p === "/api/login" && m === "POST") {
       rateLimit(req, "login", 30);
       const body = await readJson(req);
+      // The access code is school-wide; it is only enforced when one is configured.
       if (accessCode && !safeEqual(clean(body.code, 100), accessCode)) throw new HttpError(401, "bad_code", "Incorrect access code.");
       const email = normEmail(body.email);
       const password = String(body.password ?? "");
@@ -832,10 +889,30 @@ export function createApp(opts = {}) {
       return send(res, 200, { ok: true });
     }
 
-    // Single password field: used for the forced change after a rollover / temporary credentials.
+    // Forced change after a rollover / temporary credentials: only the new password.
+    // A voluntary change (Account screen) must prove the current password.
     if (p === "/api/password" && m === "POST") {
       const { session, account } = authenticate(req, url, p);
       const body = await readJson(req);
+      if (!account.mustChange) {
+        const t = now();
+        if (account.lockedUntil > t) {
+          const mins = Math.max(1, Math.ceil((account.lockedUntil - t) / 60000));
+          throw new HttpError(429, "account_locked", `Too many failed attempts. This account is locked for ${mins} more minute${mins === 1 ? "" : "s"}.`);
+        }
+        if (typeof body.currentPassword !== "string" || !body.currentPassword || !checkPassword(body.currentPassword, account.pwSalt, account.pwHash)) {
+          account.failed += 1;
+          if (account.failed >= lockoutFailures) {
+            account.lockedUntil = t + lockoutMinutes * 60000;
+            audit("account_locked", { target: account.email, detail: `${account.failed} failed password changes`, req });
+          }
+          store.save();
+          audit("password_change_failed", { target: account.email, detail: "wrong current password", req });
+          throw new HttpError(401, "invalid_password", "Your current password is incorrect.");
+        }
+        account.failed = 0;
+        account.lockedUntil = 0;
+      }
       const problem = validatePassword(body.password);
       if (problem) throw bad(problem, "weak_password");
       const cred = hashPassword(body.password);
@@ -848,7 +925,7 @@ export function createApp(opts = {}) {
       account.lockedUntil = 0;
       revokeSessions(account.id, session.id); // every other device is signed out
       store.save();
-      audit("password_change", { by: account.email, target: account.email, detail: firstSet ? "temporary password replaced" : "", req });
+      audit("password_change", { by: account.email, target: account.email, detail: firstSet ? "temporary password replaced" : "voluntary change", req });
       return send(res, 200, { ok: true });
     }
 
@@ -934,9 +1011,12 @@ export function createApp(opts = {}) {
       if (action === "reset-password") {
         const pw = makeTempPassword();
         const cred = hashPassword(pw);
-        acc.pwSalt = cred.salt; acc.pwHash = cred.hash;
-        acc.mustChange = true; acc.temp = true; acc.failed = 0; acc.lockedUntil = 0;
-        const revoked = revokeSessions(acc.id);
+            acc.pwSalt = cred.salt;
+            acc.pwHash = cred.hash;
+            acc.mustChange = true;
+            acc.temp = true;
+            acc.failed = 0;
+            acc.lockedUntil = 0;        const revoked = revokeSessions(acc.id);
         store.save();
         audit("password_reset", { by: user.email, target: acc.email, detail: `${revoked} session(s) revoked, temporary credentials issued`, req });
         return send(res, 200, { ok: true, tempPassword: pw });
@@ -1012,8 +1092,8 @@ export function createApp(opts = {}) {
     let mt = p.match(/^\/api\/incidents\/([\w-]+)\/(seen|ack|onsite|resolve)$/);
     if (mt && m === "POST") {
       need(user, "principal", "responder");
-      const body = mt[2] === "resolve" || mt[2] === "ack" ? await readJson(req) : {};
-      const { incident, changed } = transition(user, mt[1], mt[2], body);
+      const transitionalBody = mt[2] === "resolve" || mt[2] === "ack" ? await readJson(req) : {};
+      const { incident, changed } = transition(user, mt[1], mt[2], transitionalBody);
       if (changed) commit({ type: "incident_updated", id: incident.id, status: incident.status });
       return send(res, 200, { incident: publicIncident(incident, user), changed });
     }
@@ -1173,6 +1253,25 @@ export function createApp(opts = {}) {
       if (acc) { acc.name = entry.name; acc.section = entry.section; } // keep the account record in step with the roster
       commit({ type: "roster_updated", id: entry.id });
       return send(res, 200, { user: userFromAccount(acc) || { id: entry.id, role: "teacher", name: entry.name, section: entry.section, room: entry.room, gps: entry.gps, registry: entry.registry, subtitle: `Teacher · ${entry.section}` } });
+    }
+
+    if (p === "/api/profile/room" && m === "PUT") {
+      need(user, "teacher");
+      const entry = store.db.roster.find((r) => r.id === user.id);
+      if (!entry) throw new HttpError(401, "unauthorized", "Please sign in again.");
+      const body = await readJson(req);
+      const room = C.roomById(String(body.roomId || ""));
+      if (!room) throw bad("Unknown room.");
+      entry.room = room.legacy;
+      // The saved coordinate follows the new room (one anchor per building).
+      const anchor = C.gpsForRoom(room);
+      if (anchor) entry.gps = anchor;
+      const acc = teacherAccount(entry.id);
+      if (acc) acc.name = entry.name;
+      store.save();
+      audit("saved_room_changed", { by: user.email, target: entry.id, detail: room.legacy, req });
+      commit({ type: "roster_updated", id: entry.id });
+      return send(res, 200, { ok: true, room: entry.room });
     }
 
     if (p === "/api/roster" && m === "POST") {

@@ -61,7 +61,7 @@ export function normalize(d) {
 }
 
 export function createStore({ dataDir, onPersistError = console.error } = {}) {
-  const file = dataDir ? path.join(dataDir, "agap-db.json") : null;
+  const file = dataDir ? path.join(dataDir, "aspire-db.json") : null;
   let db = freshDb();
   let timer = null;
   let touchTimer = null;

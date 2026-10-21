@@ -1,23 +1,36 @@
 import { useState, useEffect } from "react";
-import { Users, ClipboardList, Calendar, Plus, RefreshCw, Unlock, UserX, UserCheck, Key, Eye, EyeOff, Copy, Check, AlertCircle } from "lucide-react";
+import {
+  Users, ClipboardList, Calendar, Plus, RefreshCw, Unlock, UserX, UserCheck, Key, Eye, EyeOff, Copy, Check, AlertCircle,
+  SlidersHorizontal, User,
+} from "lucide-react";
 import { useApp } from "../lib/store";
-import { api, ApiError } from "../lib/api";
+import { api } from "../lib/api";
 import type { AccountRecord, AuditEntry, SchoolYear, TempCredential } from "../lib/types";
 import { Modal, ConfirmModal } from "../components/Modal";
 import { dateTime } from "../lib/format";
+import { Header, StatusBanner, BottomNav, SideNav, type NavTab } from "../components/Chrome";
+import AccountView from "./AccountView";
+import { WEIGHTS, CONSISTENCY, HAZARD_LOCATION_BOOST, TRANSPORT_MODES } from "../../shared/domain.js";
 
-const card = "bg-white border border-slate-200 rounded-2xl p-4";
-const h2 = "text-xs font-bold text-slate-500 uppercase tracking-wide mb-2 flex items-center gap-1.5";
-const input = "w-full min-h-11 rounded-xl border border-slate-300 px-3 text-sm";
-const btn = "min-h-10 px-3 rounded-xl text-sm font-bold flex items-center gap-1.5";
+const card = "rounded-2xl border border-slate-200 bg-white p-4";
+const h2 = "flex items-center gap-1.5 text-xs font-bold uppercase tracking-wide text-slate-500";
+const input = "min-h-12 w-full rounded-xl border border-slate-300 px-3 text-sm";
+const btn = "flex min-h-12 items-center gap-1.5 rounded-xl px-3 text-sm font-bold";
 const btnPrimary = `${btn} bg-brand-600 text-white`;
 const btnSecondary = `${btn} bg-slate-100 text-slate-700`;
 const btnDanger = `${btn} bg-blush-100 text-blush-700`;
 
-type Tab = "accounts" | "audit" | "schoolyear";
+type Tab = "accounts" | "audit" | "schoolyear" | "config" | "account";
+
+const TABS: NavTab<Tab>[] = [
+  { id: "accounts", label: "Accounts", icon: Users },
+  { id: "audit", label: "Audit", icon: ClipboardList },
+  { id: "schoolyear", label: "Year", icon: Calendar },
+  { id: "config", label: "Configuration", icon: SlidersHorizontal },
+  { id: "account", label: "Account", icon: User },
+];
 
 export default function AdminConsole() {
-  const { logout } = useApp();
   const [tab, setTab] = useState<Tab>("accounts");
   const [accounts, setAccounts] = useState<AccountRecord[]>([]);
   const [auditEntries, setAuditEntries] = useState<AuditEntry[]>([]);
@@ -36,9 +49,11 @@ export default function AdminConsole() {
 
   useEffect(() => {
     void loadData();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab]);
 
   async function loadData() {
+    if (tab === "account") { setLoading(false); return; }
     setLoading(true);
     setError("");
     try {
@@ -51,6 +66,8 @@ export default function AdminConsole() {
       } else if (tab === "schoolyear") {
         const r = await api<SchoolYear>("GET", "/api/admin/school-year");
         setSchoolYear(r);
+      } else {
+        setLoading(false);
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load data");
@@ -60,34 +77,18 @@ export default function AdminConsole() {
   }
 
   async function handleUnlock(acc: AccountRecord) {
-    try {
-      await api("POST", `/api/admin/accounts/${acc.id}/unlock`);
-      await loadData();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to unlock");
-    }
+    try { await api("POST", `/api/admin/accounts/${acc.id}/unlock`); await loadData(); }
+    catch (e) { setError(e instanceof Error ? e.message : "Failed to unlock"); }
   }
-
   async function handleActivate(acc: AccountRecord) {
-    try {
-      await api("POST", `/api/admin/accounts/${acc.id}/activate`);
-      await loadData();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to activate");
-    }
+    try { await api("POST", `/api/admin/accounts/${acc.id}/activate`); await loadData(); }
+    catch (e) { setError(e instanceof Error ? e.message : "Failed to activate"); }
   }
-
   async function handleDeactivate() {
     if (!deactivateTarget) return;
-    try {
-      await api("POST", `/api/admin/accounts/${deactivateTarget.id}/deactivate`);
-      setDeactivateTarget(null);
-      await loadData();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to deactivate");
-    }
+    try { await api("POST", `/api/admin/accounts/${deactivateTarget.id}/deactivate`); setDeactivateTarget(null); await loadData(); }
+    catch (e) { setError(e instanceof Error ? e.message : "Failed to deactivate"); }
   }
-
   async function handleReset() {
     if (!resetTarget) return;
     try {
@@ -95,259 +96,232 @@ export default function AdminConsole() {
       setResetResult(r.tempPassword);
       setResetTarget(null);
       await loadData();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to reset");
-    }
+    } catch (e) { setError(e instanceof Error ? e.message : "Failed to reset"); }
   }
-
   async function handleRollover() {
     try {
       const r = await api<{ accounts: TempCredential[] }>("POST", "/api/admin/school-year/start");
       setRolloverResult(r.accounts);
       setRolloverConfirm(false);
       await loadData();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to start new school year");
-    }
+    } catch (e) { setError(e instanceof Error ? e.message : "Failed to start new school year"); }
   }
 
-  const tabs: { id: Tab; label: string; icon: typeof Users }[] = [
-    { id: "accounts", label: "Accounts", icon: Users },
-    { id: "audit", label: "Audit Log", icon: ClipboardList },
-    { id: "schoolyear", label: "School Year", icon: Calendar },
-  ];
-
   return (
-    <div className="mx-auto w-full max-w-6xl px-3 py-3 space-y-3">
-      {/* Tab navigation */}
-      <div className="flex gap-1 bg-white rounded-xl p-1 border border-slate-200">
-        {tabs.map((t) => (
-          <button
-            key={t.id}
-            onClick={() => setTab(t.id)}
-            className={`flex-1 min-h-10 rounded-lg text-sm font-bold flex items-center justify-center gap-1.5 ${
-              tab === t.id ? "bg-brand-600 text-white" : "text-slate-600 hover:bg-slate-50"
-            }`}
-          >
-            <t.icon size={15} />
-            {t.label}
-          </button>
+    <div className="flex min-h-dvh bg-cream">
+      <SideNav tab={tab} setTab={setTab} tabs={TABS} subtitle="Super Admin" />
+      <div className="flex min-w-0 flex-1 flex-col">
+        <Header title="Super Admin" subtitle="Accounts, audit and configuration" />
+        <StatusBanner />
+        <main className="flex-1 px-3 py-3 pb-24 lg:pb-6">
+          {error && (
+            <div className="mb-3 flex items-start gap-2 rounded-xl border border-blush-200 bg-blush-100 p-3 text-sm text-blush-800">
+              <AlertCircle size={16} className="mt-0.5 shrink-0" />
+              <span>{error}</span>
+            </div>
+          )}
+          {loading && <div className="py-8 text-center text-slate-500">Loading…</div>}
+
+          {tab === "accounts" && !loading && (
+            <div className="space-y-3">
+              <div className="flex items-center justify-between">
+                <h2 className={h2}><Users size={14} /> Accounts ({accounts.length})</h2>
+                <button onClick={() => setShowProvision(true)} className={btnPrimary}><Plus size={15} /> Provision</button>
+              </div>
+              <AccountsPane accounts={accounts} onUnlock={handleUnlock} onActivate={handleActivate}
+                onReset={setResetTarget} onDeactivate={setDeactivateTarget} />
+            </div>
+          )}
+
+          {tab === "audit" && !loading && (
+            <div className="space-y-3">
+              <h2 className={h2}><ClipboardList size={14} /> Audit log (read-only)</h2>
+              <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white">
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead className="border-b border-slate-200 bg-slate-50">
+                      <tr>
+                        {["Time", "Action", "By", "Target", "Detail", "IP"].map((h) => <th key={h} className="px-3 py-2 text-left font-bold text-slate-600">{h}</th>)}
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {auditEntries.map((entry, i) => (
+                        <tr key={i} className="hover:bg-slate-50">
+                          <td className="whitespace-nowrap px-3 py-2 text-slate-500">{dateTime(entry.at)}</td>
+                          <td className="px-3 py-2">
+                            <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs font-bold text-slate-700">{entry.action}</span>
+                          </td>
+                          <td className="px-3 py-2 text-slate-600">{entry.by || "—"}</td>
+                          <td className="px-3 py-2 text-slate-600">{entry.target || "—"}</td>
+                          <td className="max-w-xs truncate px-3 py-2 text-slate-500">{entry.detail || "—"}</td>
+                          <td className="px-3 py-2 font-mono text-xs text-slate-400">{entry.ip || "—"}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+              {auditEntries.length === 0 && <p className="py-8 text-center text-slate-500">No audit entries yet.</p>}
+            </div>
+          )}
+
+          {tab === "schoolyear" && !loading && (
+            <div className="space-y-3">
+              <h2 className={h2}><Calendar size={14} /> School year</h2>
+              <div className={card}>
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <p className="text-3xl font-black text-slate-800">Year {schoolYear?.count || 0}</p>
+                    {schoolYear?.startedAt && <p className="mt-1 text-sm text-slate-600">Started: {dateTime(schoolYear.startedAt)}</p>}
+                    <p className="mt-1 text-xs text-slate-500">{schoolYear?.accounts || 0} total accounts</p>
+                  </div>
+                  <button onClick={() => setRolloverConfirm(true)} className={btnPrimary}>
+                    <RefreshCw size={15} /> Start new year
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {tab === "config" && <ConfigTab />}
+          {tab === "account" && <AccountView />}
+        </main>
+        <BottomNav tab={tab} setTab={setTab} tabs={TABS} />
+      </div>
+
+      {showProvision && (
+        <ProvisionModal onClose={() => setShowProvision(false)}
+          onCreated={(cred) => { setShowProvision(false); setProvisionResult(cred); void loadData(); }} />
+      )}
+      {provisionResult && <TempCredentialModal title="Account provisioned" credential={provisionResult} onClose={() => setProvisionResult(null)} />}
+      {resetTarget && (
+        <ConfirmModal title="Reset password" onClose={() => setResetTarget(null)}
+          message={`This will generate a new temporary password for ${resetTarget.name} (${resetTarget.email}). All existing sessions will be revoked.`}
+          confirmLabel="Reset password" onConfirm={() => void handleReset()} />
+      )}
+      {resetResult && <PasswordResultModal tempPassword={resetResult} onClose={() => setResetResult(null)} />}
+      {deactivateTarget && (
+        <ConfirmModal title="Deactivate account" danger onClose={() => setDeactivateTarget(null)}
+          message={`This will deactivate ${deactivateTarget.name} (${deactivateTarget.email}). All their sessions will be revoked immediately.`}
+          confirmLabel="Deactivate" onConfirm={() => void handleDeactivate()} />
+      )}
+      {rolloverConfirm && (
+        <ConfirmModal title="Start new school year" onClose={() => setRolloverConfirm(false)}
+          message="This will revoke all existing sessions for non-admin users and issue temporary credentials. Each user must set a new password on their next sign-in."
+          confirmLabel="Start new year" onConfirm={() => void handleRollover()} />
+      )}
+      {rolloverResult && <RolloverResultModal credentials={rolloverResult} onClose={() => setRolloverResult(null)} />}
+    </div>
+  );
+}
+
+function StatusChips({ acc }: { acc: AccountRecord }) {
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      <span className={`rounded-full px-2 py-0.5 text-xs font-bold ${acc.status === "active" ? "bg-emerald-100 text-emerald-700" : "bg-slate-100 text-slate-500"}`}>{acc.status}</span>
+      {acc.mustChange && <span className="rounded-full bg-amber-100 px-2 py-0.5 text-xs font-bold text-amber-700">Must change password</span>}
+      {acc.temp && <span className="rounded-full bg-blue-100 px-2 py-0.5 text-xs font-bold text-blue-700">Temporary credential</span>}
+      {acc.locked && <span className="rounded-full bg-blush-100 px-2 py-0.5 text-xs font-bold text-blush-700">Locked</span>}
+    </div>
+  );
+}
+
+function AccountActions({ acc, onUnlock, onActivate, onReset, onDeactivate }: {
+  acc: AccountRecord;
+  onUnlock: (a: AccountRecord) => void; onActivate: (a: AccountRecord) => void;
+  onReset: (a: AccountRecord) => void; onDeactivate: (a: AccountRecord) => void;
+}) {
+  return (
+    <div className="flex flex-wrap gap-1.5">
+      {acc.locked && <button onClick={() => onUnlock(acc)} className={btnSecondary} title="Unlock account"><Unlock size={15} /> Unlock</button>}
+      <button onClick={() => onReset(acc)} className={btnSecondary} title="Reset password"><Key size={15} /> Reset</button>
+      {acc.status === "active"
+        ? <button onClick={() => onDeactivate(acc)} className={btnDanger} title="Deactivate"><UserX size={15} /> Deactivate</button>
+        : <button onClick={() => onActivate(acc)} className={btnSecondary} title="Reactivate"><UserCheck size={15} /> Activate</button>}
+    </div>
+  );
+}
+
+function AccountsPane({ accounts, onUnlock, onActivate, onReset, onDeactivate }: {
+  accounts: AccountRecord[];
+  onUnlock: (a: AccountRecord) => void; onActivate: (a: AccountRecord) => void;
+  onReset: (a: AccountRecord) => void; onDeactivate: (a: AccountRecord) => void;
+}) {
+  const [sel, setSel] = useState<string | null>(null);
+  const selected = accounts.find((a) => a.id === sel) ?? accounts[0] ?? null;
+  if (accounts.length === 0) return <p className="py-8 text-center text-sm text-slate-500">No accounts yet.</p>;
+  return (
+    <>
+      <div className="grid gap-2 lg:hidden">
+        {accounts.map((acc) => (
+          <div key={acc.id} className={card}>
+            <p className="text-base font-bold text-slate-800">{acc.name}</p>
+            <p className="text-sm text-slate-600">{acc.email}</p>
+            <p className="mt-0.5 text-xs text-slate-500">{acc.role}{acc.section ? ` · ${acc.section}` : ""}</p>
+            <div className="mt-2"><StatusChips acc={acc} /></div>
+            <div className="mt-3"><AccountActions acc={acc} onUnlock={onUnlock} onActivate={onActivate} onReset={onReset} onDeactivate={onDeactivate} /></div>
+          </div>
         ))}
       </div>
 
-      {error && (
-        <div className="rounded-xl bg-blush-100 border border-blush-200 text-blush-800 p-3 text-sm flex items-start gap-2">
-          <AlertCircle size={16} className="mt-0.5 shrink-0" />
-          <span>{error}</span>
-        </div>
-      )}
-
-      {loading && <div className="text-center py-8 text-slate-500">Loading...</div>}
-
-      {/* Accounts Tab */}
-      {!loading && tab === "accounts" && (
-        <div className="space-y-3">
-          <div className="flex items-center justify-between">
-            <h2 className={h2}><Users size={14} /> User Accounts ({accounts.length})</h2>
-            <button onClick={() => setShowProvision(true)} className={btnPrimary}>
-              <Plus size={15} /> Provision Account
-            </button>
-          </div>
-          <div className="grid gap-2">
-            {accounts.map((acc) => (
-              <div key={acc.id} className={card}>
-                <div className="flex items-start justify-between gap-3">
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <span className="font-bold text-slate-800">{acc.name}</span>
-                      <span className={`text-xs px-2 py-0.5 rounded-full font-bold ${
-                        acc.status === "active" ? "bg-emerald-100 text-emerald-700" : "bg-slate-100 text-slate-500"
-                      }`}>
-                        {acc.status}
-                      </span>
-                      {acc.mustChange && (
-                        <span className="text-xs px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 font-bold">
-                          Must change password
-                        </span>
-                      )}
-                      {acc.temp && (
-                        <span className="text-xs px-2 py-0.5 rounded-full bg-blue-100 text-blue-700 font-bold">
-                          Temporary credentials
-                        </span>
-                      )}
-                      {acc.locked && (
-                        <span className="text-xs px-2 py-0.5 rounded-full bg-blush-100 text-blush-700 font-bold">
-                          Locked
-                        </span>
-                      )}
-                    </div>
-                    <p className="text-sm text-slate-600 mt-1">{acc.email}</p>
-                    <p className="text-xs text-slate-500">{acc.role} {acc.section ? `· ${acc.section}` : ""}</p>
-                    {acc.lastLoginAt && (
-                      <p className="text-xs text-slate-400 mt-1">Last sign-in: {dateTime(acc.lastLoginAt)}</p>
-                    )}
-                  </div>
-                  <div className="flex gap-1.5 shrink-0">
-                    {acc.locked && (
-                      <button onClick={() => handleUnlock(acc)} className={btnSecondary} title="Unlock account">
-                        <Unlock size={15} />
-                      </button>
-                    )}
-                    <button onClick={() => setResetTarget(acc)} className={btnSecondary} title="Reset password">
-                      <Key size={15} />
-                    </button>
-                    {acc.status === "active" ? (
-                      <button onClick={() => setDeactivateTarget(acc)} className={btnDanger} title="Deactivate">
-                        <UserX size={15} />
-                      </button>
-                    ) : (
-                      <button onClick={() => handleActivate(acc)} className={btnSecondary} title="Reactivate">
-                        <UserCheck size={15} />
-                      </button>
-                    )}
-                  </div>
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* Audit Log Tab */}
-      {!loading && tab === "audit" && (
-        <div className="space-y-3">
-          <h2 className={h2}><ClipboardList size={14} /> Audit Log (read-only)</h2>
-          <div className="bg-white border border-slate-200 rounded-2xl overflow-hidden">
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm">
-                <thead className="bg-slate-50 border-b border-slate-200">
-                  <tr>
-                    <th className="px-3 py-2 text-left font-bold text-slate-600">Time</th>
-                    <th className="px-3 py-2 text-left font-bold text-slate-600">Action</th>
-                    <th className="px-3 py-2 text-left font-bold text-slate-600">By</th>
-                    <th className="px-3 py-2 text-left font-bold text-slate-600">Target</th>
-                    <th className="px-3 py-2 text-left font-bold text-slate-600">Detail</th>
-                    <th className="px-3 py-2 text-left font-bold text-slate-600">IP</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100">
-                  {auditEntries.map((entry, i) => (
-                    <tr key={i} className="hover:bg-slate-50">
-                      <td className="px-3 py-2 whitespace-nowrap text-slate-500">{dateTime(entry.at)}</td>
-                      <td className="px-3 py-2">
-                        <span className={`text-xs px-2 py-0.5 rounded-full font-bold ${
-                          entry.action.includes("failed") || entry.action.includes("locked") ? "bg-blush-100 text-blush-700" :
-                          entry.action.includes("success") || entry.action.includes("activated") ? "bg-emerald-100 text-emerald-700" :
-                          "bg-slate-100 text-slate-700"
-                        }`}>
-                          {entry.action}
-                        </span>
-                      </td>
-                      <td className="px-3 py-2 text-slate-600">{entry.by || "—"}</td>
-                      <td className="px-3 py-2 text-slate-600">{entry.target || "—"}</td>
-                      <td className="px-3 py-2 text-slate-500 max-w-xs truncate">{entry.detail || "—"}</td>
-                      <td className="px-3 py-2 text-slate-400 font-mono text-xs">{entry.ip || "—"}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </div>
-          {auditEntries.length === 0 && <p className="text-center text-slate-500 py-8">No audit entries yet.</p>}
-        </div>
-      )}
-
-      {/* School Year Tab */}
-      {!loading && tab === "schoolyear" && (
-        <div className="space-y-3">
-          <h2 className={h2}><Calendar size={14} /> School Year</h2>
-          <div className={card}>
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-3xl font-black text-slate-800">Year {schoolYear?.count || 0}</p>
-                {schoolYear?.startedAt && (
-                  <p className="text-sm text-slate-600 mt-1">Started: {dateTime(schoolYear.startedAt)}</p>
-                )}
-                <p className="text-xs text-slate-500 mt-1">{schoolYear?.accounts || 0} total accounts</p>
-              </div>
-              <button onClick={() => setRolloverConfirm(true)} className={btnPrimary}>
-                <RefreshCw size={15} /> Start New School Year
+      <div className="hidden items-start gap-4 lg:grid lg:grid-cols-[22rem_minmax(0,1fr)]">
+        <ul className="max-h-[calc(100dvh-14rem)] space-y-1.5 overflow-y-auto pr-1">
+          {accounts.map((acc) => (
+            <li key={acc.id}>
+              <button onClick={() => setSel(acc.id)} aria-current={selected?.id === acc.id ? "true" : undefined}
+                className={`w-full rounded-xl border p-3 text-left ${selected?.id === acc.id ? "border-brand-500 bg-white shadow-sm" : "border-slate-200 bg-white hover:border-brand-300"}`}>
+                <p className="truncate text-sm font-bold text-slate-800">{acc.name}</p>
+                <p className="truncate text-xs text-slate-500">{acc.role}{acc.section ? ` · ${acc.section}` : ""}</p>
+                <p className={`mt-1 text-[11px] font-bold uppercase tracking-wide ${acc.status === "active" ? "text-emerald-700" : "text-slate-400"}`}>{acc.status}</p>
               </button>
-            </div>
+            </li>
+          ))}
+        </ul>
+        {selected && (
+          <div className={card}>
+            <p className="text-lg font-black text-slate-900">{selected.name}</p>
+            <p className="text-sm text-slate-600">{selected.email}</p>
+            <p className="mt-0.5 text-xs text-slate-500">{selected.role}{selected.section ? ` · ${selected.section}` : ""}</p>
+            <div className="mt-2"><StatusChips acc={selected} /></div>
+            {selected.lastLoginAt && <p className="mt-2 text-xs text-slate-400">Last sign-in: {dateTime(selected.lastLoginAt)}</p>}
+            <div className="mt-4"><AccountActions acc={selected} onUnlock={onUnlock} onActivate={onActivate} onReset={onReset} onDeactivate={onDeactivate} /></div>
           </div>
-        </div>
-      )}
+        )}
+      </div>
+    </>
+  );
+}
 
-      {/* Provision Account Modal */}
-      {showProvision && (
-        <ProvisionModal
-          onClose={() => setShowProvision(false)}
-          onCreated={(cred) => {
-            setShowProvision(false);
-            setProvisionResult(cred);
-            void loadData();
-          }}
-        />
-      )}
-
-      {/* Provision Result Modal */}
-      {provisionResult && (
-        <TempCredentialModal
-          title="Account Provisioned"
-          credential={provisionResult}
-          onClose={() => setProvisionResult(null)}
-        />
-      )}
-
-      {/* Reset Password Modal */}
-      {resetTarget && (
-        <ConfirmModal
-          title="Reset Password"
-          message={`This will generate a new temporary password for ${resetTarget.name} (${resetTarget.email}). All existing sessions will be revoked.`}
-          confirmLabel="Reset Password"
-          onConfirm={handleReset}
-          onClose={() => setResetTarget(null)}
-        />
-      )}
-
-      {/* Reset Result Modal */}
-      {resetResult && (
-        <PasswordResultModal
-          tempPassword={resetResult}
-          onClose={() => setResetResult(null)}
-        />
-      )}
-
-      {/* Deactivate Modal */}
-      {deactivateTarget && (
-        <ConfirmModal
-          title="Deactivate Account"
-          message={`This will deactivate ${deactivateTarget.name} (${deactivateTarget.email}). All their sessions will be revoked immediately.`}
-          confirmLabel="Deactivate"
-          danger
-          onConfirm={handleDeactivate}
-          onClose={() => setDeactivateTarget(null)}
-        />
-      )}
-
-      {/* Rollover Confirm Modal */}
-      {rolloverConfirm && (
-        <ConfirmModal
-          title="Start New School Year"
-          message="This will revoke all existing sessions for non-admin users and issue temporary credentials. Each user must set a new password on their next sign-in."
-          confirmLabel="Start New Year"
-          onConfirm={handleRollover}
-          onClose={() => setRolloverConfirm(false)}
-        />
-      )}
-
-      {/* Rollover Result Modal */}
-      {rolloverResult && (
-        <RolloverResultModal
-          credentials={rolloverResult}
-          onClose={() => setRolloverResult(null)}
-        />
-      )}
+function ConfigTab() {
+  const { escalationMinutes } = useApp();
+  const bands: [string, string][] = [["Critical", "4.0 and up"], ["High", "3.0 – 3.99"], ["Moderate", "below 3.0"]];
+  return (
+    <div className="mx-auto w-full max-w-3xl space-y-3">
+      <section className={card}>
+        <h2 className={`${h2} mb-2`}>Urgency model (read-only)</h2>
+        <dl className="divide-y divide-slate-100 text-sm">
+          {([["Severity", WEIGHTS.severity], ["Vulnerability", WEIGHTS.vulnerability], ["Location risk", WEIGHTS.locationRisk], ["Time sensitivity", WEIGHTS.timeSensitivity]] as const).map(([k, v]) => (
+            <div key={k} className="flex items-center justify-between py-1.5"><dt className="text-slate-600">{k}</dt><dd className="font-mono font-bold text-brand-700">{v.toFixed(2)}</dd></div>
+          ))}
+        </dl>
+        <p className="mt-2 text-xs text-slate-500">Consistency ratio {CONSISTENCY.cr} · λmax {CONSISTENCY.lambdaMax} · CI {CONSISTENCY.ci} · RI {CONSISTENCY.ri}. Default values until the expert panel validates them.</p>
+      </section>
+      <section className={card}>
+        <h2 className={`${h2} mb-2`}>Priority rules</h2>
+        <dl className="divide-y divide-slate-100 text-sm">
+          <div className="flex justify-between py-1.5"><dt className="text-slate-600">Score bands</dt><dd className="text-right text-slate-800">{bands.map(([k, v]) => `${k} ${v}`).join(" · ")}</dd></div>
+          <div className="flex justify-between py-1.5"><dt className="text-slate-600">Critical override</dt><dd className="text-slate-800">Severity 5 or headcount mismatch</dd></div>
+          <div className="flex justify-between py-1.5"><dt className="text-slate-600">Escalation</dt><dd className="text-slate-800">Barangay after {escalationMinutes[0]} min · CDRRMO after {escalationMinutes[1]} min</dd></div>
+          <div className="flex justify-between py-1.5"><dt className="text-slate-600">Hazard mode boost</dt><dd className="font-mono text-slate-800">+{HAZARD_LOCATION_BOOST}</dd></div>
+        </dl>
+      </section>
+      <section className={card}>
+        <h2 className={`${h2} mb-2`}>Responder speeds</h2>
+        <ul className="space-y-1 text-sm text-slate-700">
+          {TRANSPORT_MODES.map((m) => <li key={m.id}>{m.label}: <span className="font-mono">{m.kmh} km/h</span></li>)}
+        </ul>
+        <p className="mt-2 text-xs text-slate-500">Read-only. Change these in code after expert-panel validation.</p>
+      </section>
     </div>
   );
 }
@@ -379,18 +353,15 @@ function ProvisionModal({ onClose, onCreated }: { onClose: () => void; onCreated
   }
 
   return (
-    <Modal title="Provision New Account" onClose={onClose}>
+    <Modal title="Provision new account" onClose={onClose}>
       <div className="space-y-3">
-        <label className="block text-sm font-medium text-slate-700">
-          Email
+        <label className="block text-sm font-medium text-slate-700">Email
           <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} className={`${input} mt-1`} placeholder="user@example.com" />
         </label>
-        <label className="block text-sm font-medium text-slate-700">
-          Full Name
+        <label className="block text-sm font-medium text-slate-700">Full name
           <input value={name} onChange={(e) => setName(e.target.value)} className={`${input} mt-1`} placeholder="Juan Dela Cruz" />
         </label>
-        <label className="block text-sm font-medium text-slate-700">
-          Role
+        <label className="block text-sm font-medium text-slate-700">Role
           <select value={role} onChange={(e) => setRole(e.target.value as typeof role)} className={`${input} mt-1`}>
             <option value="teacher">Teacher</option>
             <option value="principal">Principal</option>
@@ -399,35 +370,26 @@ function ProvisionModal({ onClose, onCreated }: { onClose: () => void; onCreated
           </select>
         </label>
         {role === "parent" && (
-          <label className="block text-sm font-medium text-slate-700">
-            Section
+          <label className="block text-sm font-medium text-slate-700">Section
             <input value={section} onChange={(e) => setSection(e.target.value)} className={`${input} mt-1`} placeholder="Grade 3 - Sec A" />
           </label>
         )}
         <div>
           <label className="block text-sm font-medium text-slate-700">
-            Password <span className="text-slate-400 font-normal">(leave blank for temporary credentials)</span>
+            Password <span className="font-normal text-slate-400">(blank = temporary)</span>
           </label>
           <div className="relative mt-1">
-            <input
-              type={showPassword ? "text" : "password"}
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              className={`${input} pr-10`}
-              placeholder="Min 8 characters"
-            />
-            <button
-              type="button"
-              onClick={() => setShowPassword(!showPassword)}
-              className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400"
-            >
+            <input type={showPassword ? "text" : "password"} value={password} onChange={(e) => setPassword(e.target.value)}
+              className={`${input} pr-12`} placeholder="Min 8 characters" />
+            <button type="button" onClick={() => setShowPassword(!showPassword)} aria-label={showPassword ? "Hide password" : "Show password"}
+              className="absolute right-0 top-1/2 flex h-12 w-12 -translate-y-1/2 items-center justify-center text-slate-400">
               {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
             </button>
           </div>
         </div>
         {error && <p className="text-sm text-blush-700">{error}</p>}
-        <button onClick={submit} disabled={busy || !email || !name} className={`${btnPrimary} w-full justify-center`}>
-          {busy ? "Creating..." : "Create Account"}
+        <button onClick={() => void submit()} disabled={busy || !email || !name} className={`${btnPrimary} w-full justify-center`}>
+          {busy ? "Creating…" : "Create account"}
         </button>
       </div>
     </Modal>
@@ -436,32 +398,28 @@ function ProvisionModal({ onClose, onCreated }: { onClose: () => void; onCreated
 
 function TempCredentialModal({ title, credential, onClose }: { title: string; credential: TempCredential; onClose: () => void }) {
   const [copied, setCopied] = useState(false);
-
   function copyToClipboard() {
     void navigator.clipboard.writeText(`${credential.email} / ${credential.tempPassword}`);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   }
-
   return (
     <Modal title={title} onClose={onClose}>
       <div className="space-y-3">
-        <div className="rounded-xl bg-amber-50 border border-amber-200 p-3 text-sm text-amber-800">
-          <p className="font-bold mb-1">⚠️ Important: Save these credentials now</p>
+        <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
+          <p className="mb-1 font-bold">⚠️ Save these credentials now</p>
           <p>This is the only time the temporary password will be shown. Share it securely with the user.</p>
         </div>
-        <div className="rounded-xl bg-slate-50 border border-slate-200 p-3">
-          <p className="text-xs text-slate-500 mb-1">Email</p>
+        <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+          <p className="mb-1 text-xs text-slate-500">Email</p>
           <p className="font-mono text-sm font-bold">{credential.email}</p>
-          <p className="text-xs text-slate-500 mt-3 mb-1">Temporary Password</p>
+          <p className="mb-1 mt-3 text-xs text-slate-500">Temporary password</p>
           <p className="font-mono text-sm font-bold">{credential.tempPassword}</p>
         </div>
         <button onClick={copyToClipboard} className={`${btnSecondary} w-full justify-center`}>
-          {copied ? <><Check size={15} /> Copied!</> : <><Copy size={15} /> Copy Credentials</>}
+          {copied ? <><Check size={15} /> Copied!</> : <><Copy size={15} /> Copy credentials</>}
         </button>
-        <p className="text-xs text-slate-500 text-center">
-          The user will be required to set a new password on their first sign-in.
-        </p>
+        <p className="text-center text-xs text-slate-500">The user must set a new password on their first sign-in.</p>
       </div>
     </Modal>
   );
@@ -469,23 +427,20 @@ function TempCredentialModal({ title, credential, onClose }: { title: string; cr
 
 function PasswordResultModal({ tempPassword, onClose }: { tempPassword: string; onClose: () => void }) {
   const [copied, setCopied] = useState(false);
-
   return (
-    <Modal title="Password Reset" onClose={onClose}>
+    <Modal title="Password reset" onClose={onClose}>
       <div className="space-y-3">
-        <div className="rounded-xl bg-amber-50 border border-amber-200 p-3 text-sm text-amber-800">
-          <p className="font-bold mb-1">⚠️ Save this temporary password</p>
+        <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
+          <p className="mb-1 font-bold">⚠️ Save this temporary password</p>
           <p>The user must set a new password on their next sign-in.</p>
         </div>
-        <div className="rounded-xl bg-slate-50 border border-slate-200 p-3">
-          <p className="text-xs text-slate-500 mb-1">Temporary Password</p>
+        <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+          <p className="mb-1 text-xs text-slate-500">Temporary password</p>
           <p className="font-mono text-sm font-bold">{tempPassword}</p>
         </div>
-        <button
-          onClick={() => { void navigator.clipboard.writeText(tempPassword); setCopied(true); setTimeout(() => setCopied(false), 2000); }}
-          className={`${btnSecondary} w-full justify-center`}
-        >
-          {copied ? <><Check size={15} /> Copied!</> : <><Copy size={15} /> Copy Password</>}
+        <button onClick={() => { void navigator.clipboard.writeText(tempPassword); setCopied(true); setTimeout(() => setCopied(false), 2000); }}
+          className={`${btnSecondary} w-full justify-center`}>
+          {copied ? <><Check size={15} /> Copied!</> : <><Copy size={15} /> Copy password</>}
         </button>
       </div>
     </Modal>
@@ -494,27 +449,24 @@ function PasswordResultModal({ tempPassword, onClose }: { tempPassword: string; 
 
 function RolloverResultModal({ credentials, onClose }: { credentials: TempCredential[]; onClose: () => void }) {
   const [copied, setCopied] = useState(false);
-
   function copyAll() {
-    const text = credentials.map((c) => `${c.email} / ${c.tempPassword}`).join("\n");
-    void navigator.clipboard.writeText(text);
+    void navigator.clipboard.writeText(credentials.map((c) => `${c.email} / ${c.tempPassword}`).join("\n"));
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   }
-
   return (
-    <Modal title="New School Year Started" onClose={onClose} wide>
+    <Modal title="New school year started" onClose={onClose} wide>
       <div className="space-y-3">
-        <div className="rounded-xl bg-amber-50 border border-amber-200 p-3 text-sm text-amber-800">
-          <p className="font-bold mb-1">⚠️ {credentials.length} temporary credentials generated</p>
-          <p>All existing sessions have been revoked. Share these credentials securely. Users must set new passwords on first sign-in.</p>
+        <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
+          <p className="mb-1 font-bold">⚠️ {credentials.length} temporary credentials generated</p>
+          <p>All existing sessions were revoked. Share these credentials securely; users must set new passwords on first sign-in.</p>
         </div>
         <div className="max-h-64 overflow-y-auto rounded-xl border border-slate-200">
           <table className="w-full text-sm">
-            <thead className="bg-slate-50 sticky top-0">
+            <thead className="sticky top-0 bg-slate-50">
               <tr>
                 <th className="px-3 py-2 text-left font-bold text-slate-600">Email</th>
-                <th className="px-3 py-2 text-left font-bold text-slate-600">Temporary Password</th>
+                <th className="px-3 py-2 text-left font-bold text-slate-600">Temporary password</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
@@ -528,7 +480,7 @@ function RolloverResultModal({ credentials, onClose }: { credentials: TempCreden
           </table>
         </div>
         <button onClick={copyAll} className={`${btnSecondary} w-full justify-center`}>
-          {copied ? <><Check size={15} /> Copied!</> : <><Copy size={15} /> Copy All Credentials</>}
+          {copied ? <><Check size={15} /> Copied!</> : <><Copy size={15} /> Copy all credentials</>}
         </button>
       </div>
     </Modal>

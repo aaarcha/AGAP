@@ -1,9 +1,9 @@
 {
-  "name": "agap",
+  "name": "aspire",
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "AGAP – Automated Guidance and Emergency Prioritization (Sinalhan Elementary School)",
+  "description": "ASPIRE: An Emergency Reporting and Incident Prioritization PWA Using AHP-SAW for Sinalhan Elementary School",
   "engines": { "node": ">=20" },
   "scripts": {
     "dev": "vite",

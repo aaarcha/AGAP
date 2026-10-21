@@ -5,7 +5,12 @@ import os from "node:os";
 import path from "node:path";
 import http from "node:http";
 import { createApp, DEMO_PASSWORD, DEMO_ADMIN_EMAIL, DEMO_ADMIN_PASSWORD } from "../server/app.js";
-import { computeScore, bandFor } from "../shared/domain.js";
+import { SEED_ROSTER } from "../server/store.js";
+import { LOCATION_RISK_SAVED_ROOM, computeScore, bandFor } from "../shared/domain.js";
+import {
+  CAMPUS_BY_LEGACY, CAMPUS_ROOMS_FLAT, featureForPoint, featureLabel, gpsToMapPoint,
+  nearestCampusFeatureForLocation, roomById, roomByLegacy,
+} from "../shared/campus.js";
 
 const ADMIN_EMAIL = DEMO_ADMIN_EMAIL;
 const ADMIN_BOOTSTRAP_PASSWORD = DEMO_ADMIN_PASSWORD;
@@ -278,19 +283,45 @@ test("server-sent events push a change to connected devices", async () => {
   await s.close();
 });
 
-test("data survives a restart and reset clears it", async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agap-"));
+test("data survives a restart and reset clears it when the demo flag is on", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "aspire-"));
   let s = await boot({ dataDir: dir });
   const teacher = await s.login("teacher", "t1");
   await s.call("POST", "/api/incidents", { token: teacher, body: report() });
   await s.close();
-  s = await boot({ dataDir: dir });
+  s = await boot({ dataDir: dir, allowReset: true });
   const principal = await s.login("principal");
   assert.equal((await s.call("GET", "/api/state", { token: principal })).json.incidents.length, 1);
   assert.equal((await s.call("POST", "/api/admin/reset", { token: principal })).status, 200);
   assert.equal((await s.call("GET", "/api/state", { token: principal })).json.incidents.length, 0);
   await s.close();
   fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("demo endpoints are off by default and only enabled by the server flag", async () => {
+  const s = await boot();
+  const principal = await s.login("principal");
+  assert.equal((await s.call("GET", "/api/config")).json.demoReset, false);
+  assert.equal((await s.call("POST", "/api/admin/reset", { token: principal })).status, 403);
+  await s.close();
+
+  const on = await boot({ allowReset: true });
+  const p2 = await on.login("principal");
+  assert.equal((await on.call("GET", "/api/config")).json.demoReset, true);
+  assert.equal((await on.call("POST", "/api/admin/reset", { token: p2 })).status, 200);
+  await on.close();
+});
+
+test("the school phone number comes from configuration", async () => {
+  const s = await boot({ schoolPhone: "+63 49 555 0100" });
+  const cfg = (await s.call("GET", "/api/config")).json;
+  assert.equal(cfg.school.phone, "+63 49 555 0100");
+  assert.equal(cfg.school.name, "Sinalhan Elementary School");
+  await s.close();
+
+  const empty = await boot();
+  assert.equal((await empty.call("GET", "/api/config")).json.school.phone, "");
+  await empty.close();
 });
 
 test("input validation", async () => {
@@ -423,16 +454,19 @@ test("headcount: aggregate counts only; a mismatch forces CRITICAL and clears wh
   const teacher = await s.login("teacher", "t1"); // registry 28
   const principal = await s.login("principal");
   const parent = await s.login("parent", "Grade 3 - Sec A");
-  const { incident } = (await s.call("POST", "/api/incidents", { token: teacher, body: report({ categoryId: "medical", subId: "heatstroke", populationId: "individual" }) })).json;
-  assert.equal(incident.score, 2.6);
+  const { incident } = (await s.call("POST", "/api/incidents", { token: teacher, body: report({ categoryId: "medical", subId: "heatstroke", populationId: "classroom" }) })).json;
+  assert.equal(incident.populationId, "classroom");
+  assert.equal(incident.score, 3.18); // 0.5×3 + 0.29×4 + 0.11×2 + 0.10×3
   assert.equal(incident.accountability.status, "pending");
+  assert.equal(incident.accountability.total, 1, "a classroom ticket asks only for its own section");
 
   const bad = await hc(s.call, teacher, incident.id, { present: 27 });
   assert.equal(bad.status, 200);
   assert.equal(bad.json.incident.accountability.status, "mismatch");
   assert.deepEqual(bad.json.incident.overrideReasons, ["HEADCOUNT_MISMATCH"]);
   assert.equal(bad.json.incident.timeSensitivity, 5);
-  assert.ok(bad.json.incident.score > 2.6, "mismatch raises the score");
+  assert.equal(bandFor(bad.json.incident.score, bad.json.incident.status, bad.json.incident.overrideReasons), "CRITICAL", "mismatch still forces CRITICAL on a group ticket");
+  assert.ok(bad.json.incident.score > 3.18, "mismatch raises the score");
   const pv = (await s.call("GET", "/api/state", { token: parent })).json.incidents[0];
   assert.deepEqual(pv.overrideReasons, ["HEADCOUNT_MISMATCH"]);
   assert.deepEqual(pv.headcounts.map((h) => [h.present, h.expected]), [[27, 28]]);
@@ -441,7 +475,7 @@ test("headcount: aggregate counts only; a mismatch forces CRITICAL and clears wh
   const fixed = await hc(s.call, teacher, incident.id, { present: 28 });
   assert.equal(fixed.json.incident.accountability.status, "verified");
   assert.deepEqual(fixed.json.incident.overrideReasons, []);
-  assert.equal(fixed.json.incident.score, 2.6, "override cleared, score back to normal");
+  assert.equal(fixed.json.incident.score, 3.18, "override cleared, score back to normal");
 
   assert.equal((await hc(s.call, teacher, incident.id, { present: -1 })).status, 400);
   assert.equal((await hc(s.call, teacher, incident.id, { present: "abc" })).status, 400);
@@ -460,12 +494,61 @@ test("headcount: whole-school incidents need every active section before they re
   const t2 = await s.login("teacher", "t2");
   const t3 = await s.login("teacher", "t3");
   const { incident } = (await s.call("POST", "/api/incidents", { token: t1, body: report({ populationId: "wholeschool" }) })).json;
+  assert.equal(incident.populationId, "wholeschool");
   assert.equal(incident.accountability.total, 3);
   assert.equal((await hc(s.call, t1, incident.id, { present: 28 })).json.incident.accountability.status, "partial");
   assert.equal((await hc(s.call, t2, incident.id, { present: 30 })).json.incident.accountability.status, "partial");
   const last = await hc(s.call, t3, incident.id, { present: 29 });
   assert.equal(last.json.incident.accountability.status, "verified");
   assert.equal(last.json.incident.accountability.reported, 3);
+  await s.close();
+});
+
+test("headcount: an individual ticket never asks for a headcount", async () => {
+  const s = await boot();
+  const teacher = await s.login("teacher", "t1");
+  const { incident } = (await s.call("POST", "/api/incidents", { token: teacher, body: report({ populationId: "individual" }) })).json;
+  assert.equal(incident.populationId, "individual");
+  assert.equal(incident.accountability.status, "not_required");
+  assert.equal(incident.accountability.total, 0);
+  assert.deepEqual(incident.overrideReasons, [], "no mismatch override can arise without a headcount");
+  assert.equal((await hc(s.call, teacher, incident.id, { present: 27 })).status, 403, "the server refuses headcounts on individual tickets");
+  await s.close();
+});
+
+test("headcount: a classroom ticket asks only for its own section", async () => {
+  const s = await boot();
+  const t1 = await s.login("teacher", "t1");
+  const t2 = await s.login("teacher", "t2");
+  const principal = await s.login("principal");
+  const { incident } = (await s.call("POST", "/api/incidents", { token: t1, body: report({ populationId: "classroom" }) })).json;
+  assert.equal(incident.accountability.status, "pending");
+  assert.equal(incident.accountability.total, 1);
+  assert.equal((await hc(s.call, t2, incident.id, { present: 30 })).status, 404, "another section is not part of this ticket");
+  assert.equal((await hc(s.call, principal, incident.id, { section: "Grade 4 - Sec B", present: 30 })).status, 403, "the principal can only count a section on the ticket");
+  const done = await hc(s.call, t1, incident.id, { present: 28 });
+  assert.equal(done.json.incident.accountability.status, "verified");
+  assert.equal(done.json.incident.accountability.reported, 1);
+  await s.close();
+});
+
+test("merge upgrade: corroboration with a wider population raises the ticket's scope and headcount duty", async () => {
+  const s = await boot();
+  const teacher = await s.login("teacher", "t1");
+  const solo = (await s.call("POST", "/api/incidents", { token: teacher, body: report({ populationId: "individual" }) })).json.incident;
+  assert.equal(solo.accountability.status, "not_required");
+
+  const cls = await s.call("POST", "/api/incidents", { token: teacher, body: report({ populationId: "classroom" }) });
+  assert.equal(cls.json.merged, true);
+  assert.equal(cls.json.incident.populationId, "classroom", "individual → classroom");
+  assert.equal(cls.json.incident.accountability.status, "pending");
+  assert.equal(cls.json.incident.accountability.total, 1);
+
+  const whole = await s.call("POST", "/api/incidents", { token: teacher, body: report({ populationId: "wholeschool" }) });
+  assert.equal(whole.json.merged, true);
+  assert.equal(whole.json.incident.populationId, "wholeschool", "classroom → whole school");
+  assert.equal(whole.json.incident.linkedSection, "ALL");
+  assert.equal(whole.json.incident.accountability.total, 3, "every active section must now report");
   await s.close();
 });
 
@@ -826,6 +909,44 @@ test("first Super Admin is bootstrapped from the environment with a forced passw
   await s.close();
 });
 
+test("voluntary password change requires the current password and revokes other sessions", async () => {
+  const s = await boot();
+  const phone = await s.login("teacher", "t1");
+  const tablet = await s.login("teacher", "t1");
+  const email = emailFor("teacher", "t1");
+
+  assert.equal((await s.call("POST", "/api/password", { token: phone, body: { password: "NewTeacher-2026!" } })).status, 401, "current password is required");
+  const wrong = await s.call("POST", "/api/password", { token: phone, body: { password: "NewTeacher-2026!", currentPassword: "not-the-password" } });
+  assert.equal(wrong.status, 401);
+  assert.equal(wrong.json.error, "invalid_password");
+
+  const changed = await s.call("POST", "/api/password", { token: phone, body: { password: "NewTeacher-2026!", currentPassword: DEMO_PASSWORD } });
+  assert.equal(changed.status, 200);
+  assert.equal((await s.call("GET", "/api/state", { token: tablet })).status, 401, "other devices are signed out");
+  assert.equal((await s.call("GET", "/api/state", { token: phone })).status, 200, "the device that changed it stays signed in");
+  assert.equal((await s.loginWith(email, DEMO_PASSWORD)).status, 401, "the old password no longer works");
+  assert.equal((await s.loginWith(email, "NewTeacher-2026!")).status, 200);
+
+  const admin = await s.loginSuper();
+  const entries = (await s.call("GET", "/api/admin/audit", { token: admin })).json.entries;
+  const change = entries.find((e) => e.action === "password_change" && e.target === email);
+  assert.equal(change?.detail, "voluntary change");
+  assert.ok(!JSON.stringify(entries).includes("NewTeacher-2026!"), "no password ever reaches the audit log");
+  await s.close();
+});
+
+test("voluntary password change failures count toward the account lockout", async () => {
+  const s = await boot({ lockoutFailures: 3 });
+  const token = await s.login("teacher", "t1");
+  for (let i = 0; i < 3; i++) {
+    assert.equal((await s.call("POST", "/api/password", { token, body: { currentPassword: "wrong", password: "NewTeacher-2026!" } })).status, 401);
+  }
+  const blocked = await s.call("POST", "/api/password", { token, body: { currentPassword: DEMO_PASSWORD, password: "NewTeacher-2026!" } });
+  assert.equal(blocked.status, 429, "lockout applies to password changes too");
+  assert.equal((await s.loginWith(emailFor("teacher", "t1"), DEMO_PASSWORD)).status, 429, "and to signing in");
+  await s.close();
+});
+
 test("idle timeout is role-based: short for principal/super admin, long for teachers, refreshed by activity", async () => {
   let t = Date.now();
   const s = await boot({ now: () => t });
@@ -848,7 +969,7 @@ test("idle timeout is role-based: short for principal/super admin, long for teac
 });
 
 test("passwords are scrypt-hashed per user and never stored or audited in plain text", async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agap-auth-"));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "aspire-auth-"));
   const s = await boot({ dataDir: dir });
   const secret = "My-Secret-Passphrase-9";
   const email = emailFor("teacher", "t2");
@@ -864,7 +985,7 @@ test("passwords are scrypt-hashed per user and never stored or audited in plain 
   assert.equal(inMemory.includes(DEMO_PASSWORD), false, "the demo password itself is never stored in plain text");
   assert.equal(inMemory.includes(secret), false, "attempted passwords are never stored");
   await s.close();
-  const onDisk = fs.readFileSync(path.join(dir, "agap-db.json"), "utf8");
+  const onDisk = fs.readFileSync(path.join(dir, "aspire-db.json"), "utf8");
   assert.equal(onDisk.includes(DEMO_PASSWORD), false, "nothing sensitive hits the disk");
   assert.equal(onDisk.includes(secret), false);
   fs.rmSync(dir, { recursive: true, force: true });
@@ -880,4 +1001,121 @@ test("demo accounts are seeded only in demo mode; otherwise just the env Super A
   assert.ok(demo.app.store.db.accounts.length >= 8, "demo mode seeds teachers, principal, responder and parents");
   assert.equal((await demo.loginWith(emailFor("teacher", "t1"), DEMO_PASSWORD)).status, 200);
   await demo.close();
+});
+
+// ---- Campus layout & report location (1A) -------------------------------------
+
+test("campus layout resolves every seeded roster room with no migration", () => {
+  assert.ok(CAMPUS_ROOMS_FLAT.length > 0, "the campus layout has rooms");
+  for (const entry of SEED_ROSTER) {
+    const room = roomByLegacy(entry.room);
+    assert.ok(room, `roster room resolves through the campus mapper: ${entry.room}`);
+    assert.equal(CAMPUS_BY_LEGACY[room.legacy].id, room.id);
+    assert.equal(roomById(room.id).legacy, room.legacy, "id and legacy string round-trip");
+    assert.match(room.legacy, /^Bldg [AB] \| Flr \d+ \| /, "the canonical Bldg X | Flr N | Rm NNN format is kept");
+    assert.ok(Number.isFinite(room.point.x) && Number.isFinite(room.point.y), "every room sits on the map");
+  }
+});
+
+test("the GPS projection pins the roster coordinates to the right campus places", () => {
+  const buildingA = nearestCampusFeatureForLocation(gpsToMapPoint(14.312, 121.115));
+  const buildingB = nearestCampusFeatureForLocation(gpsToMapPoint(14.313, 121.116));
+  assert.ok(buildingA && buildingB, "both known coordinates land on a known feature");
+  assert.equal(buildingA.buildingId, "bldg-a");
+  assert.equal(buildingB.buildingId, "bldg-b");
+  assert.equal(featureLabel(buildingB), "Building B · Rm 105");
+  assert.equal(nearestCampusFeatureForLocation(gpsToMapPoint(14.4, 121.4)), null, "far off campus nothing is named");
+  assert.ok(featureForPoint(null) === null);
+});
+
+test("a teacher reports from outside their assigned room: Grade 4 teacher picks the Building B room", async () => {
+  const s = await boot();
+  const teacher = await s.login("teacher", "t2"); // saved room is Bldg A | Flr 2 | Rm 210
+  const principal = await s.login("principal");
+  const responder = await s.login("responder");
+
+  const made = await s.call("POST", "/api/incidents", {
+    token: teacher,
+    body: report({ locationKind: "room", roomId: "bldg-b-flr-1-rm-105" }),
+  });
+  assert.equal(made.status, 201, JSON.stringify(made.json));
+  const inc = made.json.incident;
+  assert.equal(inc.room, "Bldg B | Flr 1 | Rm 105");
+  assert.equal(inc.locationKind, "room");
+  assert.equal(inc.locationSetBy, "selected_room");
+  assert.match(inc.locationNote, /Selected by reporter/);
+  assert.equal(inc.locationRisk, LOCATION_RISK_SAVED_ROOM, "a selected classroom keeps the saved-room Location Risk");
+  const stored = s.app.store.db.incidents.find((i) => i.id === inc.id);
+  assert.equal(stored.lowLying, true, "low-lying follows the selected room's own floor");
+
+  const forPrincipal = (await s.call("GET", "/api/state", { token: principal })).json.incidents.find((i) => i.id === inc.id);
+  assert.equal(forPrincipal.room, "Bldg B | Flr 1 | Rm 105");
+  assert.equal(forPrincipal.locationSetBy, "selected_room");
+  assert.match(forPrincipal.locationNote, /Selected by reporter/);
+  const forResponder = (await s.call("GET", "/api/state", { token: responder })).json.incidents.find((i) => i.id === inc.id);
+  assert.equal(forResponder.locationSetBy, "selected_room", "responders see how the location was set");
+  await s.close();
+});
+
+test("a GPS-detected classroom is filed as that room, tagged as detected", async () => {
+  const s = await boot();
+  const teacher = await s.login("teacher", "t1");
+  const made = await s.call("POST", "/api/incidents", {
+    token: teacher,
+    body: report({ locationKind: "room", roomId: "bldg-a-flr-2-rm-205", locationSetBy: "gps_detected" }),
+  });
+  assert.equal(made.status, 201, JSON.stringify(made.json));
+  assert.equal(made.json.incident.room, "Bldg A | Flr 2 | Rm 205");
+  assert.equal(made.json.incident.locationSetBy, "gps_detected");
+  assert.match(made.json.incident.locationNote, /^Detected by GPS/);
+  assert.equal(made.json.incident.locationRisk, LOCATION_RISK_SAVED_ROOM);
+
+  // An unknown room, a bogus area or a bogus "how it was set" are all refused.
+  const badRoom = await s.call("POST", "/api/incidents", { token: teacher, body: report({ locationKind: "room", roomId: "rm-999" }) });
+  assert.equal(badRoom.status, 400);
+  const badArea = await s.call("POST", "/api/incidents", { token: teacher, body: report({ locationKind: "area", areaId: "nowhere" }) });
+  assert.equal(badArea.status, 400);
+  await s.close();
+});
+
+test("the reporter keeps every location option: saved room, common area and unverified", async () => {
+  const s = await boot();
+  const teacher = await s.login("teacher", "t1");
+
+  const saved = await s.call("POST", "/api/incidents", { token: teacher, body: report() });
+  assert.equal(saved.json.incident.room, "Bldg A | Flr 2 | Rm 204");
+  assert.equal(saved.json.incident.locationKind, "saved");
+  assert.equal(saved.json.incident.locationSetBy, "saved_room");
+
+  const area = await s.call("POST", "/api/incidents", { token: teacher, body: report({ locationKind: "area", areaId: "canteen" }) });
+  assert.equal(area.json.incident.locationKind, "area");
+  assert.equal(area.json.incident.locationSetBy, "selected_area");
+  assert.match(area.json.incident.room, /^Canteen \(reassigned from /);
+
+  const unverified = await s.call("POST", "/api/incidents", { token: teacher, body: report({ locationKind: "unverified" }) });
+  assert.equal(unverified.json.incident.locationSetBy, "unverified");
+  assert.match(unverified.json.incident.locationNote, /not verified/i);
+  await s.close();
+});
+
+test("a teacher can set their default classroom from the campus picker", async () => {
+  const s = await boot();
+  const teacher = await s.login("teacher", "t2");
+  const parent = await s.login("parent", "Grade 3 - Sec A");
+
+  const changed = await s.call("PUT", "/api/profile/room", { token: teacher, body: { roomId: "bldg-b-flr-1-rm-105" } });
+  assert.equal(changed.status, 200, JSON.stringify(changed.json));
+  const state = (await s.call("GET", "/api/state", { token: teacher })).json;
+  assert.equal(state.me.room, "Bldg B | Flr 1 | Rm 105");
+  assert.equal(state.roster[0].room, "Bldg B | Flr 1 | Rm 105");
+  assert.equal(state.roster[0].gps, "14.313, 121.116", "the saved coordinate follows the building");
+
+  // A report with no location now files the new default room.
+  const made = await s.call("POST", "/api/incidents", { token: teacher, body: report() });
+  assert.equal(made.json.incident.room, "Bldg B | Flr 1 | Rm 105");
+  assert.equal(made.json.incident.locationSetBy, "saved_room");
+
+  assert.equal((await s.call("PUT", "/api/profile/room", { token: teacher, body: { roomId: "rm-999" } })).status, 400);
+  assert.equal((await s.call("PUT", "/api/profile/room", { token: parent, body: { roomId: "bldg-a-flr-2-rm-204" } })).status, 403, "only the teacher changes their own room");
+  await s.close();
 });

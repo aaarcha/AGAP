@@ -7,6 +7,8 @@ export const SCHOOL = {
   barangay: "Barangay Sinalhan",
   city: "City of Santa Rosa, Laguna",
   division: "Santa Rosa City Schools Division – District II",
+  // Set on the server from ASPIRE_SCHOOL_PHONE and exposed through /api/config.
+  phone: "",
 };
 
 // Illustrative AHP-derived weights (pending the final Expert Panel session).
@@ -241,9 +243,11 @@ export function floorOf(room) {
   return m ? Number(m[1]) : null;
 }
 // Ground-floor rooms and open ground-level areas count as low-lying.
-export function isLowLying({ locationKind, areaId, savedRoom }) {
+export function isLowLying({ locationKind, areaId, savedRoom, selectedRoom }) {
   if (locationKind === "area" && LOW_LYING_AREAS.includes(areaId)) return true;
-  return floorOf(savedRoom) === 1;
+  // A room chosen by the reporter counts low-lying by that room's own floor.
+  const room = selectedRoom || savedRoom;
+  return floorOf(room) === 1;
 }
 
 // Feature: time-based escalation. Minutes without acknowledgement before each tier is alerted.
@@ -255,11 +259,27 @@ export const OVERRIDE_LABEL = {
   HEADCOUNT_MISMATCH: "Headcount mismatch",
 };
 
+// Affected population id stored on every incident (populationId). Older records only
+// carry the label, so fall back to it.
+export function populationIdOf(inc) {
+  if (inc.populationId) return inc.populationId;
+  const label = String(inc.populationLabel || "");
+  if (/individual/i.test(label)) return "individual";
+  if (/whole/i.test(label)) return "wholeschool";
+  return "classroom";
+}
+
+// Headcount verification applies only to group-scope reports: a single pupil is
+// never headcounted, so no mismatch can arise on an individual ticket.
+export function headcountRequired(inc) {
+  return populationIdOf(inc) !== "individual";
+}
+
 // One place that decides location risk, time sensitivity, score and override flags.
 export function scoreIncident(inc, { hazardActive = false } = {}) {
   const hazardApplied = Boolean(hazardActive && inc.lowLying);
   const locationRisk = hazardApplied ? Math.min(5, inc.baseLocationRisk + HAZARD_LOCATION_BOOST) : inc.baseLocationRisk;
-  const mismatch = (inc.headcounts || []).some((h) => h.present !== h.expected);
+  const mismatch = headcountRequired(inc) && (inc.headcounts || []).some((h) => h.present !== h.expected);
   const timeSensitivity = mismatch ? 5 : Math.min(5, inc.baseTimeSensitivity + (inc.escalationLevel || 0));
   const score = computeScore(inc.severity, inc.vulnerability, locationRisk, timeSensitivity);
   const overrideReasons = [];

@@ -10,7 +10,7 @@ import tailwindcss from "@tailwindcss/vite";
 function serviceWorker(): Plugin {
   let outDir = "dist";
   return {
-    name: "agap-service-worker",
+    name: "aspire-service-worker",
     apply: "build",
     configResolved(cfg) {
       outDir = path.resolve(cfg.root, cfg.build.outDir);

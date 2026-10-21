@@ -1,8 +1,8 @@
 {
   "id": "/",
-  "name": "School Emergency Reporting",
-  "short_name": "Emergency",
-  "description": "Emergency reporting and coordination for Sinalhan Elementary School, Barangay Sinalhan and CDRRMO.",
+  "name": "ASPIRE",
+  "short_name": "ASPIRE",
+  "description": "Emergency reporting and incident prioritization for Sinalhan Elementary School.",
   "lang": "en-PH",
   "start_url": "/?source=pwa",
   "scope": "/",
