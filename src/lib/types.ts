@@ -1,4 +1,4 @@
-export type Role = "teacher" | "principal" | "parent" | "responder";
+export type Role = "teacher" | "principal" | "parent" | "responder" | "super_admin";
 export type Status = "SENT" | "SEEN" | "EN_ROUTE" | "ON_SITE" | "RESOLVED";
 
 export interface User {
@@ -132,6 +132,53 @@ export interface QueuedReport {
 export interface AppConfig {
   accessCodeRequired: boolean;
   demoReset: boolean;
+  passwordMin?: number;
+}
+
+// ---- authentication / Super Admin console ------------------------------------
+export interface AccountRecord {
+  id: string;
+  email: string;
+  role: Role;
+  name: string;
+  section: string | null;
+  status: "active" | "inactive";
+  mustChange: boolean;
+  temp: boolean;
+  locked: boolean;
+  lockedUntil: number;
+  failed: number;
+  lastLoginAt: number | null;
+  createdAt: number;
+}
+
+export interface AuditEntry {
+  at: number;
+  action: string;
+  by: string | null;
+  target: string | null;
+  detail: string;
+  ip: string;
+}
+
+export interface SchoolYear {
+  count: number;
+  startedAt: number | null;
+  accounts?: number;
+}
+
+export interface TempCredential {
+  id: string;
+  email: string;
+  name: string;
+  role: Role;
+  tempPassword: string;
+}
+
+export interface LoginResult {
+  token: string;
+  user: User;
+  mustChange: boolean;
 }
 
 export interface AlertItem {
