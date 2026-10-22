@@ -31,11 +31,11 @@ function TeacherForm({ initial, onClose }: { initial: RosterEntry | null; onClos
       <div className="space-y-3">
         {fields.map(([label, val, set, ph]) => (
           <label key={label} className="block text-xs font-semibold text-slate-600">{label}
-            <input value={val} onChange={(e) => set(e.target.value)} placeholder={ph} className="w-full mt-1 min-h-11 border border-slate-300 rounded-xl px-3 text-base outline-none focus:border-brand-500 font-normal" />
+            <input value={val} onChange={(e) => set(e.target.value)} placeholder={ph} className="mt-1 min-h-12 w-full rounded-xl border border-slate-300 px-3 text-base font-normal outline-none focus:border-brand-500" />
           </label>
         ))}
         <label className="block text-xs font-semibold text-slate-600">Status
-          <select value={status} onChange={(e) => setStatus(e.target.value as "active" | "inactive")} className="w-full mt-1 min-h-11 border border-slate-300 rounded-xl px-3 text-base bg-white font-normal">
+          <select value={status} onChange={(e) => setStatus(e.target.value as "active" | "inactive")} className="mt-1 min-h-12 w-full rounded-xl border border-slate-300 bg-white px-3 text-base font-normal">
             <option value="active">On duty (can sign in and report)</option>
             <option value="inactive">Off duty (cannot sign in)</option>
           </select>
@@ -56,9 +56,9 @@ export default function RosterPanel() {
     <div className="mx-auto w-full max-w-6xl px-3 py-3">
       <div className="flex items-center justify-between mb-2">
         <h2 className="text-xs font-bold text-slate-500 uppercase tracking-wide">Teacher Roster &amp; Section Mapping</h2>
-        <button onClick={() => setEditing("new")} className="min-h-10 px-3 rounded-xl bg-brand-600 text-white text-sm font-bold flex items-center gap-1"><Plus size={16} /> Add teacher</button>
+        <button onClick={() => setEditing("new")} className="flex min-h-12 items-center gap-1 rounded-xl bg-brand-600 px-3 text-sm font-bold text-white"><Plus size={16} /> Add teacher</button>
       </div>
-      <p className="text-xs text-slate-500 mb-3">Profile edits made by teachers show up here instantly. Each section here is also a Parent/PTA feed.</p>
+      <p className="mb-3 text-xs text-slate-500">Each section here is also a Parent/PTA feed.</p>
       <div className="grid gap-2 md:grid-cols-2 lg:grid-cols-3">
         {roster.map((t) => (
           <div key={t.id} className="bg-white border border-slate-200 rounded-2xl p-3">
@@ -74,8 +74,8 @@ export default function RosterPanel() {
               </span>
             </div>
             <div className="flex gap-2 mt-3">
-              <button onClick={() => setEditing(t)} className="flex-1 min-h-10 bg-slate-100 text-slate-700 rounded-xl text-sm font-bold flex items-center justify-center gap-1"><Pencil size={14} /> Edit</button>
-              <button onClick={() => setDeleting(t)} className="flex-1 min-h-10 bg-blush-100 text-blush-700 rounded-xl text-sm font-bold flex items-center justify-center gap-1"><Trash2 size={14} /> Delete</button>
+              <button onClick={() => setEditing(t)} className="flex min-h-12 flex-1 items-center justify-center gap-1 rounded-xl bg-slate-100 text-sm font-bold text-slate-700"><Pencil size={14} /> Edit</button>
+              <button onClick={() => setDeleting(t)} className="flex min-h-12 flex-1 items-center justify-center gap-1 rounded-xl bg-blush-100 text-sm font-bold text-blush-700"><Trash2 size={14} /> Delete</button>
             </div>
           </div>
         ))}

@@ -49,6 +49,10 @@ button { cursor: pointer; }
 button:disabled { cursor: not-allowed; }
 :focus-visible { outline: 3px solid #425b9a; outline-offset: 2px; }
 
+/* One reveal control per password field — hide the browser's built-in one. */
+input::-ms-reveal,
+input::-ms-clear { display: none; }
+
 @keyframes shrink-bar { from { width: 100%; } to { width: 0%; } }
 @keyframes slide-down { from { transform: translateY(-120%); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
 @keyframes pulse-ring { 0% { box-shadow: 0 0 0 0 rgba(255,149,165,.55); } 100% { box-shadow: 0 0 0 14px rgba(255,149,165,0); } }

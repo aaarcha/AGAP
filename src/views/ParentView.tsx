@@ -1,23 +1,22 @@
 import { useState } from "react";
-import { Copy, PhoneCall } from "lucide-react";
+import { ChevronDown, Copy, PhoneCall } from "lucide-react";
 import { SCHOOL, bandFor } from "../../shared/domain.js";
 import { LANGS, buildAdvisory } from "../../shared/advisories.js";
 import { useApp } from "../lib/store";
 import { useLang } from "../lib/lang";
 import { BAND_STYLE, catTheme } from "../lib/theme";
-import { clockTime, elapsed } from "../lib/format";
+import { clockTime, elapsed, plainOverride } from "../lib/format";
 import type { Incident } from "../lib/types";
-import { ContactDrrmModal, ResponseTracker, WaitingLine } from "../components/Incident";
-import { EtaLine, RuleBadges } from "../components/Rules";
-import HistorySection from "../components/History";
+import { WaitingLine } from "../components/Incident";
+import { EtaLine, HeadcountPanel, RuleBadges } from "../components/Rules";
 
 function LangToggle() {
   const [lang, setLang] = useLang();
   return (
-    <div role="group" aria-label="Advisory language" className="flex rounded-xl border border-brand-200 overflow-hidden bg-white self-start">
+    <div role="group" aria-label="Advisory language" className="flex self-start overflow-hidden rounded-xl border border-brand-200 bg-white">
       {LANGS.map((l) => (
         <button key={l.id} onClick={() => setLang(l.id as "en" | "fil")} aria-pressed={lang === l.id}
-          className={`min-h-10 px-4 text-sm font-bold ${lang === l.id ? "bg-brand-600 text-white" : "text-brand-700"}`}>{l.label}</button>
+          className={`min-h-12 px-4 text-sm font-bold ${lang === l.id ? "bg-brand-600 text-white" : "text-brand-700"}`}>{l.label}</button>
       ))}
     </div>
   );
@@ -32,89 +31,120 @@ function Advisory({ inc }: { inc: Incident }) {
     try { await navigator.clipboard.writeText(adv.text); setCopied(true); setTimeout(() => setCopied(false), 2500); } catch { /* clipboard blocked */ }
   }
   return (
-    <div className="bg-brand-50 border border-brand-100 rounded-xl p-3" lang={lang === "fil" ? "fil" : "en"}>
+    <div className="rounded-xl border border-brand-100 bg-brand-50 p-3" lang={lang === "fil" ? "fil" : "en"}>
       <p className="text-sm font-extrabold text-brand-800">{adv.title}</p>
       <ul className="mt-1.5 space-y-1">
-        {adv.lines.map((l, i) => <li key={i} className="text-sm text-slate-700 leading-relaxed">{l}</li>)}
+        {adv.lines.map((l, i) => <li key={i} className="text-sm leading-relaxed text-slate-700">{l}</li>)}
       </ul>
-      <button onClick={copy} className="mt-2 min-h-9 px-3 rounded-lg bg-white border border-brand-200 text-xs font-bold text-brand-700 flex items-center gap-1.5">
+      <button onClick={() => void copy()} className="mt-2 flex min-h-12 items-center gap-1.5 rounded-lg border border-brand-200 bg-white px-3 text-xs font-bold text-brand-700">
         <Copy size={13} /> {copied ? (lang === "fil" ? "Nakopya na" : "Copied") : lang === "fil" ? "Kopyahin ang abiso" : "Copy advisory"}
       </button>
     </div>
   );
 }
 
-export default function ParentView() {
-  const { user, incidents, now } = useApp();
-  const [contact, setContact] = useState(false);
+function ParentCard({ inc }: { inc: Incident }) {
+  const { now, modes } = useApp();
   const [lang] = useLang();
-  const open = incidents.filter((i) => i.status !== "RESOLVED").sort((a, b) => Number(b.overrideReasons.length > 0) - Number(a.overrideReasons.length > 0) || b.score - a.score);
+  const [expanded, setExpanded] = useState(false);
+  const ct = catTheme(inc.category);
+  const band = bandFor(inc.score, inc.status, inc.overrideReasons);
+  const bs = BAND_STYLE[inc.status === "RESOLVED" ? "RESOLVED" : band];
+
+  const reasons: [string, string][] = [
+    ["Incident type", `${inc.categoryLabel} — ${inc.subLabel}`],
+    ["Who is affected", `${inc.populationLabel ?? "—"}${inc.linkedSection === "ALL" ? " · whole school" : inc.linkedSection ? ` · ${inc.linkedSection}` : ""}`],
+    ["Location", inc.room],
+    ["Hazard mode", inc.hazardApplied ? "On — flooding/typhoon conditions" : "Off"],
+    ["Escalation", inc.escalationLevel > 0 ? "Escalated — no acknowledgement in time" : "Not escalated"],
+    ["Critical override", inc.overrideReasons.length ? inc.overrideReasons.map((r) => plainOverride(r)).join(" · ") : "None"],
+  ];
+
+  return (
+    <article className="overflow-hidden rounded-2xl bg-white" style={{ border: `2px solid ${ct.border}`, boxShadow: `0 2px 12px ${ct.color}22` }}>
+      <div className="px-4 py-3 text-white" style={{ background: ct.gradient }}>
+        <p className="text-sm font-extrabold tracking-wide">{lang === "fil" ? "ABISO NG PAARALAN" : "SCHOOL ADVISORY"}</p>
+        <p className="text-xs font-semibold text-white/85">{SCHOOL.name}</p>
+      </div>
+      <div className="flex flex-wrap items-center gap-2 px-4 py-2.5" style={{ background: ct.bg, borderBottom: `1px solid ${ct.border}` }}>
+        <span className="rounded-full px-2.5 py-1 text-xs font-extrabold uppercase tracking-wide text-white" style={{ background: ct.pill }}>{ct.emoji} {inc.categoryLabel}</span>
+        <span className="rounded-full px-2.5 py-1 text-xs font-bold" style={{ background: bs.bg, color: bs.color, border: `1px solid ${bs.color}55` }}>{inc.status === "RESOLVED" ? "Resolved" : band}</span>
+      </div>
+      <div className="space-y-3 p-4">
+        <div>
+          <p className="text-base font-bold text-slate-800">{inc.subLabel}</p>
+          <p className="mt-0.5 text-sm text-slate-600">📍 {inc.room}</p>
+          <p className="mt-0.5 text-xs text-slate-500">
+            {inc.populationLabel ?? "—"} · {inc.linkedSection === "ALL" ? "whole school" : inc.linkedSection} · {elapsed(inc.createdAt, now)}
+          </p>
+        </div>
+        <RuleBadges inc={inc} />
+        <WaitingLine inc={inc} />
+        <HeadcountPanel inc={inc} />
+        <Advisory inc={inc} />
+
+        <button onClick={() => setExpanded((v) => !v)} aria-expanded={expanded}
+          className="flex min-h-12 w-full items-center justify-between border-t border-slate-100 pt-2 text-sm font-bold text-brand-700">
+          Details <ChevronDown size={16} className={expanded ? "rotate-180" : ""} />
+        </button>
+        {expanded && (
+          <div className="space-y-3">
+            <dl className="divide-y divide-slate-100 text-sm">
+              {reasons.map(([k, v]) => (
+                <div key={k} className="flex gap-3 py-1.5">
+                  <dt className="w-32 shrink-0 text-slate-500">{k}</dt>
+                  <dd className="flex-1 font-medium text-slate-800">{v}</dd>
+                </div>
+              ))}
+            </dl>
+            <EtaLine inc={inc} />
+            <p className="text-xs text-slate-500">Reported at {clockTime(inc.createdAt)} · approach route <b className="capitalize">{modes.route.status}</b></p>
+          </div>
+        )}
+      </div>
+    </article>
+  );
+}
+
+export default function ParentView() {
+  const { user, incidents, now, config } = useApp();
+  const [lang] = useLang();
+  const phone = config?.school?.phone ?? "";
+  const open = incidents
+    .filter((i) => i.status !== "RESOLVED")
+    .sort((a, b) => Number(b.overrideReasons.length > 0) - Number(a.overrideReasons.length > 0) || b.score - a.score);
   const lastClosed = incidents.filter((i) => i.status === "RESOLVED").sort((a, b) => (b.resolvedAt ?? 0) - (a.resolvedAt ?? 0))[0];
 
   return (
-    <div className="mx-auto w-full max-w-md px-3 py-3 space-y-3">
+    <div className="mx-auto w-full max-w-md space-y-3 px-3 py-3">
       <div className="flex items-center justify-between gap-2">
-        <p className="text-xs font-bold text-slate-500 uppercase tracking-wide">{lang === "fil" ? "Wika ng abiso" : "Advisory language"}</p>
+        <p className="text-xs font-bold uppercase tracking-wide text-slate-500">{lang === "fil" ? "Wika ng abiso" : "Advisory language"}</p>
         <LangToggle />
       </div>
 
       {open.length === 0 && (
-        <div className="bg-emerald-50 border border-emerald-200 rounded-2xl p-5 text-center" role="status">
-          <p className="text-4xl mb-1" aria-hidden>🟢</p>
+        <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-5 text-center" role="status">
+          <p className="mb-1 text-4xl" aria-hidden>🟢</p>
           <p className="text-base font-bold text-emerald-800">{SCHOOL.name} {lang === "fil" ? "ay normal ang takbo." : "is operating normally."}</p>
-          <p className="text-sm text-emerald-700 mt-1">{lang === "fil" ? `Walang aktibong emergency alert para sa ${user!.section}.` : `No active emergency alerts for ${user!.section}.`}</p>
+          <p className="mt-1 text-sm text-emerald-700">
+            {lang === "fil" ? `Walang aktibong emergency alert para sa ${user!.section}.` : `No active emergency alerts for ${user!.section}.`}
+          </p>
           {lastClosed && (
-            <p className="text-xs text-emerald-600 mt-3">
+            <p className="mt-3 text-xs text-emerald-600">
               {lang === "fil" ? "Huling abiso:" : "Last advisory:"} {lastClosed.outcome === "false_alarm" ? (lang === "fil" ? "maling alarma" : "cancelled as a false alarm") : lastClosed.outcome === "cancelled" ? (lang === "fil" ? "kinansela ng nag-ulat" : "cancelled by the reporter") : (lang === "fil" ? "naresolba" : "resolved")} {lastClosed.resolvedAt ? elapsed(lastClosed.resolvedAt, now) : ""}.
             </p>
           )}
         </div>
       )}
 
-      {open.map((a) => {
-        const ct = catTheme(a.category);
-        const band = bandFor(a.score, a.status, a.overrideReasons);
-        const bs = BAND_STYLE[band];
-        return (
-          <article key={a.id} className="rounded-2xl overflow-hidden bg-white" style={{ border: `2px solid ${ct.border}`, boxShadow: `0 2px 12px ${ct.color}22` }}>
-            <div className="px-4 py-3 text-white" style={{ background: ct.gradient }}>
-              <p className="text-sm font-extrabold tracking-wide">🚨 OFFICIAL SCHOOL ADVISORY</p>
-              <p className="text-xs text-white/85 font-semibold">SINALHAN ELEMENTARY EMERGENCY FEED</p>
-            </div>
-            <div className="flex flex-wrap items-center gap-2 px-4 py-2.5" style={{ background: ct.bg, borderBottom: `1px solid ${ct.border}` }}>
-              <span className="text-xs font-extrabold uppercase tracking-wide px-2.5 py-1 rounded-full text-white" style={{ background: ct.pill }}>{ct.emoji} {a.categoryLabel}</span>
-              <span className="text-xs font-bold px-2.5 py-1 rounded-full" style={{ background: bs.bg, color: bs.color, border: `1px solid ${bs.color}55` }}>{band}</span>
-              <span className="ml-auto font-mono text-xs font-bold" style={{ color: ct.color }}>{a.score.toFixed(2)}</span>
-            </div>
-            <div className="p-4 space-y-3">
-              <div>
-                <p className="text-base font-bold text-slate-800">{a.subLabel}</p>
-                <p className="text-sm text-slate-600 mt-0.5">📍 {a.room}</p>
-                <p className="text-xs text-slate-500 mt-0.5">
-                  Impact: {a.populationLabel ?? "—"} · {a.linkedSection === "ALL" ? "whole school" : a.linkedSection} · {elapsed(a.createdAt, now)} ({clockTime(a.createdAt)})
-                </p>
-              </div>
-              <RuleBadges inc={a} />
-              <div className="rounded-xl p-3" style={{ background: ct.bg, border: `1px solid ${ct.border}` }}>
-                <ResponseTracker status={a.status} category={a.category} />
-              </div>
-              <WaitingLine inc={a} />
-              <EtaLine inc={a} />
-              <Advisory inc={a} />
-              <button onClick={() => setContact(true)} className="w-full min-h-12 text-white rounded-xl text-base font-bold flex items-center justify-center gap-2 active:scale-[0.99]" style={{ background: ct.gradient }}>
-                <PhoneCall size={18} /> {lang === "fil" ? "Tawagan ang School DRRM Desk" : "Contact School DRRM Desk"}
-              </button>
-            </div>
-          </article>
-        );
-      })}
+      {open.map((a) => <ParentCard key={a.id} inc={a} />)}
 
-      <div className="pt-2"><HistorySection title="Past advisories" /></div>
-
-      <p className="text-xs text-slate-500 text-center">
-        {user!.section} advisories only. A whole-floor / whole-school emergency is shown to every section.
-      </p>
-      {contact && <ContactDrrmModal onClose={() => setContact(false)} />}
+      {phone && (
+        <a href={`tel:${phone.replace(/[^0-9+]/g, "")}`}
+          className="flex min-h-14 w-full items-center justify-center gap-2 rounded-2xl bg-brand-600 text-base font-bold text-white active:scale-[0.99]">
+          <PhoneCall size={18} /> {lang === "fil" ? "Tawagan ang Paaralan" : "Contact School"}
+        </a>
+      )}
     </div>
   );
 }

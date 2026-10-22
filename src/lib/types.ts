@@ -20,6 +20,9 @@ export interface LogEntry {
   note?: string;
 }
 
+// How the final location of a ticket was established.
+export type LocationSetBy = "saved_room" | "gps_detected" | "selected_room" | "selected_area" | "unverified";
+
 export interface Incident {
   id: string;
   category: string;
@@ -32,6 +35,8 @@ export interface Incident {
   confirmedBy: number;
   linkedSection: string;
   populationLabel?: string;
+  /** Affected population id (individual | classroom | wholeschool); group scopes require a headcount. */
+  populationId?: string;
   outcome: "resolved" | "false_alarm" | "cancelled" | "drill" | null;
   resolvedAt: number | null;
   // Not sent to parents:
@@ -49,12 +54,17 @@ export interface Incident {
   overrideReasons: string[];
   escalationLevel: number;
   eta: Eta | null;
-  accountability: { status: "pending" | "partial" | "verified" | "mismatch"; reported: number; total: number };
+  accountability: { status: "pending" | "partial" | "verified" | "mismatch" | "not_required"; reported: number; total: number };
   headcounts: Headcount[];
   baseLocationRisk?: number;
   hazardApplied?: boolean;
   drill?: boolean;
   metrics?: Metrics;
+  locationKind?: "saved" | "area" | "unverified" | "room";
+  /** How the final location was established. */
+  locationSetBy?: LocationSetBy;
+  /** Human-readable final location + how it was set. */
+  locationNote?: string;
 }
 
 export interface Eta {
@@ -115,8 +125,11 @@ export interface ReportPayload {
   categoryId: string;
   subId: string;
   populationId: string;
-  locationKind: "saved" | "area" | "unverified";
+  locationKind: "saved" | "area" | "unverified" | "room";
   areaId?: string;
+  roomId?: string;
+  /** How the final location was established (see Incident.locationSetBy). */
+  locationSetBy?: LocationSetBy;
   section?: string;
   interactions?: number;
 }
@@ -133,9 +146,19 @@ export interface AppConfig {
   accessCodeRequired: boolean;
   demoReset: boolean;
   passwordMin?: number;
+  school?: { name: string; depedId: string; barangay: string; city: string; division: string; phone: string };
 }
 
 // ---- authentication / Super Admin console ------------------------------------
+export interface TeacherRecord {
+  id: string;
+  name: string;
+  section: string | null;
+  room: string | null;
+  gps: string | null;
+  registry: number | null;
+}
+
 export interface AccountRecord {
   id: string;
   email: string;
@@ -150,6 +173,7 @@ export interface AccountRecord {
   failed: number;
   lastLoginAt: number | null;
   createdAt: number;
+  teacher?: TeacherRecord | null;
 }
 
 export interface AuditEntry {
