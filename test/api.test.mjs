@@ -1,14 +1,40 @@
-import test from "node:test";
+import test, { after } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import http from "node:http";
-import { createApp } from "../server/app.js";
+import { createApp, DEMO_PASSWORD, DEMO_ADMIN_EMAIL, DEMO_ADMIN_PASSWORD } from "../server/app.js";
 import { computeScore, bandFor } from "../shared/domain.js";
 
+const ADMIN_EMAIL = DEMO_ADMIN_EMAIL;
+const ADMIN_BOOTSTRAP_PASSWORD = DEMO_ADMIN_PASSWORD;
+const ADMIN_PASSWORD = "Sinalhan-Admin-2026!";
+const slug = (s) => String(s).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+const emailFor = (role, accountId) => {
+  if (role === "principal") return "principal@sinalhanes.deped.ph";
+  if (role === "responder") return "responder@sinalhanes.deped.ph";
+  if (role === "super_admin") return ADMIN_EMAIL;
+  if (role === "teacher") return `${accountId}@sinalhanes.deped.ph`;
+  if (role === "parent") return `parent-${slug(accountId)}@sinalhanes.deped.ph`;
+  throw new Error(`unknown role ${role}`);
+};
+
+// Close every server the tests open – even when an assertion fails mid-test,
+// so a leaked listener can never keep the runner alive.
+const openApps = [];
+after(() => Promise.allSettled(openApps.map((a) => a.close())));
+
 async function boot(opts = {}) {
-  const app = createApp({ secret: "test-secret", ...opts });
+  const app = createApp({
+    secret: "test-secret",
+    seedDemoAccounts: true, // demo accounts = the test fixtures
+    scryptN: 1024, // keep scrypt real but fast in tests
+    superAdminEmail: ADMIN_EMAIL,
+    superAdminPassword: ADMIN_BOOTSTRAP_PASSWORD,
+    ...opts,
+  });
+  openApps.push(app);
   await new Promise((r) => app.server.listen(0, "127.0.0.1", r));
   const base = `http://127.0.0.1:${app.server.address().port}`;
   const call = async (method, url, { token, body } = {}) => {
@@ -21,8 +47,26 @@ async function boot(opts = {}) {
     let json; try { json = JSON.parse(text); } catch { json = text; }
     return { status: res.status, json };
   };
-  const login = async (role, accountId, code) => (await call("POST", "/api/login", { body: { role, accountId, code } })).json.token;
-  return { app, base, call, login, close: () => app.close() };
+  // New auth flow: email + password only – the server derives the role from the account.
+  const loginWith = async (email, password, code) => call("POST", "/api/login", { body: { email, password, code } });
+  const login = async (role, accountId, code) => {
+    const res = await loginWith(emailFor(role, accountId), role === "super_admin" ? ADMIN_PASSWORD : DEMO_PASSWORD, code);
+    if (res.status !== 200) throw new Error(`login failed for ${role}: ${res.status} ${JSON.stringify(res.json)}`);
+    return res.json.token;
+  };
+  // The env-bootstrap Super Admin must change its password at first sign-in; do it once per server.
+  const loginSuper = async () => {
+    let res = await loginWith(ADMIN_EMAIL, ADMIN_PASSWORD);
+    if (res.status !== 200) res = await loginWith(ADMIN_EMAIL, ADMIN_BOOTSTRAP_PASSWORD);
+    assert.equal(res.status, 200, `super admin login: ${JSON.stringify(res.json)}`);
+    const token = res.json.token;
+    if (res.json.mustChange) {
+      const changed = await call("POST", "/api/password", { token, body: { password: ADMIN_PASSWORD } });
+      assert.equal(changed.status, 200, "super admin completes the forced password change");
+    }
+    return token;
+  };
+  return { app, base, call, login, loginWith, loginSuper, close: () => app.close() };
 }
 
 const report = (over = {}) => ({
@@ -181,10 +225,19 @@ test("teacher profile edits and roster CRUD are reflected for the principal inst
   const added = await s.call("POST", "/api/roster", { token: principal, body: { name: "Mr. Lopez", section: "Grade 1 - Sec A", room: "Bldg C | Flr 1 | Rm 101" } });
   assert.equal(added.status, 201);
   const newId = added.json.teacher.id;
-  const newTeacherTok = await s.login("teacher", newId);
-  assert.ok(newTeacherTok, "new roster entries can sign in");
+  // Creating a roster row also provisions its sign-in account with temporary credentials.
+  assert.ok(added.json.account && added.json.tempPassword, "roster rows come with a provisioned account");
+  assert.equal(added.json.account.mustChange, true);
+  const first = await s.loginWith(added.json.account.email, added.json.tempPassword);
+  assert.equal(first.status, 200, "new roster entries can sign in");
+  assert.equal(first.json.mustChange, true, "temporary credentials must be changed at first sign-in");
+  const newTeacherTok = first.json.token;
+  assert.equal((await s.call("POST", "/api/password", { token: newTeacherTok, body: { password: "Mrlopez-2026!" } })).status, 200);
+  assert.equal((await s.call("GET", "/api/state", { token: newTeacherTok })).status, 200);
   await s.call("PUT", `/api/roster/${newId}`, { token: principal, body: { status: "inactive" } });
-  assert.equal((await s.call("POST", "/api/login", { body: { role: "teacher", accountId: newId } })).status, 404, "inactive teachers cannot sign in");
+  const blocked = await s.call("POST", "/api/login", { body: { email: added.json.account.email, password: "Mrlopez-2026!" } });
+  assert.equal(blocked.status, 401, "inactive teachers cannot sign in");
+  assert.equal(blocked.json.message, "Invalid email or password.", "generic error – no account enumeration");
   assert.equal((await s.call("GET", "/api/state", { token: newTeacherTok })).status, 401, "existing session is cut off");
   await s.call("PUT", `/api/roster/${newId}`, { token: principal, body: { status: "active" } });
   await s.call("DELETE", `/api/roster/${newId}`, { token: principal });
@@ -197,9 +250,11 @@ test("teacher profile edits and roster CRUD are reflected for the principal inst
 test("access code gates login when configured", async () => {
   const s = await boot({ accessCode: "sinalhan-2026" });
   assert.equal((await s.call("GET", "/api/config")).json.accessCodeRequired, true);
-  assert.equal((await s.call("POST", "/api/login", { body: { role: "principal" } })).status, 401);
-  assert.equal((await s.call("POST", "/api/login", { body: { role: "principal", code: "nope" } })).status, 401);
-  assert.equal((await s.call("POST", "/api/login", { body: { role: "principal", code: "sinalhan-2026" } })).status, 200);
+  const email = emailFor("principal");
+  assert.equal((await s.loginWith(email, DEMO_PASSWORD)).status, 401, "code required");
+  assert.equal((await s.loginWith(email, DEMO_PASSWORD, "nope")).status, 401, "wrong code");
+  assert.equal((await s.loginWith(email, "wrong-password-1", "sinalhan-2026")).status, 401, "right code, wrong password");
+  assert.equal((await s.loginWith(email, DEMO_PASSWORD, "sinalhan-2026")).status, 200);
   await s.close();
 });
 
@@ -350,9 +405,10 @@ test("old resolved incidents are pruned only after the retention window", async 
   const touch = (tok) => s.call("PUT", "/api/profile", { token: tok, body: { name: "Ms. Reyes", section: "Grade 3 - Sec A", room: "Bldg A | Flr 2 | Rm 204" } });
   t += 29 * 24 * 3600 * 1000;
   await touch(teacher);
-  assert.equal((await s.call("GET", "/api/state", { token: principal })).json.incidents.length, 1, "kept inside retention");
+  const principalAgain = await s.login("principal"); // principals idle out quickly now, so sign in again
+  assert.equal((await s.call("GET", "/api/state", { token: principalAgain })).json.incidents.length, 1, "kept inside retention");
   t += 2 * 24 * 3600 * 1000;
-  const teacher2 = await s.login("teacher", "t1"); // old tokens expire after 30 days
+  const teacher2 = await s.login("teacher", "t1"); // long-idle sessions expire too, so re-authenticate
   const principal2 = await s.login("principal");
   await touch(teacher2);
   assert.equal((await s.call("GET", "/api/state", { token: principal2 })).json.incidents.length, 0, "pruned after retention");
@@ -580,4 +636,248 @@ test("registry (today's class count) can be edited by the teacher and the princi
   const { incident } = (await s.call("POST", "/api/incidents", { token: teacher, body: report() })).json;
   assert.equal((await hc(s.call, teacher, incident.id, { present: 25 })).json.incident.accountability.status, "verified");
   await s.close();
+});
+
+// ---------------------------------------------------------------- real authentication
+test("login needs a registered email + password; the server derives the role; errors are generic", async () => {
+  const s = await boot();
+  const good = await s.loginWith(emailFor("teacher", "t1"), DEMO_PASSWORD);
+  assert.equal(good.status, 200);
+  assert.equal(good.json.user.role, "teacher", "role comes from the account, not the request");
+  assert.equal(good.json.mustChange, false);
+
+  const wrong = await s.loginWith(emailFor("teacher", "t1"), "definitely-not-the-password");
+  assert.equal(wrong.status, 401);
+  assert.equal(wrong.json.error, "invalid_credentials");
+  assert.equal(wrong.json.message, "Invalid email or password.");
+
+  const unknown = await s.loginWith("nobody@example.com", "definitely-not-the-password");
+  assert.equal(unknown.status, 401);
+  assert.equal(unknown.json.message, "Invalid email or password.", "same message as a wrong password – no account enumeration");
+
+  const malformed = await s.loginWith("not-an-email", "definitely-not-the-password");
+  assert.equal(malformed.status, 401);
+  assert.equal(malformed.json.message, "Invalid email or password.");
+
+  // The old role picker is gone: role/accountId in the body can no longer pick an identity.
+  const spoof = await s.call("POST", "/api/login", { body: { role: "principal" } });
+  assert.equal(spoof.status, 401);
+  await s.close();
+});
+
+test("the public /api/accounts endpoint is removed", async () => {
+  const s = await boot();
+  assert.equal((await s.call("GET", "/api/accounts")).status, 401, "not public");
+  const teacher = await s.login("teacher", "t1");
+  const gone = await s.call("GET", "/api/accounts", { token: teacher });
+  assert.equal(gone.status, 404, "endpoint fully removed, even for signed-in users");
+  assert.equal(JSON.stringify(gone.json).includes("teachers"), false, "no roster data leaks through it");
+  await s.close();
+});
+
+test("5 failed sign-ins lock the account for 10 minutes; Super Admin can unlock; a signed-in teacher is never locked out mid-emergency", async () => {
+  let t = Date.now();
+  const s = await boot({ now: () => t });
+  const email = emailFor("teacher", "t1");
+  const session = await s.login("teacher", "t1"); // signed in before the lockout happens
+
+  for (let i = 0; i < 5; i++) {
+    const r = await s.loginWith(email, "wrong-password-attempt");
+    assert.equal(r.status, 401, `attempt ${i + 1} rejected`);
+  }
+  const locked = await s.loginWith(email, DEMO_PASSWORD);
+  assert.equal(locked.status, 429, "locked even with the correct password");
+  assert.match(locked.json.message, /locked for/);
+  // Locking an account must NOT cut off the session that is already signed in.
+  assert.equal((await s.call("GET", "/api/state", { token: session })).status, 200, "active session keeps working");
+
+  const admin = await s.loginSuper();
+  const accounts = (await s.call("GET", "/api/admin/accounts", { token: admin })).json.accounts;
+  const accId = accounts.find((a) => a.email === email).id;
+  const unlock = await s.call("POST", `/api/admin/accounts/${accId}/unlock`, { token: admin });
+  assert.equal(unlock.status, 200);
+  assert.equal((await s.loginWith(email, DEMO_PASSWORD)).status, 200, "unlocked by the Super Admin");
+
+  // The lock also releases on its own after 10 minutes.
+  const email2 = emailFor("teacher", "t2");
+  for (let i = 0; i < 5; i++) await s.loginWith(email2, "wrong-password-attempt");
+  assert.equal((await s.loginWith(email2, DEMO_PASSWORD)).status, 429);
+  t += 10 * 60000;
+  assert.equal((await s.loginWith(email2, DEMO_PASSWORD)).status, 200, "lock expires after 10 minutes");
+
+  const actions = (await s.call("GET", "/api/admin/audit", { token: admin })).json.entries.map((e) => e.action);
+  assert.ok(actions.includes("login_failed"), "failed logins are audited");
+  assert.ok(actions.includes("account_locked"), "lockouts are audited");
+  assert.ok(actions.includes("account_unlocked"), "unlocks are audited");
+  await s.close();
+});
+
+test("deactivated accounts cannot sign in and their sessions are revoked", async () => {
+  const s = await boot();
+  const admin = await s.loginSuper();
+  const prov = await s.call("POST", "/api/admin/accounts", {
+    token: admin,
+    body: { email: "ptagrade3@example.com", role: "parent", section: "Grade 3 - Sec A", password: "Grade3PTA-2026" },
+  });
+  assert.equal(prov.status, 201);
+  assert.equal(prov.json.tempPassword, null, "an admin-chosen password is not a temporary one");
+  const tok = (await s.loginWith("ptagrade3@example.com", "Grade3PTA-2026")).json.token;
+  assert.equal((await s.call("GET", "/api/state", { token: tok })).status, 200);
+
+  const id = prov.json.account.id;
+  assert.equal((await s.call("POST", `/api/admin/accounts/${id}/deactivate`, { token: admin })).status, 200);
+  const blocked = await s.loginWith("ptagrade3@example.com", "Grade3PTA-2026");
+  assert.equal(blocked.status, 401);
+  assert.equal(blocked.json.message, "Invalid email or password.", "deactivation is not disclosed");
+  assert.equal((await s.call("GET", "/api/state", { token: tok })).status, 401, "session revoked on deactivation");
+
+  assert.equal((await s.call("POST", `/api/admin/accounts/${id}/activate`, { token: admin })).status, 200);
+  assert.equal((await s.loginWith("ptagrade3@example.com", "Grade3PTA-2026")).status, 200, "sign-in works again after reactivation");
+
+  const adminId = (await s.call("GET", "/api/admin/accounts", { token: admin })).json.accounts.find((a) => a.email === ADMIN_EMAIL).id;
+  assert.equal((await s.call("POST", `/api/admin/accounts/${adminId}/deactivate`, { token: admin })).status, 400, "Super Admin cannot deactivate their own account");
+  await s.close();
+});
+
+test("school-year rollover issues temporary credentials, forces a new password and invalidates sessions", async () => {
+  const s = await boot();
+  const admin = await s.loginSuper();
+  const teacher = await s.login("teacher", "t1");
+  assert.equal((await s.call("GET", "/api/state", { token: teacher })).status, 200);
+  assert.equal((await s.call("POST", "/api/logout", { token: teacher })).status, 200);
+  assert.equal((await s.call("GET", "/api/state", { token: teacher })).status, 401, "logout revokes the session server-side");
+  const teacher2 = await s.login("teacher", "t1");
+
+  const roll = await s.call("POST", "/api/admin/school-year/start", { token: admin });
+  assert.equal(roll.status, 200);
+  assert.equal(roll.json.year, 1);
+  assert.equal(roll.json.accounts.length, 8, "every non-admin account (3 teachers, principal, responder, 3 parents) is rolled over");
+  assert.equal((await s.call("GET", "/api/state", { token: teacher2 })).status, 401, "existing sessions are invalidated");
+
+  const entry = roll.json.accounts.find((a) => a.email === emailFor("teacher", "t1"));
+  assert.equal((await s.loginWith(emailFor("teacher", "t1"), DEMO_PASSWORD)).status, 401, "the old password no longer works");
+  const forced = await s.loginWith(entry.email, entry.tempPassword);
+  assert.equal(forced.status, 200);
+  assert.equal(forced.json.mustChange, true, "first login after rollover forces a new password");
+  const tok = forced.json.token;
+  assert.equal((await s.call("GET", "/api/state", { token: tok })).status, 403, "data access is blocked until the change");
+  assert.equal((await s.call("POST", "/api/incidents", { token: tok, body: report() })).status, 403);
+  assert.equal((await s.call("POST", "/api/password", { token: tok, body: { password: "short" } })).status, 400, "minimum 8 characters");
+  assert.equal((await s.call("POST", "/api/password", { token: tok, body: { password: "12345678" } })).status, 400, "common passwords rejected");
+  assert.equal((await s.call("POST", "/api/password", { token: tok, body: { password: "abcdefgh" } })).status, 200, "no composition rules – 8 letters is a valid password");
+  assert.equal((await s.call("GET", "/api/state", { token: tok })).status, 200, "in with the new password");
+  assert.equal((await s.loginWith(entry.email, entry.tempPassword)).status, 401, "the temporary credential is spent");
+  assert.equal((await s.loginWith(entry.email, "abcdefgh")).status, 200);
+
+  // The audit log covers the whole flow – and never contains a password or a token.
+  const entries = (await s.call("GET", "/api/admin/audit", { token: admin })).json.entries;
+  const actions = entries.map((e) => e.action);
+  for (const a of ["login_success", "login_failed", "logout", "password_change", "account_created", "school_year_started"])
+    assert.ok(actions.includes(a), `audit records ${a}`);
+  const raw = JSON.stringify(entries);
+  assert.equal(raw.includes(entry.tempPassword), false, "audit never stores temporary passwords");
+  assert.equal(raw.includes("abcdefgh"), false, "audit never stores passwords");
+  assert.equal(raw.includes(tok), false, "audit never stores tokens");
+  await s.close();
+});
+
+test("Super Admin console is RBAC-locked: accounts + audit only, never dispatch or scoring", async () => {
+  const s = await boot();
+  const admin = await s.loginSuper();
+  const teacher = await s.login("teacher", "t1");
+  const principal = await s.login("principal");
+  const parent = await s.login("parent", "Grade 3 - Sec A");
+
+  assert.equal((await s.call("GET", "/api/admin/accounts")).status, 401);
+  for (const [name, tok] of [["teacher", teacher], ["principal", principal], ["parent", parent]]) {
+    assert.equal((await s.call("GET", "/api/admin/accounts", { token: tok })).status, 403, `${name} cannot list accounts`);
+    assert.equal((await s.call("GET", "/api/admin/audit", { token: tok })).status, 403, `${name} cannot read the audit log`);
+    assert.equal((await s.call("POST", "/api/admin/school-year/start", { token: tok })).status, 403, `${name} cannot roll the year over`);
+  }
+  assert.equal((await s.call("GET", "/api/admin/accounts", { token: admin })).status, 200);
+  assert.equal((await s.call("GET", "/api/admin/audit", { token: admin })).status, 200);
+
+  const { incident } = (await s.call("POST", "/api/incidents", { token: teacher, body: report() })).json;
+  assert.equal((await s.call("POST", "/api/incidents", { token: admin, body: report() })).status, 403, "Super Admin cannot report");
+  assert.equal((await s.call("POST", `/api/incidents/${incident.id}/ack`, { token: admin, body: {} })).status, 403, "Super Admin cannot dispatch");
+  assert.equal((await s.call("POST", `/api/incidents/${incident.id}/resolve`, { token: admin, body: {} })).status, 403);
+  assert.equal((await s.call("POST", `/api/incidents/${incident.id}/headcount`, { token: admin, body: { present: 1 } })).status, 403);
+  assert.equal((await s.call("PUT", "/api/modes/hazard", { token: admin, body: { active: true } })).status, 403, "Super Admin cannot edit live urgency");
+  assert.equal((await s.call("PUT", "/api/modes/drill", { token: admin, body: { active: true } })).status, 403);
+  assert.equal((await s.call("PUT", "/api/modes/route", { token: admin, body: { status: "blocked" } })).status, 403);
+  assert.equal((await s.call("POST", "/api/roster", { token: admin, body: { name: "x", section: "y", room: "z" } })).status, 403, "the roster stays with the principal");
+  assert.equal((await s.call("GET", "/api/state", { token: admin })).json.incidents.length, 0, "the console role sees no incident data");
+  await s.close();
+});
+
+test("first Super Admin is bootstrapped from the environment with a forced password change", async () => {
+  const s = await boot();
+  const first = await s.loginWith(ADMIN_EMAIL, ADMIN_BOOTSTRAP_PASSWORD);
+  assert.equal(first.status, 200);
+  assert.equal(first.json.user.role, "super_admin");
+  assert.equal(first.json.mustChange, true, "bootstrap password must be changed at first sign-in");
+  const tok = first.json.token;
+  assert.equal((await s.call("GET", "/api/state", { token: tok })).status, 403);
+  assert.equal((await s.call("GET", "/api/admin/accounts", { token: tok })).status, 403, "console locked until the change");
+  assert.equal((await s.call("POST", "/api/password", { token: tok, body: { password: ADMIN_PASSWORD } })).status, 200);
+  assert.equal((await s.call("GET", "/api/admin/accounts", { token: tok })).status, 200);
+  assert.equal((await s.loginWith(ADMIN_EMAIL, ADMIN_BOOTSTRAP_PASSWORD)).status, 401, "the bootstrap password is spent");
+  assert.equal((await s.loginWith(ADMIN_EMAIL, ADMIN_PASSWORD)).status, 200);
+  await s.close();
+});
+
+test("idle timeout is role-based: short for principal/super admin, long for teachers, refreshed by activity", async () => {
+  let t = Date.now();
+  const s = await boot({ now: () => t });
+  const principal = await s.login("principal");
+  const teacher = await s.login("teacher", "t1");
+  t += 61 * 60000;
+  assert.equal((await s.call("GET", "/api/state", { token: principal })).status, 401, "principal idles out after an hour");
+  assert.equal((await s.call("GET", "/api/state", { token: teacher })).status, 200, "teacher stays signed in");
+
+  const active = await s.login("principal");
+  for (let i = 0; i < 4; i++) {
+    t += 30 * 60000;
+    assert.equal((await s.call("GET", "/api/state", { token: active })).status, 200, `activity keeps the session alive (${i + 1})`);
+  }
+  t += 61 * 60000;
+  assert.equal((await s.call("GET", "/api/state", { token: active })).status, 401, "…but pure idling still times out");
+  t += 31 * 24 * 3600 * 1000;
+  assert.equal((await s.call("GET", "/api/state", { token: teacher })).status, 401, "teacher times out after long inactivity too");
+  await s.close();
+});
+
+test("passwords are scrypt-hashed per user and never stored or audited in plain text", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agap-auth-"));
+  const s = await boot({ dataDir: dir });
+  const secret = "My-Secret-Passphrase-9";
+  const email = emailFor("teacher", "t2");
+  assert.equal((await s.loginWith(email, secret)).status, 401, "wrong password");
+  assert.equal((await s.loginWith(email, DEMO_PASSWORD)).status, 200);
+
+  const acc = s.app.store.db.accounts.find((a) => a.email === email);
+  assert.equal(acc.password, undefined, "no plaintext password field on the account");
+  assert.equal(acc.pwSalt.length, 32, "per-user salt (16 random bytes, hex)");
+  assert.match(acc.pwHash, /^[0-9a-f]{128}$/, "64-byte scrypt hash");
+
+  const inMemory = JSON.stringify(s.app.store.db);
+  assert.equal(inMemory.includes(DEMO_PASSWORD), false, "the demo password itself is never stored in plain text");
+  assert.equal(inMemory.includes(secret), false, "attempted passwords are never stored");
+  await s.close();
+  const onDisk = fs.readFileSync(path.join(dir, "agap-db.json"), "utf8");
+  assert.equal(onDisk.includes(DEMO_PASSWORD), false, "nothing sensitive hits the disk");
+  assert.equal(onDisk.includes(secret), false);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("demo accounts are seeded only in demo mode; otherwise just the env Super Admin exists", async () => {
+  const plain = await boot({ seedDemoAccounts: false, superAdminEmail: "", superAdminPassword: "" });
+  assert.equal(plain.app.store.db.accounts.length, 0, "no accounts without demo mode or env bootstrap");
+  assert.equal((await plain.loginWith(emailFor("teacher", "t1"), DEMO_PASSWORD)).status, 401);
+  await plain.close();
+
+  const demo = await boot({ seedDemoAccounts: true, superAdminEmail: "", superAdminPassword: "" });
+  assert.ok(demo.app.store.db.accounts.length >= 8, "demo mode seeds teachers, principal, responder and parents");
+  assert.equal((await demo.loginWith(emailFor("teacher", "t1"), DEMO_PASSWORD)).status, 200);
+  await demo.close();
 });

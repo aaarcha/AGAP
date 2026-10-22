@@ -19,7 +19,11 @@ function freshModes() {
 }
 
 function freshDb() {
-  return { version: 1, seq: 0, roster: structuredClone(SEED_ROSTER), incidents: [], clientIds: {}, modes: freshModes(), drills: [] };
+  return {
+    version: 1, seq: 0, roster: structuredClone(SEED_ROSTER), incidents: [], clientIds: {}, modes: freshModes(), drills: [],
+    // Auth state: accounts (scrypt hashes, never plaintext), server-side sessions (revocable), append-only audit log.
+    accounts: [], sessions: [], audit: [], schoolYear: { count: 0, startedAt: null },
+  };
 }
 
 // Backfill fields added by newer versions so an old data file keeps working.
@@ -31,6 +35,10 @@ export function normalize(d) {
     route: { ...f.route, ...(d.modes && d.modes.route) },
   };
   d.drills = Array.isArray(d.drills) ? d.drills : [];
+  d.accounts = Array.isArray(d.accounts) ? d.accounts : [];
+  d.sessions = Array.isArray(d.sessions) ? d.sessions : [];
+  d.audit = Array.isArray(d.audit) ? d.audit : [];
+  d.schoolYear = d.schoolYear && Number.isFinite(d.schoolYear.count) ? d.schoolYear : { count: 0, startedAt: null };
   for (const r of d.roster) if (!Number.isInteger(r.registry)) r.registry = 30;
   for (const i of d.incidents) {
     i.baseLocationRisk ??= i.locationRisk;
@@ -56,6 +64,7 @@ export function createStore({ dataDir, onPersistError = console.error } = {}) {
   const file = dataDir ? path.join(dataDir, "agap-db.json") : null;
   let db = freshDb();
   let timer = null;
+  let touchTimer = null;
 
   if (file) {
     try {
@@ -91,14 +100,25 @@ export function createStore({ dataDir, onPersistError = console.error } = {}) {
     timer = setTimeout(flush, 250);
   }
 
+  // Persist in-memory-only updates (e.g. session activity) without bumping the shared version number.
+  function schedule() {
+    if (!file) return;
+    clearTimeout(touchTimer);
+    touchTimer = setTimeout(flush, 2000);
+  }
+
   return {
     get db() { return db; },
     save,
+    schedule,
     flush,
     nextId(prefix) { db.seq += 1; return `${prefix}${Date.now().toString(36)}${db.seq.toString(36)}`; },
     reset({ keepRoster = true } = {}) {
       const roster = keepRoster ? db.roster : structuredClone(SEED_ROSTER);
-      db = { ...freshDb(), roster, version: db.version };
+      // Demo reset wipes incidents/modes but never auth state: accounts, sessions
+      // (the Principal stays signed in) and the audit trail must survive.
+      const { accounts, sessions, audit, schoolYear } = db;
+      db = { ...freshDb(), roster, accounts, sessions, audit, schoolYear, version: db.version };
       save();
     },
     // Keep the incident list from growing forever: drop resolved tickets older than `keepDays` (default 90).

@@ -15,8 +15,8 @@ function LangToggle() {
   const [lang, setLang] = useLang();
   return (
     <div role="group" aria-label="Advisory language" className="flex rounded-xl border border-brand-200 overflow-hidden bg-white self-start">
-      {LANGS.map((l: { id: "en" | "fil"; label: string }) => (
-        <button key={l.id} onClick={() => setLang(l.id)} aria-pressed={lang === l.id}
+      {LANGS.map((l) => (
+        <button key={l.id} onClick={() => setLang(l.id as "en" | "fil")} aria-pressed={lang === l.id}
           className={`min-h-10 px-4 text-sm font-bold ${lang === l.id ? "bg-brand-600 text-white" : "text-brand-700"}`}>{l.label}</button>
       ))}
     </div>
@@ -27,7 +27,7 @@ function Advisory({ inc }: { inc: Incident }) {
   const { now, modes } = useApp();
   const [lang] = useLang();
   const [copied, setCopied] = useState(false);
-  const adv = buildAdvisory(inc, lang, { school: SCHOOL.name, now, hazardKind: modes.hazard.active ? modes.hazard.kind : null });
+  const adv = buildAdvisory(inc, lang, { school: SCHOOL.name, now, hazardKind: modes.hazard.active ? modes.hazard.kind : undefined });
   async function copy() {
     try { await navigator.clipboard.writeText(adv.text); setCopied(true); setTimeout(() => setCopied(false), 2500); } catch { /* clipboard blocked */ }
   }

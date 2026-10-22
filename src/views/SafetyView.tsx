@@ -109,8 +109,8 @@ function RulesCard() {
       </ol>
       <h3 className="text-xs font-bold text-slate-500 uppercase tracking-wide mt-4 mb-1">Responder speeds used for ETA</h3>
       <ul className="text-sm text-slate-700 grid sm:grid-cols-3 gap-1">
-        {TRANSPORT_MODES.map((m: { id: keyof typeof ROUTE_SPEED_FACTOR.flooded; label: string; kmh: number }) => (
-          <li key={m.id}>{m.label}: <span className="font-mono">{m.kmh} km/h</span>, flooded ×{ROUTE_SPEED_FACTOR.flooded[m.id]}</li>
+        {TRANSPORT_MODES.map((m) => (
+          <li key={m.id}>{m.label}: <span className="font-mono">{m.kmh} km/h</span>, flooded ×{ROUTE_SPEED_FACTOR.flooded[m.id as keyof typeof ROUTE_SPEED_FACTOR.flooded]}</li>
         ))}
       </ul>
       <IllustrativeTag text="All thresholds, boosts and speeds are illustrative defaults pending the expert-panel session." />
