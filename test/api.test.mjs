@@ -1119,3 +1119,28 @@ test("a teacher can set their default classroom from the campus picker", async (
   assert.equal((await s.call("PUT", "/api/profile/room", { token: parent, body: { roomId: "bldg-a-flr-2-rm-204" } })).status, 403, "only the teacher changes their own room");
   await s.close();
 });
+
+test("login for seeded @sinalhanes.deped.ph account with wrong password returns 401 invalid_credentials (never 500); correct password returns 200", async () => {
+  const s = await boot();
+  const email = "t1@sinalhanes.deped.ph";
+  const wrong = await s.call("POST", "/api/login", { body: { email, password: "WrongPassword123!" } });
+  assert.equal(wrong.status, 401);
+  assert.equal(wrong.json?.error, "invalid_credentials");
+  const correct = await s.call("POST", "/api/login", { body: { email, password: DEMO_PASSWORD } });
+  assert.equal(correct.status, 200);
+  assert.ok(correct.json?.token);
+  await s.close();
+});
+
+test("every subtype in CATEGORIES is reachable from the tiles", async () => {
+  const { CATEGORIES } = await import("../shared/domain.js");
+  for (const cat of CATEGORIES) {
+    assert.ok(Array.isArray(cat.subs) && cat.subs.length > 0, `category ${cat.id} has subs`);
+    for (const sub of cat.subs) {
+      assert.ok(sub.id && sub.label, `subtype ${cat.id} missing id/label`);
+    }
+  }
+  // Medical Mass Collapse must exist
+  const medical = CATEGORIES.find((c) => c.id === "medical");
+  assert.ok(medical?.subs.some((s) => s.id === "mass_collapse"), "medical.mass_collapse exists");
+});

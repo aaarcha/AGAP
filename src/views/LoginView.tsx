@@ -54,8 +54,9 @@ export default function LoginView() {
     e.preventDefault();
     if (!validate()) return;
     setSubmitting(true); setError("");
-    try { await login(email, password); }
-    catch (e: any) { setError(e instanceof Error ? e.message : "Could not sign in."); }
+    try {
+      await login(email, password);
+    } catch (e: any) { setError(e instanceof Error ? e.message : "Could not sign in."); }
     finally { setSubmitting(false); }
   };
 
@@ -63,13 +64,13 @@ export default function LoginView() {
   if (mustChange && !changed) {
     return (
       <div className="min-h-dvh flex flex-col text-white" style={{ background: "radial-gradient(ellipse 120% 60% at 50% 0%, #425B9A 0%, #1D2848 55%, #0F1830 100%)" }}>
-        <div className="flex-1 w-full max-w-md mx-auto px-5 pt-[max(2rem,env(safe-area-inset-top))] pb-6 flex flex-col">
-          <div className="flex flex-col items-center text-center pt-4 pb-6">
-            <div className="w-28 h-28 rounded-3xl overflow-hidden bg-cream border-2 border-white/10 shadow-2xl" style={{ boxShadow: "0 0 40px 12px rgba(118,192,236,.35)" }}>
-              <img src="/icons/logo-256.png" alt="" width={112} height={112} className="w-full h-full object-contain p-1" />
+        <div className="flex-1 w-full max-w-sm mx-auto px-4 pt-[max(1.25rem,env(safe-area-inset-top))] pb-4 flex flex-col">
+          <div className="flex flex-col items-center text-center pt-3 pb-4">
+            <div className="w-10 h-10 rounded-xl overflow-hidden bg-cream border-2 border-white/10 shadow-sm" style={{ boxShadow: "0 0 12px 4px rgba(118,192,236,.25)" }}>
+              <img src="/icons/logo-256.png" alt="" width={40} height={40} className="w-full h-full object-contain p-0.5" />
             </div>
             <h1 className="text-2xl font-black tracking-tight mt-4">Set a new password</h1>
-            <p className="text-sm text-slate-300 font-medium mt-2">Your temporary credential must be replaced before you can continue.</p>
+            <p className="text-xs text-slate-400 font-medium mt-1">Your temporary credential must be replaced before you can continue.</p>
           </div>
 
           <form onSubmit={handlePasswordChange} className="w-full space-y-4">
@@ -84,14 +85,14 @@ export default function LoginView() {
                 disabled={changing}
                 required
                 placeholder="At least 8 characters"
-                className="w-full min-h-14 rounded-xl px-4 pr-12 bg-white text-slate-900 text-base outline-none focus:ring-2 focus:ring-accent"
-              />
-              <button
-                type="button"
-                onClick={() => setShowNew(!showNew)}
-                className="absolute right-0 top-1/2 flex h-14 w-12 -translate-y-1/2 items-center justify-center text-slate-500 hover:text-brand-600"
-                aria-label={showNew ? "Hide password" : "Show password"}
-              >
+              className="w-full min-h-12 rounded-lg px-3 pr-10 bg-white text-slate-900 text-sm outline-none focus:ring-2 focus:ring-accent"
+            />
+            <button
+              type="button"
+              onClick={() => setShowNew(!showNew)}
+              className="absolute right-3 top-1/2 flex -translate-y-1/2 items-center justify-center text-slate-500 hover:text-brand-600"
+              aria-label={showNew ? "Hide password" : "Show password"}
+            >
                 {showNew ? <Eye size={18} /> : <EyeOff size={18} />}
               </button>
             </div>
@@ -119,8 +120,8 @@ export default function LoginView() {
       <div className="min-h-dvh flex flex-col text-white" style={{ background: "radial-gradient(ellipse 120% 60% at 50% 0%, #425B9A 0%, #1D2848 55%, #0F1830 100%)" }}>
         <div className="flex-1 w-full max-w-md mx-auto px-5 pt-[max(2rem,env(safe-area-inset-top))] pb-6 flex flex-col items-center justify-center text-center">
           <p className="text-5xl mb-4" aria-hidden>✅</p>
-          <h1 className="text-2xl font-black tracking-tight">Password set!</h1>
-          <p className="text-sm text-slate-300 font-medium mt-2">You can now continue to the app.</p>
+          <h1 className="text-2xl font-black tracking-tight mt-4">Password set!</h1>
+          <p className="text-base text-slate-300 font-medium mt-1.5">You can now continue to the app.</p>
           <button
             onClick={() => window.location.reload()}
             className="mt-6 w-full min-h-14 rounded-xl px-4 bg-brand-600 text-white font-bold text-base"
@@ -133,15 +134,12 @@ export default function LoginView() {
   }
 
   return (
-    <div className="min-h-dvh flex flex-col text-white" style={{ background: "radial-gradient(ellipse 120% 60% at 50% 0%, #425B9A 0%, #1D2848 55%, #0F1830 100%)" }}>
-      <div className="flex-1 w-full max-w-md mx-auto px-5 pt-[max(2rem,env(safe-area-inset-top))] pb-6 flex flex-col">
-        <div className="flex flex-col items-center text-center pt-4 pb-6">
-          <div className="w-28 h-28 rounded-3xl overflow-hidden bg-cream border-2 border-white/10 shadow-2xl" style={{ boxShadow: "0 0 40px 12px rgba(118,192,236,.35)" }}>
-            <img src="/icons/logo-256.png" alt="" width={112} height={112} className="w-full h-full object-contain p-1" />
-          </div>
-          <h1 className="text-2xl font-black tracking-tight mt-4">{BRAND.name}</h1>
-          <p className="text-sm text-slate-300 font-medium">Emergency reporting and incident prioritization</p>
-          <p className="text-xs text-slate-400 font-semibold mt-2">{SCHOOL.name} · DepEd ID {SCHOOL.depedId}</p>
+    <div className="min-h-dvh flex flex-col text-white" style={{ background: "radial-gradient(ellipse 120% 60% at 50% 0%, #425B9A 0%, #1D2848 55%, #0F1830 100%)" }}>          <div className="flex-1 w-full max-w-sm mx-auto px-4 pt-[max(1.25rem,env(safe-area-inset-top))] pb-4 flex flex-col">        <div className="flex flex-col items-center text-center pt-4 pb-6">            <div className="w-10 h-10 rounded-xl overflow-hidden bg-cream border-2 border-white/10 shadow-sm" style={{ boxShadow: "0 0 12px 4px rgba(118,192,236,.25)" }}>
+              <img src="/icons/logo-256.png" alt="" width={40} height={40} className="w-full h-full object-contain p-0.5" />
+            </div>
+            <h1 className="text-2xl font-black tracking-tight mt-4">{BRAND.name}</h1>
+            <p className="text-sm text-slate-400 font-medium mt-1">Emergency reporting and incident prioritization</p>
+            <p className="text-xs text-slate-500 font-semibold mt-1.5">{SCHOOL.name} · DepEd ID {SCHOOL.depedId}</p>
         </div>
 
         {/* Login form – mobile-first, accessible, touch-target sized */}
@@ -160,7 +158,7 @@ export default function LoginView() {
               disabled={busy}
               required
               placeholder="Enter your email"
-              className="w-full min-h-14 rounded-xl px-4 bg-white text-slate-900 text-base outline-none focus:ring-2 focus:ring-accent focus:outline-none"
+              className="w-full min-h-12 rounded-xl px-4 bg-white text-slate-900 text-sm outline-none focus:ring-2 focus:ring-accent"
             />
           </div>
 
@@ -178,13 +176,12 @@ export default function LoginView() {
               disabled={busy}
               required
               placeholder="Enter your password"
-              className="w-full min-h-14 rounded-xl px-4 pr-12 bg-white text-slate-900 text-base outline-none focus:ring-2 focus:ring-accent focus:outline-none"
-              aria-label={showPassword ? "Password (visible)" : "Password (masked)"}
+              className="w-full min-h-12 rounded-lg px-3 pr-10 bg-white text-slate-900 text-sm outline-none focus:ring-2 focus:ring-accent"
             />
             <button
               type="button"
               onClick={toggle}
-              className="absolute right-0 top-1/2 flex h-14 w-12 -translate-y-1/2 items-center justify-center text-slate-500 hover:text-brand-600 focus:outline-none focus:ring-2 focus:ring-accent focus:ring-opacity-50"
+              className="absolute right-3 top-1/2 flex -translate-y-1/2 items-center justify-center text-slate-500 hover:text-brand-600 focus:outline-none focus:ring-2 focus:ring-accent focus:ring-opacity-50"
               aria-label={showPassword ? "Hide password" : "Show password"}
             >
               {showPassword ? <Eye size={18} /> : <EyeOff size={18} />}
@@ -192,22 +189,16 @@ export default function LoginView() {
           </div>
 
           {/* Inline validation / server error message – announced to screen readers */}
-          {error && <p role="alert" aria-live="assertive" className="text-sm text-blush-300">{error}</p>}
-
-          <button
-            type="submit"
-            disabled={busy || submitting}
-            className="w-full min-h-14 rounded-xl px-4 bg-brand-600 text-white font-bold text-base disabled:opacity-60 transition-opacity"
-          >
+          {error && <p role="alert" aria-live="assertive" className="text-sm text-blush-300">{error}</p>}            <button
+              type="submit"
+              disabled={busy || submitting}
+              className="w-full min-h-14 rounded-xl px-4 bg-brand-600 text-white font-bold text-base disabled:opacity-60"
+            >
             {submitting ? "Signing in…" : "Sign In"}
           </button>
         </form>
 
-        <div className="mt-auto pt-8 text-center">
-          <button type="button" onClick={() => setAbout(true)} className="min-h-12 px-3 text-xs font-semibold text-slate-400 underline">
-            About ASPIRE
-          </button>
-        </div>
+        <button type="button" onClick={() => setAbout(true)} className="mt-6 min-h-12 text-xs font-semibold text-slate-400 underline">About ASPIRE</button>
       </div>
 
       {about && (

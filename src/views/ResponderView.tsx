@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { useMediaQuery } from "../lib/hooks";
 import { BookOpen, History, Radio, User } from "lucide-react";
 import { STATUS_LABEL, bandFor } from "../../shared/domain.js";
 import { useApp } from "../lib/store";
@@ -81,17 +82,18 @@ export const RESPONDER_TABS = [
 export type ResponderTab = (typeof RESPONDER_TABS)[number]["id"];
 
 export default function ResponderView({ tab }: { tab: ResponderTab }) {
+  const wide = useMediaQuery("screen and (min-width: 1024px)");
   const { incidents } = useApp();
   return (
     <>
       {tab === "queue" && (
-        <div className="mx-auto w-full max-w-6xl space-y-3 px-3 py-3">
-          <div className="max-w-xl"><RouteControl /></div>
+        <div className={`mx-auto w-full ${wide ? "max-w-7xl" : "max-w-3xl"} space-y-3 px-3 py-3`}>
+          <div className={wide ? "" : "max-w-xl"}><RouteControl /></div>
           <IncidentQueue incidents={incidents} title="Priority dispatch queue" empty="No active dispatches." />
         </div>
       )}
-      {tab === "history" && <div className="mx-auto w-full max-w-3xl px-3 py-3"><HistorySection title="Incident history" /></div>}
-      {tab === "ref" && <div className="mx-auto w-full max-w-2xl px-3 py-3"><EscalationTable /></div>}
+      {tab === "history" && <div className={`mx-auto w-full ${wide ? "max-w-5xl" : "max-w-3xl"} px-3 py-3`}><HistorySection title="Incident history" /></div>}
+      {tab === "ref" && <div className={`mx-auto w-full ${wide ? "max-w-5xl" : "max-w-2xl"} px-3 py-3`}><EscalationTable /></div>}
       {tab === "account" && <AccountView />}
     </>
   );

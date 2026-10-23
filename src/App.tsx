@@ -69,9 +69,9 @@ export default function App() {
   const subtitle = user.role === "principal" ? SCHOOL.name : user.role === "responder" ? "Barangay Sinalhan + CDRRMO" : user.subtitle;
 
   return (
-    <div className={compact ? "min-h-dvh bg-slate-200" : "min-h-dvh bg-cream"}>
+    <div className={compact ? "min-h-dvh bg-slate-100" : "min-h-dvh bg-cream"}>
       <div className={compact
-        ? "relative mx-auto flex min-h-dvh w-full max-w-md flex-col bg-cream md:shadow-[0_0_0_1px_rgba(15,23,42,0.08)]"
+        ? "relative mx-auto flex min-h-dvh w-full max-w-md flex-col bg-cream md:shadow-[0_0_0_1px_rgba(15,23,42,0.08)] md:max-w-xl lg:max-w-2xl xl:max-w-3xl 2xl:max-w-4xl"
         : "flex min-h-dvh"}>
         {user.role === "principal" && <SideNav tab={pTab} setTab={setPTab} tabs={PRINCIPAL_TABS} subtitle="Principal" />}
         {user.role === "responder" && <SideNav tab={rTab} setTab={setRTab} tabs={RESPONDER_TABS} subtitle="Responder" />}
@@ -79,7 +79,7 @@ export default function App() {
         <div className="flex min-w-0 flex-1 flex-col">
           <Header title={title} subtitle={subtitle} />
           <StatusBanner />
-          <main className={compact ? "flex-1 pb-24" : "flex-1 pb-24 lg:pb-6"}>
+          <main className={compact ? "flex-1 overflow-y-auto overflow-x-hidden pb-24 scroll-smooth" : "flex-1 pb-24 lg:pb-6 overflow-y-auto scroll-smooth"}>
             {user.role === "teacher" && (
               <>
                 {teacherTab === "report" && <ReportView />}

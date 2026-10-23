@@ -255,15 +255,16 @@ function AccountsPane({ accounts, onUnlock, onActivate, onReset, onDeactivate }:
       <div className="grid gap-2 lg:hidden">
         {accounts.map((acc) => (
           <div key={acc.id} className={card}>
-            <p className="text-base font-bold text-slate-800">{acc.name}</p>
-            <p className="text-sm text-slate-600">{acc.email}</p>
-            <p className="mt-0.5 text-xs text-slate-500">{acc.role}{acc.section ? ` · ${acc.section}` : ""}</p>
-            <div className="mt-2"><StatusChips acc={acc} /></div>
-            <div className="mt-3"><AccountActions acc={acc} onUnlock={onUnlock} onActivate={onActivate} onReset={onReset} onDeactivate={onDeactivate} /></div>
+            <div>
+              <p className="text-base font-bold text-slate-800">{acc.name}</p>
+              <p className="text-sm text-slate-600">{acc.email}</p>
+              <p className="mt-0.5 text-xs text-slate-500">{acc.role}{acc.section ? ` · ${acc.section}` : ""}</p>
+              <div className="mt-2"><StatusChips acc={acc} /></div>
+              <div className="mt-3"><AccountActions acc={acc} onUnlock={onUnlock} onActivate={onActivate} onReset={onReset} onDeactivate={onDeactivate} /></div>
+            </div>
           </div>
         ))}
       </div>
-
       <div className="hidden items-start gap-4 lg:grid lg:grid-cols-[22rem_minmax(0,1fr)]">
         <ul className="max-h-[calc(100dvh-14rem)] space-y-1.5 overflow-y-auto pr-1">
           {accounts.map((acc) => (

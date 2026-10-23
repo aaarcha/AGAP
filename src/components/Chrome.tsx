@@ -146,7 +146,7 @@ export function SideNav<T extends string>({ tab, setTab, tabs, subtitle }: {
   tab: T; setTab: (t: T) => void; tabs: NavTab<T>[]; subtitle?: string;
 }) {
   return (
-    <aside className="sticky top-0 hidden h-dvh w-60 shrink-0 flex-col bg-brand-900 text-white lg:flex">
+    <aside className="sticky top-0 hidden h-dvh w-60 shrink-0 flex-col bg-brand-900 text-white lg:flex scroll-smooth overflow-y-auto">
       <div className="flex h-16 items-center gap-2.5 border-b border-white/10 px-4">
         <img src="/icons/logo-256.png" alt="" className="h-9 w-9 rounded-lg bg-cream object-contain p-0.5" width={36} height={36} />
         <div className="min-w-0">

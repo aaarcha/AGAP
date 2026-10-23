@@ -819,12 +819,14 @@ export function createApp(opts = {}) {
     if (p === "/api/config" && m === "GET")
       return send(res, 200, { accessCodeRequired: Boolean(accessCode), demoReset: Boolean(allowReset), passwordMin: PASSWORD_MIN, school: { ...D.SCHOOL, phone: schoolPhone } });
 
-    if (p === "/api/login" && m === "POST") {
+      if (p === "/api/login" && m === "POST") {
       rateLimit(req, "login", 30);
       const body = await readJson(req);
-      // The access code is school-wide; it is only enforced when one is configured.
-      if (accessCode && !safeEqual(clean(body.code, 100), accessCode)) throw new HttpError(401, "bad_code", "Incorrect access code.");
       const email = normEmail(body.email);
+
+      // Access code check first when one is configured.
+      if (accessCode && !safeEqual(clean(body.code, 100), accessCode)) throw new HttpError(401, "bad_code", "Incorrect access code.");
+
       const password = String(body.password ?? "");
       // One generic error for "unknown email / wrong password / deactivated" – no account enumeration.
       const generic = () => new HttpError(401, "invalid_credentials", "Invalid email or password.");

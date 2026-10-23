@@ -1,5 +1,6 @@
 import { useState } from "react";
-import { ChevronDown, Copy, PhoneCall } from "lucide-react";
+import { useMediaQuery } from "../lib/hooks";
+import { ChevronDown, Copy, PhoneCall, Share2 } from "lucide-react";
 import { SCHOOL, bandFor } from "../../shared/domain.js";
 import { LANGS, buildAdvisory } from "../../shared/advisories.js";
 import { useApp } from "../lib/store";
@@ -25,11 +26,61 @@ function LangToggle() {
 function Advisory({ inc }: { inc: Incident }) {
   const { now, modes } = useApp();
   const [lang] = useLang();
-  const [copied, setCopied] = useState(false);
+  const [status, setStatus] = useState<"idle" | "copied" | "error">("idle");
   const adv = buildAdvisory(inc, lang, { school: SCHOOL.name, now, hazardKind: modes.hazard.active ? modes.hazard.kind : undefined });
+
   async function copy() {
-    try { await navigator.clipboard.writeText(adv.text); setCopied(true); setTimeout(() => setCopied(false), 2500); } catch { /* clipboard blocked */ }
+    const text = adv.text;
+    try {
+      if (typeof navigator !== "undefined" && typeof (navigator as any).share === "function") {
+        try {
+          await (navigator as any).share({ text });
+          setStatus("copied");
+          setTimeout(() => setStatus("idle"), 2500);
+          return;
+        } catch {
+          // Fall through to other methods if share fails
+        }
+      }
+      if (typeof navigator !== "undefined" && navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+        try {
+          await navigator.clipboard.writeText(text);
+          setStatus("copied");
+          setTimeout(() => setStatus("idle"), 2500);
+          return;
+        } catch {
+          // Fall through to fallback
+        }
+      }
+      if (typeof document !== "undefined") {
+        try {
+          const textarea = document.createElement("textarea");
+          textarea.value = text;
+          textarea.style.position = "fixed";
+          textarea.style.left = "-999999px";
+          textarea.style.top = "-999999px";
+          document.body.appendChild(textarea);
+          textarea.focus();
+          textarea.select();
+          const successful = document.execCommand("copy");
+          textarea.remove();
+          if (successful) {
+            setStatus("copied");
+            setTimeout(() => setStatus("idle"), 2500);
+            return;
+          }
+        } catch {
+          // Fall through to error
+        }
+      }
+      setStatus("error");
+      setTimeout(() => setStatus("idle"), 4000);
+    } catch {
+      setStatus("error");
+      setTimeout(() => setStatus("idle"), 4000);
+    }
   }
+
   return (
     <div className="rounded-xl border border-brand-100 bg-brand-50 p-3" lang={lang === "fil" ? "fil" : "en"}>
       <p className="text-sm font-extrabold text-brand-800">{adv.title}</p>
@@ -37,7 +88,7 @@ function Advisory({ inc }: { inc: Incident }) {
         {adv.lines.map((l, i) => <li key={i} className="text-sm leading-relaxed text-slate-700">{l}</li>)}
       </ul>
       <button onClick={() => void copy()} className="mt-2 flex min-h-12 items-center gap-1.5 rounded-lg border border-brand-200 bg-white px-3 text-xs font-bold text-brand-700">
-        <Copy size={13} /> {copied ? (lang === "fil" ? "Nakopya na" : "Copied") : lang === "fil" ? "Kopyahin ang abiso" : "Copy advisory"}
+        <Share2 size={13} /> {status === "copied" ? "Copied" : status === "error" ? "Couldn't copy. Press and hold the text to copy it." : "Share"}
       </button>
     </div>
   );
@@ -110,20 +161,21 @@ export default function ParentView() {
   const { user, incidents, now, config } = useApp();
   const [lang] = useLang();
   const phone = config?.school?.phone ?? "";
+  const wide = useMediaQuery("screen and (min-width: 768px)");
   const open = incidents
     .filter((i) => i.status !== "RESOLVED")
     .sort((a, b) => Number(b.overrideReasons.length > 0) - Number(a.overrideReasons.length > 0) || b.score - a.score);
   const lastClosed = incidents.filter((i) => i.status === "RESOLVED").sort((a, b) => (b.resolvedAt ?? 0) - (a.resolvedAt ?? 0))[0];
 
   return (
-    <div className="mx-auto w-full max-w-md space-y-3 px-3 py-3">
+    <div className={`mx-auto w-full ${wide ? "max-w-4xl" : "max-w-md"} space-y-3 px-3 py-3`}>
       <div className="flex items-center justify-between gap-2">
         <p className="text-xs font-bold uppercase tracking-wide text-slate-500">{lang === "fil" ? "Wika ng abiso" : "Advisory language"}</p>
         <LangToggle />
       </div>
 
       {open.length === 0 && (
-        <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-5 text-center" role="status">
+        <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-5 text-center shadow-sm" role="status">
           <p className="mb-1 text-4xl" aria-hidden>🟢</p>
           <p className="text-base font-bold text-emerald-800">{SCHOOL.name} {lang === "fil" ? "ay normal ang takbo." : "is operating normally."}</p>
           <p className="mt-1 text-sm text-emerald-700">
@@ -137,11 +189,15 @@ export default function ParentView() {
         </div>
       )}
 
-      {open.map((a) => <ParentCard key={a.id} inc={a} />)}
+      {open.map((a) => (
+        <div key={a.id} className="overflow-hidden rounded-2xl bg-white shadow-lg transition-shadow hover:shadow-xl">
+          <ParentCard inc={a} />
+        </div>
+      ))}
 
       {phone && (
         <a href={`tel:${phone.replace(/[^0-9+]/g, "")}`}
-          className="flex min-h-14 w-full items-center justify-center gap-2 rounded-2xl bg-brand-600 text-base font-bold text-white active:scale-[0.99]">
+          className={`inline-flex min-h-12 items-center gap-2 rounded-2xl bg-brand-600 text-base font-bold text-white active:scale-[0.99] ${wide ? "px-4" : "w-full justify-center"}`}>
           <PhoneCall size={18} /> {lang === "fil" ? "Tawagan ang Paaralan" : "Contact School"}
         </a>
       )}

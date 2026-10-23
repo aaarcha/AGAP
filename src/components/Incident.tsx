@@ -1,4 +1,6 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useMemo } from "react";
+import { useMediaQuery } from "../lib/hooks";
+
 import { CheckCircle2, ChevronDown, Clock, Eye, Navigation, PhoneCall, Siren } from "lucide-react";
 import { ESCALATION_MATRIX, STATUS_LABEL, agencyFor, bandFor } from "../../shared/domain.js";
 import { useApp } from "../lib/store";
@@ -41,6 +43,8 @@ export function IncidentCard({ inc, showActions, showLog }: { inc: Incident; sho
   const [busy, setBusy] = useState(false);
   const [ackOpen, setAckOpen] = useState(false);
 
+  const isMobileAck = useMediaQuery("screen and (max-width: 479px)");
+
   // First time a principal/responder sees a "Sent" ticket, tell the server it was seen.
   useEffect(() => { if (showActions && inc.status === "SENT") markSeen(inc.id); }, [showActions, inc.id, inc.status, markSeen]);
 
@@ -63,8 +67,7 @@ export function IncidentCard({ inc, showActions, showLog }: { inc: Incident; sho
     ["Critical override", inc.overrideReasons.length ? inc.overrideReasons.map(plainOverride).join(" · ") : "None"],
   ];
 
-  return (
-    <article className="overflow-hidden rounded-2xl bg-white" style={{ border: `1.5px solid ${ct.border}`, boxShadow: `0 1px 6px ${ct.color}18` }}>
+  return (      <article className="overflow-hidden rounded-2xl bg-white" style={{ border: `1.5px solid ${ct.border}`, boxShadow: `0 1px 6px ${ct.color}18`, transition: "box-shadow 0.2s ease" }}>
       <header className="flex items-center gap-2 px-3 py-2" style={{ background: ct.bg, borderBottom: `1px solid ${ct.border}` }}>
         <span aria-hidden>{ct.emoji}</span>
         <span className="text-xs font-extrabold uppercase tracking-wider" style={{ color: ct.color }}>{inc.categoryLabel}</span>
@@ -91,26 +94,22 @@ export function IncidentCard({ inc, showActions, showLog }: { inc: Incident; sho
         {showActions && <HeadcountPanel inc={inc} />}
 
         {showActions && !closed && (
-          <div className="grid gap-2 pt-1">
+          <div className="grid grid-cols-2 gap-2 pt-1">
             {(inc.status === "SENT" || inc.status === "SEEN") && (
-              <button disabled={busy} onClick={() => setAckOpen(true)}
-                className="flex min-h-14 w-full items-center justify-center gap-2 rounded-2xl text-base font-bold text-white disabled:opacity-60"
-                style={{ background: ct.gradient }}>
-                <Navigation size={18} /> Acknowledge &amp; En Route
-              </button>
+              <MobileAckButton disabled={busy} onClick={() => setAckOpen(true)} gradient={ct.gradient} />
             )}
             {inc.status !== "ON_SITE" && (
               <button disabled={busy} onClick={() => void run("onsite")}
-                className="flex min-h-14 w-full items-center justify-center gap-2 rounded-2xl bg-teal-700 text-base font-bold text-white disabled:opacity-60">
-                <Siren size={18} /> On-Site
+                className="flex min-h-10 w-full items-center justify-center gap-2 rounded-xl bg-teal-700 text-sm font-bold text-white disabled:opacity-60">
+                <Siren size={15} /> On-Site
               </button>
             )}
             <button disabled={busy} onClick={() => setConfirm("resolved")}
-              className="flex min-h-14 w-full items-center justify-center gap-2 rounded-2xl bg-white text-base font-bold disabled:opacity-60"
+              className="flex min-h-10 w-full items-center justify-center gap-2 rounded-xl bg-white text-sm font-bold disabled:opacity-60"
               style={{ border: `2px solid ${ct.border}`, color: ct.color }}>
-              <CheckCircle2 size={18} /> Resolve
+              <CheckCircle2 size={15} /> Resolve
             </button>
-            <button disabled={busy} onClick={() => setConfirm("false_alarm")} className="min-h-12 text-sm font-bold text-slate-500">
+            <button disabled={busy} onClick={() => setConfirm("false_alarm")} className="flex min-h-10 w-full items-center justify-center gap-2 rounded-xl border border-slate-300 bg-white text-sm font-bold text-slate-600 disabled:opacity-60">
               Cancel — false alarm
             </button>
           </div>
@@ -163,8 +162,43 @@ export function IncidentCard({ inc, showActions, showLog }: { inc: Incident; sho
           onClose={() => setConfirm(null)}
           onConfirm={() => void run("resolve", confirm)}
         />
+      )}      {ackOpen && <AckModal inc={inc} onClose={() => setAckOpen(false)} onConfirm={ack} />}
+      {confirm && (
+        <ConfirmModal
+          title={confirm === "resolved" ? "Mark as resolved?" : "Cancel as false alarm?"}
+          message={confirm === "resolved"
+            ? "This closes the ticket for everyone and shows “All clear” to the affected parents."
+            : "Use this only if there was no real emergency. The ticket closes and parents see it was cancelled."}
+          confirmLabel={confirm === "resolved" ? "Mark Resolved" : "Cancel Alert"}
+          danger={confirm === "false_alarm"}
+          onClose={() => setConfirm(null)}
+          onConfirm={() => void run("resolve", confirm)}
+        />
       )}
     </article>
+  );
+}
+
+function MobileAckButton({ disabled, onClick, gradient }: {
+  disabled: boolean;
+  onClick: () => void;
+  gradient: string;
+}) {
+  const isMobileAck = useMediaQuery("screen and (max-width: 479px)");
+  return (
+    <button disabled={disabled} onClick={onClick}
+      className={`min-h-10 w-full rounded-xl text-sm font-bold text-white disabled:opacity-60 ${isMobileAck ? "relative" : "flex items-center justify-center gap-2"}`}
+      style={{ background: gradient }}>
+      {isMobileAck ? (
+        <>
+          <Navigation size={15} className="absolute left-3 top-1/2 -translate-y-1/2" />
+          <span className="absolute left-0 right-0 top-1/2 -translate-y-1/2 flex flex-col items-center leading-tight">Acknowledge
+            <br />&amp; En Route</span>
+        </>
+      ) : (
+        <><Navigation size={15} /> Acknowledge &amp; En Route</>
+      )}
+    </button>
   );
 }
 

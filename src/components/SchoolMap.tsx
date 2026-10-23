@@ -117,6 +117,7 @@ export function SchoolMap({
           onPointerMove={moveDrag}
           onPointerUp={endDrag}
           onPointerCancel={endDrag}
+          onPointerLeave={endDrag}
           style={{ touchAction: "none" }}
         >
           <rect width="100" height="100" fill="#E0F2FE" />
