@@ -136,7 +136,7 @@ export function BottomNav<T extends string>({ tab, setTab, tabs, contained }: {
 }) {
   return (
     <nav aria-label="Sections"
-      className={`fixed bottom-0 z-30 flex border-t border-slate-200 bg-white pb-[env(safe-area-inset-bottom)] ${contained ? "left-1/2 w-full max-w-md -translate-x-1/2" : "inset-x-0 lg:hidden"}`}>
+      className={`fixed bottom-0 z-30 flex border-t border-slate-200 bg-white pb-[env(safe-area-inset-bottom)] ${contained ? "inset-x-0 md:hidden" : "inset-x-0 md:hidden"}`}>
       {tabs.map((t) => navButton(t, tab, setTab, "bottom"))}
     </nav>
   );
@@ -146,7 +146,7 @@ export function SideNav<T extends string>({ tab, setTab, tabs, subtitle }: {
   tab: T; setTab: (t: T) => void; tabs: NavTab<T>[]; subtitle?: string;
 }) {
   return (
-    <aside className="sticky top-0 hidden h-dvh w-60 shrink-0 flex-col bg-brand-900 text-white lg:flex scroll-smooth overflow-y-auto">
+    <aside className="scroll-area sticky top-0 hidden h-dvh w-60 shrink-0 flex-col bg-brand-900 text-white md:flex">
       <div className="flex h-16 items-center gap-2.5 border-b border-white/10 px-4">
         <img src="/icons/logo-256.png" alt="" className="h-9 w-9 rounded-lg bg-cream object-contain p-0.5" width={36} height={36} />
         <div className="min-w-0">

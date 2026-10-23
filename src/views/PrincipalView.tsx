@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { ChevronRight, ClipboardList, History as HistoryIcon, Info, Menu, ShieldAlert, Siren, User, Users } from "lucide-react";
 import { useApp } from "../lib/store";
 import { startOfToday } from "../lib/format";
@@ -35,13 +35,15 @@ function Command() {
   const today = incidents.filter((i) => !i.drill && i.createdAt >= startOfToday(now)).reduce((n, i) => n + i.confirmedBy, 0);
   const staff = roster.filter((r) => r.status === "active").length;
   return (
-    <div className="mx-auto w-full max-w-6xl space-y-4 px-3 py-3">
-      <div className="grid grid-cols-3 gap-2">
+    <div className="mx-auto flex w-full max-w-6xl flex-col gap-3 px-3 py-3 lg:h-full lg:min-h-0">
+      <div className="grid shrink-0 grid-cols-3 gap-2">
         <Stat value={active} label={critical ? `Active · ${critical} critical` : "Active incidents"} tone="text-brand-600" />
         <Stat value={today} label="Reports today" tone="text-slate-700" />
         <Stat value={staff} label="Active staff" tone="text-emerald-600" />
       </div>
-      <IncidentQueue incidents={incidents} title="Active incident command queue" empty="No active incidents." />
+      <div className="lg:min-h-0 lg:flex-1">
+        <IncidentQueue incidents={incidents} title="Active incident command queue" empty="No active incidents." />
+      </div>
     </div>
   );
 }
@@ -62,11 +64,17 @@ function More() {
     { id: "about" as const, label: "About ASPIRE", hint: "Purpose, privacy, version", icon: Info },
     { id: "account" as const, label: "Account", hint: "Password and sign out", icon: User },
   ];
-  if (screen === "roster") return <><BackBar title="Teacher roster" onBack={() => setScreen("menu")} /><RosterPanel /></>;
-  if (screen === "about") return <><BackBar title="About ASPIRE" onBack={() => setScreen("menu")} /><AboutView /></>;
-  if (screen === "account") return <><BackBar title="Account" onBack={() => setScreen("menu")} /><AccountView /></>;
+  const shell = (title: string, node: ReactNode) => (
+    <div className="flex flex-col lg:h-full lg:min-h-0">
+      <div className="shrink-0"><BackBar title={title} onBack={() => setScreen("menu")} /></div>
+      <div className="lg:min-h-0 lg:flex-1">{node}</div>
+    </div>
+  );
+  if (screen === "roster") return shell("Teacher roster", <RosterPanel />);
+  if (screen === "about") return shell("About ASPIRE", <AboutView />);
+  if (screen === "account") return shell("Account", <AccountView />);
   return (
-    <div className="mx-auto w-full max-w-md space-y-2 px-3 py-3">
+    <div className="scroll-area mx-auto w-full max-w-md space-y-2 px-3 py-3 lg:h-full lg:overflow-y-auto">
       {items.map((it) => (
         <button key={it.id} onClick={() => setScreen(it.id)}
           className="flex min-h-16 w-full items-center gap-3 rounded-2xl border border-slate-200 bg-white px-4 text-left">
@@ -88,7 +96,7 @@ export default function PrincipalView({ tab }: { tab: PrincipalTab }) {
       {tab === "command" && <Command />}
       {tab === "report" && <ReportView />}
       {tab === "safety" && <SafetyView />}
-      {tab === "history" && <div className="mx-auto w-full max-w-3xl px-3 py-3"><HistorySection title="Incident history (official record)" /></div>}
+      {tab === "history" && <div className="scroll-area mx-auto w-full max-w-3xl px-3 py-3 lg:h-full lg:overflow-y-auto"><HistorySection title="Incident history (official record)" /></div>}
       {tab === "more" && <More />}
     </>
   );

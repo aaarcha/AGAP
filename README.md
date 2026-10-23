@@ -16,7 +16,7 @@ Principal, Parent/PTA and Barangay/CDRRMO devices within about a second.
 ## Run locally
 ```bash
 npm install
-npm test                 # 25 API tests (roles, scoping, merging, offline replay, SSE…)
+npm test                 # API tests (roles, scoping, merging, offline replay, SSE…) + the Select component test
 npm run dev:all          # starts BOTH the API (:3000) and the app (:5173) in one terminal
 # (or separately: npm run dev:server  and  npm run dev -- --host)
 # or production-style:
@@ -67,6 +67,14 @@ Every resolved, false-alarm or cancelled incident moves to **History** for all f
 * **Teacher / Parent / Responder** deletes only remove it from **their own** history; the Principal's record stays.
 * Only closed incidents can be deleted. Parent accounts are per section, so clearing history hides it for that section's parent account.
 * Reporters can cancel their own alert until a responder is on site, unless other people also reported it.
+
+## Dropdowns
+Every dropdown in the app is the shared `src/components/Select.tsx` — never a native `<select>`
+(its popup is drawn by the OS and can't follow the design). It keeps the `<select>`-like API
+(`value`, `onChange(value)`, `options: { value, label, description?, disabled? }`, `placeholder`,
+`label`, `disabled`, `error`), renders a popover on screens ≥ 640px and a bottom sheet below that,
+and is keyboard accessible (arrows/Home/End, type-ahead, Enter, Esc closes only the menu).
+Use it for any new dropdown.
 
 ## Branding
 The product name is **ASPIRE**, set in one place: `src/lib/brand.ts`

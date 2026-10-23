@@ -33,6 +33,7 @@ import { ConfirmModal, Modal } from "../components/Modal";
 import { WaitingLine } from "../components/Incident";
 import { HeadcountPanel, RuleBadges } from "../components/Rules";
 import { CampusPicker, type DetectedPlace, type PickedPlace } from "../components/CampusPicker";
+import { Select } from "../components/Select";
 import { useMediaQuery } from "../lib/hooks";
 
 const CAT_ICON: Record<string, React.ElementType> = {
@@ -44,6 +45,125 @@ const CAT_ICON: Record<string, React.ElementType> = {
 
 const POOR_ACCURACY_METERS = 100;
 const ROOM_MATCH_UNITS = 3;
+
+function LocationCard({ headline, caption, how, failed, onChange, onProfile, onRecheck }: {
+  headline: string;
+  caption: string;
+  how: string;
+  failed: boolean;
+  onChange: () => void;
+  onProfile?: () => void;
+  onRecheck: () => void;
+}) {
+  return (
+    <section
+      className="rounded-2xl border border-slate-200 bg-white p-3"
+      aria-label="Location of this report"
+    >
+      <div className="flex items-start gap-3">
+        <MapPin size={20} className="mt-0.5 shrink-0 text-brand-600" />
+        <div className="min-w-0 flex-1">
+          <p className="text-sm font-bold text-slate-800">{headline}</p>
+          <p className="mt-0.5 text-xs text-slate-500">{caption}</p>
+          <p className="mt-0.5 text-[11px] font-semibold uppercase tracking-wide text-slate-400">
+            How it was set: {how}
+          </p>
+        </div>
+        <div className="flex shrink-0 flex-col items-stretch gap-1.5">
+          <button
+            onClick={onChange}
+            className="min-h-12 rounded-xl bg-brand-700 px-3 text-xs font-bold text-white"
+          >
+            Change location
+          </button>
+          {onProfile && (
+            <button
+              onClick={onProfile}
+              aria-label="Edit profile and default room"
+              className="flex min-h-12 items-center justify-center rounded-xl bg-slate-100 px-3 text-slate-600"
+            >
+              <Settings size={16} />
+            </button>
+          )}
+        </div>
+      </div>
+      {failed && (
+        <button
+          onClick={onRecheck}
+          className="mt-2 inline-flex min-h-12 items-center gap-1.5 text-xs font-bold text-brand-700"
+        >
+          <RefreshCw size={14} /> Check location again
+        </button>
+      )}
+    </section>
+  );
+}
+
+function SendPanel({ sel, popLabel, ct, needSection, section, setSection, sections, headline, canSend, onSend }: {
+  sel: Sel;
+  popLabel: string | null;
+  ct: ReturnType<typeof catTheme>;
+  needSection: boolean;
+  section: string;
+  setSection: (v: string) => void;
+  sections: string[];
+  headline: string;
+  canSend: boolean;
+  onSend: () => void;
+}) {
+  return (
+    <section
+      className="space-y-3 rounded-2xl border border-slate-200 bg-white p-3"
+      aria-label="Who is affected and send"
+    >
+      <h2 className="text-xs font-bold uppercase tracking-wide text-slate-500">
+        Who is affected &amp; send
+      </h2>
+      {sel ? (
+        <div className="space-y-1">
+          <p className="text-base font-extrabold" style={{ color: ct.color }}>
+            {ct.emoji} {sel.catLabel} — {sel.subLabel}
+          </p>
+          <p className="text-sm text-slate-600">
+            {popLabel ?? "Choose who is affected (left)"}
+          </p>
+          <p className="text-xs text-slate-500">📍 {headline}</p>
+        </div>
+      ) : (
+        <p className="text-sm text-slate-500">
+          Pick what is happening on the left to start this report.
+        </p>
+      )}
+
+      {needSection && (
+        <div>
+          <Select
+            label="Which section is affected?"
+            value={section}
+            onChange={setSection}
+            placeholder="Choose a section…"
+            options={sections.map((s) => ({ value: s, label: s }))}
+          />
+          <p className="mt-1 text-xs text-slate-500">
+            Only the parents/PTA of this section are notified.
+          </p>
+        </div>
+      )}
+
+      <button
+        onClick={onSend}
+        disabled={!canSend}
+        className="min-h-16 w-full rounded-2xl text-base font-extrabold tracking-wide text-brand-900 disabled:opacity-50"
+        style={{ background: "#FF95A5", boxShadow: "0 6px 18px rgba(255,149,165,.55)" }}
+      >
+        🔴 SEND EMERGENCY ALERT
+      </button>
+      <p className="text-center text-xs text-slate-500">
+        The location above is on the ticket. Use “Change location” to correct it.
+      </p>
+    </section>
+  );
+}
 
 type Notice =
   | { kind: "sent" | "merged" | "queued" | "error"; text: string }
@@ -436,7 +556,7 @@ export default function ReportView() {
   const ct = sel ? catTheme(sel.catId) : catTheme("other");
 
   const main =
-    "mx-auto w-full space-y-3 px-3 py-3 transition-all duration-200";
+    "mx-auto w-full px-3 py-3 pb-16 transition-all duration-200 md:pb-3 lg:h-full lg:overflow-hidden";
 
   return (
     <div
@@ -445,51 +565,21 @@ export default function ReportView() {
         taps.current += 1;
       }}
     >
-      {/* Location card — always visible, never blocks sending */}
-      <section
-        className="rounded-2xl border border-slate-200 bg-white p-3"
-        aria-label="Location of this report"
-      >
-        <div className="flex items-start gap-3">
-          <MapPin size={20} className="mt-0.5 shrink-0 text-brand-600" />
-          <div className="min-w-0 flex-1">
-            <p className="text-sm font-bold text-slate-800">
-              {location.headline}
-            </p>
-            <p className="mt-0.5 text-xs text-slate-500">
-              {location.caption}
-            </p>
-            <p className="mt-0.5 text-[11px] font-semibold uppercase tracking-wide text-slate-400">
-              How it was set: {location.how}
-            </p>
+      <div className="grid w-full gap-3 md:grid-cols-[minmax(0,1fr)_20rem] md:items-start lg:grid-cols-[minmax(0,1fr)_22rem]">
+        {/* Left column: the tap-through steps */}
+        <div className="scroll-area min-w-0 space-y-3 lg:max-h-[calc(100dvh-10rem)] lg:pr-1">
+          {/* Location card — phones keep it in the flow; wide screens use the sticky rail */}
+          <div className="md:hidden">
+            <LocationCard
+              headline={location.headline}
+              caption={location.caption}
+              how={location.how}
+              failed={gps === "failed"}
+              onChange={() => setPickerOpen(true)}
+              onProfile={isTeacher ? () => setModal("profile") : undefined}
+              onRecheck={checkLocation}
+            />
           </div>
-          <div className="flex shrink-0 flex-col items-stretch gap-1.5">
-            <button
-              onClick={() => setPickerOpen(true)}
-              className="min-h-12 rounded-xl bg-brand-700 px-3 text-xs font-bold text-white"
-            >
-              Change location
-            </button>
-            {isTeacher && (
-              <button
-                onClick={() => setModal("profile")}
-                aria-label="Edit profile and default room"
-                className="flex min-h-12 items-center justify-center rounded-xl bg-slate-100 px-3 text-slate-600"
-              >
-                <Settings size={16} />
-              </button>
-            )}
-          </div>
-        </div>
-        {gps === "failed" && (
-          <button
-            onClick={checkLocation}
-            className="mt-2 inline-flex min-h-12 items-center gap-1.5 text-xs font-bold text-brand-700"
-          >
-            <RefreshCw size={14} /> Check location again
-          </button>
-        )}
-      </section>
 
       {notice && (
         <div
@@ -589,7 +679,7 @@ export default function ReportView() {
               placeholder="Quick search: earthquake, faint, fire…"
               aria-label="Quick keyword search"
               inputMode="search"
-              className="min-h-12 w-full rounded-xl border border-slate-300 bg-white pl-9 pr-9 text-base outline-none focus:border-brand-500"
+              className="min-h-12 w-full rounded-xl border border-slate-300 bg-white pl-9 pr-12 text-base outline-none focus:border-brand-500"
             />
             {query && (
               <button
@@ -614,23 +704,6 @@ export default function ReportView() {
               pick={pick}
               pickOther={pickOther}
             />
-          </div>
-
-          <div className="w-full">
-            <button
-              onClick={pickOther}
-              className={
-                "mt-2 min-h-14 rounded-2xl text-base font-bold text-white w-full"
-              }
-              style={{
-                background: catTheme("other").gradient,
-                outline: hasQuery && match.other
-                  ? "3px solid #425B9A"
-                  : undefined,
-              }}
-            >
-              {catTheme("other").emoji} Other / General Emergency
-            </button>
           </div>
         </section>
       )}
@@ -671,22 +744,22 @@ export default function ReportView() {
             type="button"
             disabled={backDisabled}
             onClick={() => setStep(1)}
-            className="mt-3 min-h-12 text-sm font-semibold text-slate-500 disabled:opacity-40 disabled:cursor-not-allowed"
+            className="mt-3 flex min-h-12 w-full items-center justify-center gap-1 rounded-xl border border-slate-300 bg-white text-sm font-bold text-slate-700 disabled:cursor-not-allowed disabled:opacity-40"
           >
             ← Back
           </button>
         </section>
       )}
 
-      {/* Step 3 — confirm location automatically and send */}
+      {/* Step 3 — confirm location automatically and send (phones) */}
       {step === 3 && sel && pop && (
-        <section className="transition-all duration-200 w-full">
+        <section className="w-full transition-all duration-200">
           <h2 className="mb-2 text-xs font-bold uppercase tracking-wide text-slate-500">
             Tap 3 · Confirm &amp; send
           </h2>
 
           <div
-            className="mb-3 space-y-1 rounded-2xl p-3 w-full"
+            className="mb-3 w-full space-y-1 rounded-2xl p-3 md:border md:border-slate-200 md:bg-white"
           >
             <p
               className="text-base font-extrabold"
@@ -702,62 +775,60 @@ export default function ReportView() {
             </p>
           </div>
 
-          {needSection && (
-            <div className="mb-3">
-              <button
-                onClick={() => setMoreOpen((v) => !v)}
-                aria-expanded={moreOpen}
-                className="flex min-h-12 w-full items-center justify-between text-sm font-bold text-brand-700"
-              >
-                More details{" "}
-                <ChevronDown
-                  size={16}
-                  className={moreOpen ? "rotate-180" : ""}
-                />
-              </button>
-              {moreOpen && (
-                <div className="mt-1">
-                  <label
-                    htmlFor="sec"
-                    className="text-xs font-semibold text-slate-600"
-                  >
-                    Which section is affected?
-                  </label>
-                  <select
-                    id="sec"
-                    value={section}
-                    onChange={(e) => setSection(e.target.value)}
-                    className="mt-1 min-h-12 w-full rounded-xl border border-slate-300 bg-white px-3 text-base"
-                  >
-                    <option value="">Choose a section…</option>
-                    {sections.map((s) => (
-                      <option key={s} value={s}>
-                        {s}
-                      </option>
-                    ))}
-                  </select>
-                  <p className="mt-1 text-xs text-slate-500">
-                    Only the parents/PTA of this section are notified.
-                  </p>
-                </div>
-              )}
-            </div>
-          )}
+          {/* Phones confirm and send here; on wide screens the send button
+              lives in the right rail, so this panel just confirms the ticket. */}
+          <div className="space-y-3 md:hidden">
+            {needSection && (
+              <div>
+                <button
+                  onClick={() => setMoreOpen((v) => !v)}
+                  aria-expanded={moreOpen}
+                  className="flex min-h-12 w-full items-center justify-between text-sm font-bold text-brand-700"
+                >
+                  More details{" "}
+                  <ChevronDown
+                    size={16}
+                    className={moreOpen ? "rotate-180" : ""}
+                  />
+                </button>
+                {moreOpen && (
+                  <div className="mt-1">
+                    <Select
+                      label="Which section is affected?"
+                      value={section}
+                      onChange={setSection}
+                      placeholder="Choose a section…"
+                      options={sections.map((s) => ({ value: s, label: s }))}
+                    />
+                    <p className="mt-1 text-xs text-slate-500">
+                      Only the parents/PTA of this section are notified.
+                    </p>
+                  </div>
+                )}
+              </div>
+            )}
 
-          <button
-            onClick={beginSubmit}
-            className="min-h-16 w-full rounded-2xl text-base font-extrabold tracking-wide text-brand-900"
-            style={{
-              background: "#FF95A5",
-              boxShadow: "0 6px 18px rgba(255,149,165,.55)",
-            }}
-          >
-            🔴 SEND EMERGENCY ALERT
-          </button>
-          <p className="mt-1.5 text-center text-xs text-slate-500">
-            The location above is on the ticket. Tap “Change location” to
-            correct it.
+            <button
+              onClick={beginSubmit}
+              className="min-h-16 w-full rounded-2xl text-base font-extrabold tracking-wide text-brand-900"
+              style={{
+                background: "#FF95A5",
+                boxShadow: "0 6px 18px rgba(255,149,165,.55)",
+              }}
+            >
+              🔴 SEND EMERGENCY ALERT
+            </button>
+            <p className="text-center text-xs text-slate-500">
+              The location above is on the ticket. Tap “Change location” to
+              correct it.
+            </p>
+          </div>
+
+          <p className="mt-3 hidden text-sm text-slate-600 lg:block">
+            Everything checks out? Use the location and send panel on the
+            right — it is on the same ticket.
           </p>
+
           <button
             type="button"
             disabled={backDisabled}
@@ -767,7 +838,7 @@ export default function ReportView() {
                 setMoreOpen(false);
               }
             }}
-            className="mt-2 min-h-12 text-sm font-semibold text-slate-500 disabled:opacity-40 disabled:cursor-not-allowed"
+            className="mt-3 flex min-h-12 w-full items-center justify-center gap-1 rounded-xl border border-slate-300 bg-white text-sm font-bold text-slate-700 disabled:cursor-not-allowed disabled:opacity-40"
           >
             ← Back
           </button>
@@ -826,6 +897,57 @@ export default function ReportView() {
           </section>
         );
       })()}
+        </div>
+
+        {/* Right rail (>= 768): sticky location, who is affected, send */}
+        <aside className="scroll-area hidden space-y-3 md:sticky md:top-3 md:block md:max-h-[calc(100dvh-6rem)]">
+          <LocationCard
+            headline={location.headline}
+            caption={location.caption}
+            how={location.how}
+            failed={gps === "failed"}
+            onChange={() => setPickerOpen(true)}
+            onProfile={isTeacher ? () => setModal("profile") : undefined}
+            onRecheck={checkLocation}
+          />
+          <SendPanel
+            sel={sel}
+            popLabel={pop ? pop.label : null}
+            ct={ct}
+            needSection={Boolean(needSection)}
+            section={section}
+            setSection={setSection}
+            sections={sections}
+            headline={location.headline}
+            canSend={Boolean(sel && pop)}
+            onSend={beginSubmit}
+          />
+        </aside>
+      </div>
+
+      {/* Phone: sticky bottom Send bar */}
+      {sel && step !== 3 && (
+        <div className="fixed inset-x-0 bottom-[calc(3.5rem+env(safe-area-inset-bottom))] z-20 border-t border-slate-200 bg-white/95 px-3 py-2 backdrop-blur md:hidden">
+          <div className="mx-auto flex w-full max-w-3xl items-center gap-2">
+            <div className="min-w-0 flex-1">
+              <p className="truncate text-xs font-bold text-slate-800">
+                {ct.emoji} {sel.subLabel}
+              </p>
+              <p className="truncate text-[11px] text-slate-500">
+                {pop ? pop.label : "Choose who is affected"}
+              </p>
+            </div>
+            <button
+              onClick={beginSubmit}
+              disabled={!pop}
+              className="min-h-12 shrink-0 rounded-xl px-4 text-sm font-extrabold text-brand-900 disabled:opacity-50"
+              style={{ background: "#FF95A5" }}
+            >
+              Send alert
+            </button>
+          </div>
+        </div>
+      )}
       {modal === "profile" && (
         <div>
           <ProfileModal onClose={() => setModal(null)} />
@@ -865,70 +987,88 @@ function ResponsiveCategoryGrid({
   pickOther: () => void;
 }) {
   return (
-    <div className="grid gap-2 w-full max-w-2xl mx-auto grid-cols-2 lg:grid-cols-3">
-      {CATEGORIES.map((c) => {
-        const Icon = CAT_ICON[c.id];
-        const t = catTheme(c.id);
-        const catHit = hasQuery && match.cats.has(c.id);
+    <div className="w-full @container">
+      <div className="grid gap-2 w-full grid-cols-2 @4xl:grid-cols-4">
+        {CATEGORIES.map((c) => {
+          const Icon = CAT_ICON[c.id];
+          const t = catTheme(c.id);
+          const catHit = hasQuery && match.cats.has(c.id);
 
-        return (
-          <div
-            key={c.id}
-            className="overflow-hidden rounded-2xl bg-white transition-shadow"
-            style={{
-              border: `2px solid ${catHit ? t.pill : t.border}`,
-              boxShadow: catHit
-                ? `0 0 0 3px ${t.pill}33`
-                : undefined,
-              opacity: hasQuery && !catHit ? 0.45 : 1,
-            }}
-          >
+          return (
             <div
-              className="flex items-center gap-1.5 px-2.5 py-2"
-              style={{ background: t.bg }}
+              key={c.id}
+              className="overflow-hidden rounded-2xl bg-white transition-shadow min-w-0"
+              style={{
+                border: `2px solid ${catHit ? t.pill : t.border}`,
+                boxShadow: catHit
+                  ? `0 0 0 3px ${t.pill}33`
+                  : undefined,
+                opacity: hasQuery && !catHit ? 0.45 : 1,
+              }}
             >
-              <Icon
-                size={14}
-                style={{ color: t.color }}
-              />
-              <span
-                className="text-xs font-extrabold"
-                style={{ color: t.color }}
+              <div
+                className="flex items-center gap-1.5 px-2.5 py-2 min-w-0"
+                style={{ background: t.bg }}
               >
-                {c.label}
-              </span>
-            </div>
+                <div className="h-6 w-6 shrink-0 flex items-center justify-center rounded-lg" style={{ background: "white" }}>
+                  <Icon
+                    size={14}
+                    style={{ color: t.color }}
+                  />
+                </div>
+                <span
+                  className="text-xs font-extrabold min-w-0 break-words"
+                  style={{ color: t.color }}
+                >
+                  {c.label}
+                </span>
+              </div>
 
-            <div className="space-y-0.5 p-1.5 w-full">
-              {c.subs.map((s) => {
-                const hit =
-                  hasQuery && match.subs.has(`${c.id}:${s.id}`);
+              <div className="space-y-0.5 p-1.5 w-full">
+                {c.subs.map((s) => {
+                  const hit =
+                    hasQuery && match.subs.has(`${c.id}:${s.id}`);
 
-                return (
-                  <button
-                    key={s.id}
-                    onClick={() =>
-                      pick(c.id, c.label, s.id, s.label)
-                    }
-                    className="min-h-10 w-full rounded-lg px-2 py-1 text-left text-xs font-medium text-slate-700 hover:bg-slate-50 active:bg-slate-100"
-                    style={
-                      hit
-                        ? {
-                            background: t.bg,
-                            outline: `2px solid ${t.pill}`,
-                            fontWeight: 700,
-                          }
-                        : undefined
-                    }
-                  >
-                    {s.label}
-                  </button>
-                );
-              })}
+                  return (
+                    <button
+                      key={s.id}
+                      onClick={() =>
+                        pick(c.id, c.label, s.id, s.label)
+                      }
+                      className="min-h-12 w-full rounded-lg px-2 py-1 text-left text-xs font-medium text-slate-700 hover:bg-slate-50 active:bg-slate-100 break-words"
+                      style={
+                        hit
+                          ? {
+                              background: t.bg,
+                              outline: `2px solid ${t.pill}`,
+                              fontWeight: 700,
+                            }
+                          : undefined
+                      }
+                    >
+                      {s.label}
+                    </button>
+                  );
+                })}
+              </div>
             </div>
-          </div>
-        );
-      })}
+          );
+        })}
+      </div>
+      <button
+        onClick={pickOther}
+        className={
+          "mt-2 min-h-14 rounded-2xl text-base font-bold text-white w-full"
+        }
+        style={{
+          background: catTheme("other").gradient,
+          outline: hasQuery && match.other
+            ? "3px solid #425B9A"
+            : undefined,
+        }}
+      >
+        {catTheme("other").emoji} Other / General Emergency
+      </button>
     </div>
   );
 }
@@ -941,19 +1081,23 @@ function ResponsivePopulationGrid({
   onPick: (id: string) => void;
 }) {
   return (
-    <div className="grid gap-2 w-full max-w-2xl mx-auto grid-cols-2 sm:grid-cols-3 md:grid-cols-4">
-      {POPULATIONS.map((p) => (
-        <button
-          key={p.id}
-          onClick={() => onPick(p.id)}
-          className="flex min-h-12 w-full items-center justify-between rounded-2xl bg-white px-3 hover:bg-slate-50"
-          style={{ border: `2px solid ${ct.border}` }}
-        >
-          <span className="text-sm font-semibold text-slate-700">
-            {p.label}
-          </span>
-        </button>
-      ))}
+    // Container-based columns: the report's left column is narrow on tablets
+    // (the side nav and the send rail both take space), wide on a desktop.
+    <div className="@container w-full">
+      <div className="grid w-full grid-cols-1 gap-2 @sm:grid-cols-3">
+        {POPULATIONS.map((p) => (
+          <button
+            key={p.id}
+            onClick={() => onPick(p.id)}
+            className="flex min-h-14 w-full items-center justify-center rounded-2xl bg-white px-3 text-center hover:bg-slate-50 md:min-h-16"
+            style={{ border: `2px solid ${ct.border}` }}
+          >
+            <span className="min-w-0 break-words text-sm font-semibold text-slate-700 md:text-base">
+              {p.label}
+            </span>
+          </button>
+        ))}
+      </div>
     </div>
   );
 }

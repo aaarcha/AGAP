@@ -34,8 +34,9 @@
   --page: #fff6dc;
 }
 
-html {
-  scroll-behavior: smooth;
+:root {
+  /* Height of the sticky app header, used by scroll-padding on long panes. */
+  --scroll-sticky-offset: 4.5rem;
 }
 html, body, #root { min-height: 100dvh; }
 body {
@@ -63,26 +64,64 @@ input::-ms-clear { display: none; }
 .animate-slide-down { animation: slide-down .3s ease-out; }
 .animate-pulse-ring { animation: pulse-ring 1.6s ease-out infinite; }
 
-
-
-
-/* Smooth scrolling for overflow containers */
-html {
-  scroll-behavior: smooth;
+/* Scroll area utility.
+   `overscroll-behavior: contain` is only applied where the pane has a bounded
+   height (>= 1024). On phones the same class is used on wrappers that are not
+   scrollable, and `contain` on those swallows the swipe instead of letting the
+   page underneath scroll. */
+.scroll-area {
+  overflow-y: auto;
+  overscroll-behavior: auto;
+  scrollbar-width: thin;
+  scrollbar-color: rgb(100 116 139 / .45) transparent;
+  scroll-padding-top: var(--scroll-sticky-offset, 0px);
 }
+@media (min-width: 1024px) {
+  .scroll-area { overscroll-behavior: contain; }
+}
+.scroll-area::-webkit-scrollbar { width: 8px; }
+.scroll-area::-webkit-scrollbar-thumb {
+  background: rgb(100 116 139 / .45);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+.scroll-area::-webkit-scrollbar-thumb:hover {
+  background: rgb(71 85 105 / .7);
+  background-clip: content-box;
+}
+.scroll-area::-webkit-scrollbar-track { background: transparent; }
+@media (hover: none) {
+  .scroll-area { scrollbar-width: none; }
+  .scroll-area::-webkit-scrollbar { display: none; }
+}
+
+/* Dropdown menu (src/components/Select.tsx) — a 150 ms fade, neutralised by the
+   prefers-reduced-motion rule at the bottom of this file. */
+@keyframes select-pop { from { opacity: 0; transform: translateY(-2px); } to { opacity: 1; transform: translateY(0); } }
+.select-pop { animation: select-pop .15s ease-out; }
+
+/* Subtle top/bottom fade */
+.scroll-fade {
+  mask-image: linear-gradient(to bottom, transparent 0, black 12px, black calc(100% - 12px), transparent 100%);
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0, black 12px, black calc(100% - 12px), transparent 100%);
+}
+
+/* Smooth scrolling only when the user has not asked for reduced motion. */
+.scroll-area,
 .overflow-y-auto,
 .overflow-auto {
-  scroll-behavior: smooth;
   -webkit-overflow-scrolling: touch;
+}
+@media (prefers-reduced-motion: no-preference) {
+  html,
+  .scroll-area,
+  .overflow-y-auto,
+  .overflow-auto {
+    scroll-behavior: smooth;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  html {
-    scroll-behavior: auto;
-  }
-  .overflow-y-auto,
-  .overflow-auto {
-    scroll-behavior: auto;
-  }
   *, *::before, *::after { animation-duration: .001ms !important; animation-iteration-count: 1 !important; transition-duration: .001ms !important; }
 }

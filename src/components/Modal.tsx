@@ -17,7 +17,7 @@ export function Modal({ title, onClose, children, wide }: { title: string; onClo
           <h2 className="font-bold text-base text-slate-800">{title}</h2>
           <button onClick={onClose} aria-label="Close" className="-mr-2 flex h-12 w-12 items-center justify-center rounded-lg hover:bg-slate-100"><X size={20} className="text-slate-500" /></button>
         </div>
-        <div className="p-4 overflow-y-auto pb-[max(1rem,env(safe-area-inset-bottom))]">{children}</div>
+        <div className="scroll-area min-h-0 flex-1 overflow-y-auto p-4 pb-[max(1rem,env(safe-area-inset-bottom))]">{children}</div>
       </div>
     </div>
   );

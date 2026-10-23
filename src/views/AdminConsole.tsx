@@ -1,7 +1,7 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import {
   Users, ClipboardList, Calendar, Plus, RefreshCw, Unlock, UserX, UserCheck, Key, Eye, EyeOff, Copy, Check, AlertCircle,
-  SlidersHorizontal, User,
+  SlidersHorizontal, User, Search, X,
 } from "lucide-react";
 import { useApp } from "../lib/store";
 import { api } from "../lib/api";
@@ -9,6 +9,8 @@ import type { AccountRecord, AuditEntry, SchoolYear, TempCredential } from "../l
 import { Modal, ConfirmModal } from "../components/Modal";
 import { dateTime } from "../lib/format";
 import { Header, StatusBanner, BottomNav, SideNav, type NavTab } from "../components/Chrome";
+import { MasterDetail } from "../components/MasterDetail";
+import { Select } from "../components/Select";
 import AccountView from "./AccountView";
 import { WEIGHTS, CONSISTENCY, HAZARD_LOCATION_BOOST, TRANSPORT_MODES } from "../../shared/domain.js";
 
@@ -108,12 +110,12 @@ export default function AdminConsole() {
   }
 
   return (
-    <div className="flex min-h-dvh bg-cream">
+    <div className="flex h-dvh overflow-hidden bg-cream">
       <SideNav tab={tab} setTab={setTab} tabs={TABS} subtitle="Super Admin" />
-      <div className="flex min-w-0 flex-1 flex-col">
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
         <Header title="Super Admin" subtitle="Accounts, audit and configuration" />
         <StatusBanner />
-        <main className="flex-1 px-3 py-3 pb-24 lg:pb-6">
+        <main className="scroll-area min-h-0 flex-1 px-3 py-3 pb-24 lg:pb-6">
           {error && (
             <div className="mb-3 flex items-start gap-2 rounded-xl border border-blush-200 bg-blush-100 p-3 text-sm text-blush-800">
               <AlertCircle size={16} className="mt-0.5 shrink-0" />
@@ -123,18 +125,20 @@ export default function AdminConsole() {
           {loading && <div className="py-8 text-center text-slate-500">Loading…</div>}
 
           {tab === "accounts" && !loading && (
-            <div className="space-y-3">
-              <div className="flex items-center justify-between">
+            <div className="flex min-h-0 flex-col gap-3 lg:h-full">
+              <div className="flex shrink-0 items-center justify-between">
                 <h2 className={h2}><Users size={14} /> Accounts ({accounts.length})</h2>
                 <button onClick={() => setShowProvision(true)} className={btnPrimary}><Plus size={15} /> Provision</button>
               </div>
-              <AccountsPane accounts={accounts} onUnlock={handleUnlock} onActivate={handleActivate}
-                onReset={setResetTarget} onDeactivate={setDeactivateTarget} />
+              <div className="lg:min-h-0 lg:flex-1">
+                <AccountsPane accounts={accounts} onUnlock={handleUnlock} onActivate={handleActivate}
+                  onReset={setResetTarget} onDeactivate={setDeactivateTarget} />
+              </div>
             </div>
           )}
 
           {tab === "audit" && !loading && (
-            <div className="space-y-3">
+            <div className="scroll-area space-y-3 lg:h-full lg:overflow-y-auto">
               <h2 className={h2}><ClipboardList size={14} /> Audit log (read-only)</h2>
               <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white">
                 <div className="overflow-x-auto">
@@ -166,7 +170,7 @@ export default function AdminConsole() {
           )}
 
           {tab === "schoolyear" && !loading && (
-            <div className="space-y-3">
+            <div className="scroll-area space-y-3 lg:h-full lg:overflow-y-auto">
               <h2 className={h2}><Calendar size={14} /> School year</h2>
               <div className={card}>
                 <div className="flex items-center justify-between gap-3">
@@ -242,54 +246,101 @@ function AccountActions({ acc, onUnlock, onActivate, onReset, onDeactivate }: {
   );
 }
 
+const ROLE_FILTERS: { id: string; label: string }[] = [
+  { id: "all", label: "All roles" },
+  { id: "teacher", label: "Teachers" },
+  { id: "principal", label: "Principals" },
+  { id: "responder", label: "Responders" },
+  { id: "parent", label: "Parents / PTA" },
+  { id: "super_admin", label: "Super admins" },
+];
+
+function AccountDetail({ acc, onUnlock, onActivate, onReset, onDeactivate }: {
+  acc: AccountRecord;
+  onUnlock: (a: AccountRecord) => void; onActivate: (a: AccountRecord) => void;
+  onReset: (a: AccountRecord) => void; onDeactivate: (a: AccountRecord) => void;
+}) {
+  return (
+    <div className={card}>
+      <p className="text-lg font-black text-slate-900">{acc.name}</p>
+      <p className="break-words text-sm text-slate-600">{acc.email}</p>
+      <p className="mt-0.5 text-xs text-slate-500">{acc.role}{acc.section ? ` · ${acc.section}` : ""}</p>
+      <div className="mt-2"><StatusChips acc={acc} /></div>
+      {acc.lastLoginAt && <p className="mt-2 text-xs text-slate-400">Last sign-in: {dateTime(acc.lastLoginAt)}</p>}
+      <div className="mt-4"><AccountActions acc={acc} onUnlock={onUnlock} onActivate={onActivate} onReset={onReset} onDeactivate={onDeactivate} /></div>
+    </div>
+  );
+}
+
+function AccountRow({ acc, active }: { acc: AccountRecord; active: boolean }) {
+  return (
+    <div className={`rounded-xl border p-3 ${active ? "border-brand-600 bg-white shadow-sm" : "border-slate-200 bg-white hover:border-brand-300"}`}>
+      <div className="flex items-center gap-2">
+        <p className="min-w-0 flex-1 truncate text-sm font-bold text-slate-800">{acc.name}</p>
+        {active && (
+          <span className="shrink-0 rounded-full bg-brand-600 px-1.5 py-0.5 text-white" aria-hidden><Check size={11} /></span>
+        )}
+      </div>
+      <p className="truncate text-xs text-slate-500">{acc.role}{acc.section ? ` · ${acc.section}` : ""}</p>
+      <p className={`mt-1 text-[11px] font-bold uppercase tracking-wide ${acc.status === "active" ? "text-emerald-700" : "text-slate-400"}`}>{acc.status}</p>
+    </div>
+  );
+}
+
 function AccountsPane({ accounts, onUnlock, onActivate, onReset, onDeactivate }: {
   accounts: AccountRecord[];
   onUnlock: (a: AccountRecord) => void; onActivate: (a: AccountRecord) => void;
   onReset: (a: AccountRecord) => void; onDeactivate: (a: AccountRecord) => void;
 }) {
-  const [sel, setSel] = useState<string | null>(null);
-  const selected = accounts.find((a) => a.id === sel) ?? accounts[0] ?? null;
-  if (accounts.length === 0) return <p className="py-8 text-center text-sm text-slate-500">No accounts yet.</p>;
-  return (
-    <>
-      <div className="grid gap-2 lg:hidden">
-        {accounts.map((acc) => (
-          <div key={acc.id} className={card}>
-            <div>
-              <p className="text-base font-bold text-slate-800">{acc.name}</p>
-              <p className="text-sm text-slate-600">{acc.email}</p>
-              <p className="mt-0.5 text-xs text-slate-500">{acc.role}{acc.section ? ` · ${acc.section}` : ""}</p>
-              <div className="mt-2"><StatusChips acc={acc} /></div>
-              <div className="mt-3"><AccountActions acc={acc} onUnlock={onUnlock} onActivate={onActivate} onReset={onReset} onDeactivate={onDeactivate} /></div>
-            </div>
-          </div>
-        ))}
-      </div>
-      <div className="hidden items-start gap-4 lg:grid lg:grid-cols-[22rem_minmax(0,1fr)]">
-        <ul className="max-h-[calc(100dvh-14rem)] space-y-1.5 overflow-y-auto pr-1">
-          {accounts.map((acc) => (
-            <li key={acc.id}>
-              <button onClick={() => setSel(acc.id)} aria-current={selected?.id === acc.id ? "true" : undefined}
-                className={`w-full rounded-xl border p-3 text-left ${selected?.id === acc.id ? "border-brand-500 bg-white shadow-sm" : "border-slate-200 bg-white hover:border-brand-300"}`}>
-                <p className="truncate text-sm font-bold text-slate-800">{acc.name}</p>
-                <p className="truncate text-xs text-slate-500">{acc.role}{acc.section ? ` · ${acc.section}` : ""}</p>
-                <p className={`mt-1 text-[11px] font-bold uppercase tracking-wide ${acc.status === "active" ? "text-emerald-700" : "text-slate-400"}`}>{acc.status}</p>
-              </button>
-            </li>
-          ))}
-        </ul>
-        {selected && (
-          <div className={card}>
-            <p className="text-lg font-black text-slate-900">{selected.name}</p>
-            <p className="text-sm text-slate-600">{selected.email}</p>
-            <p className="mt-0.5 text-xs text-slate-500">{selected.role}{selected.section ? ` · ${selected.section}` : ""}</p>
-            <div className="mt-2"><StatusChips acc={selected} /></div>
-            {selected.lastLoginAt && <p className="mt-2 text-xs text-slate-400">Last sign-in: {dateTime(selected.lastLoginAt)}</p>}
-            <div className="mt-4"><AccountActions acc={selected} onUnlock={onUnlock} onActivate={onActivate} onReset={onReset} onDeactivate={onDeactivate} /></div>
-          </div>
+  const [query, setQuery] = useState("");
+  const [role, setRole] = useState("all");
+
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    return accounts.filter((a) =>
+      (role === "all" || a.role === role) &&
+      (!q ||
+        a.name.toLowerCase().includes(q) ||
+        a.email.toLowerCase().includes(q) ||
+        (a.section ?? "").toLowerCase().includes(q))
+    );
+  }, [accounts, query, role]);
+
+  const listHeader = (
+    <div className="flex flex-col gap-2">
+      <div className="relative">
+        <Search size={16} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+        <input
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="Search name, email or section"
+          aria-label="Search accounts"
+          className="min-h-12 w-full rounded-xl border border-slate-300 bg-white pl-10 pr-12 text-sm outline-none focus:border-brand-500"
+        />
+        {query && (
+          <button type="button" onClick={() => setQuery("")} aria-label="Clear search"
+            className="absolute inset-y-0 right-0 flex w-12 items-center justify-center text-slate-400">
+            <X size={16} />
+          </button>
         )}
       </div>
-    </>
+      <Select value={role} onChange={setRole} ariaLabel="Filter accounts by role"
+        options={ROLE_FILTERS.map((r) => ({ value: r.id, label: r.label }))} />
+    </div>
+  );
+
+  return (
+    <MasterDetail
+      items={filtered}
+      ariaLabel="Accounts — select an account"
+      listHeader={listHeader}
+      emptyList={accounts.length === 0 ? "No accounts yet." : "No accounts match that search."}
+      emptyDetail="Select an account to see its profile and actions."
+      renderList={(acc, active) => <AccountRow acc={acc} active={active} />}
+      renderDetail={(acc) => (
+        <AccountDetail acc={acc} onUnlock={onUnlock} onActivate={onActivate} onReset={onReset} onDeactivate={onDeactivate} />
+      )}
+    />
   );
 }
 
@@ -297,7 +348,7 @@ function ConfigTab() {
   const { escalationMinutes } = useApp();
   const bands: [string, string][] = [["Critical", "4.0 and up"], ["High", "3.0 – 3.99"], ["Moderate", "below 3.0"]];
   return (
-    <div className="mx-auto w-full max-w-3xl space-y-3">
+    <div className="scroll-area mx-auto w-full max-w-3xl space-y-3 lg:h-full lg:overflow-y-auto">
       <section className={card}>
         <h2 className={`${h2} mb-2`}>Urgency model (read-only)</h2>
         <dl className="divide-y divide-slate-100 text-sm">
@@ -362,14 +413,14 @@ function ProvisionModal({ onClose, onCreated }: { onClose: () => void; onCreated
         <label className="block text-sm font-medium text-slate-700">Full name
           <input value={name} onChange={(e) => setName(e.target.value)} className={`${input} mt-1`} placeholder="Juan Dela Cruz" />
         </label>
-        <label className="block text-sm font-medium text-slate-700">Role
-          <select value={role} onChange={(e) => setRole(e.target.value as typeof role)} className={`${input} mt-1`}>
-            <option value="teacher">Teacher</option>
-            <option value="principal">Principal</option>
-            <option value="responder">Responder (Barangay/CDRRMO)</option>
-            <option value="parent">Parent / PTA</option>
-          </select>
-        </label>
+        <Select label="Role" labelClassName="text-sm font-medium text-slate-700" value={role}
+          onChange={(v) => setRole(v as typeof role)}
+          options={[
+            { value: "teacher", label: "Teacher" },
+            { value: "principal", label: "Principal" },
+            { value: "responder", label: "Responder (Barangay/CDRRMO)" },
+            { value: "parent", label: "Parent / PTA" },
+          ]} />
         {role === "parent" && (
           <label className="block text-sm font-medium text-slate-700">Section
             <input value={section} onChange={(e) => setSection(e.target.value)} className={`${input} mt-1`} placeholder="Grade 3 - Sec A" />
@@ -462,7 +513,7 @@ function RolloverResultModal({ credentials, onClose }: { credentials: TempCreden
           <p className="mb-1 font-bold">⚠️ {credentials.length} temporary credentials generated</p>
           <p>All existing sessions were revoked. Share these credentials securely; users must set new passwords on first sign-in.</p>
         </div>
-        <div className="max-h-64 overflow-y-auto rounded-xl border border-slate-200">
+        <div className="scroll-area max-h-64 overflow-y-auto rounded-xl border border-slate-200">
           <table className="w-full text-sm">
             <thead className="sticky top-0 bg-slate-50">
               <tr>

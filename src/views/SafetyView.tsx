@@ -4,6 +4,7 @@ import { HAZARD_KINDS } from "../../shared/domain.js";
 import { useApp } from "../lib/store";
 import { dateTime, fmtMs } from "../lib/format";
 import { InfoButton } from "../components/Modal";
+import { Select } from "../components/Select";
 import type { DrillSummary } from "../lib/types";
 
 const card = "rounded-2xl border border-slate-200 bg-white p-4";
@@ -26,10 +27,8 @@ function HazardCard() {
         </InfoButton>
       </div>
       <div className="mb-2 grid grid-cols-2 gap-2">
-        <select value={kind} onChange={(e) => setKind(e.target.value)} disabled={hz.active} aria-label="Hazard type"
-          className="min-h-12 rounded-xl border border-slate-300 bg-white px-3 text-sm">
-          {HAZARD_KINDS.map((k: { id: string; label: string }) => <option key={k.id} value={k.id}>{k.label}</option>)}
-        </select>
+        <Select value={kind} onChange={setKind} disabled={hz.active} ariaLabel="Hazard type"
+          options={HAZARD_KINDS.map((k: { id: string; label: string }) => ({ value: k.id, label: k.label }))} />
         <input value={note} onChange={(e) => setNote(e.target.value.slice(0, 140))} disabled={hz.active} placeholder="Note (optional)" aria-label="Hazard note"
           className="min-h-12 rounded-xl border border-slate-300 px-3 text-sm" />
       </div>
@@ -142,7 +141,7 @@ function HeadcountStatus() {
 
 export default function SafetyView() {
   return (
-    <div className="mx-auto grid w-full max-w-6xl items-start gap-3 px-3 py-3 lg:grid-cols-2">
+    <div className="scroll-area mx-auto grid w-full max-w-6xl items-start gap-3 px-3 py-3 lg:h-full lg:grid-cols-2 lg:overflow-y-auto">
       <div className="space-y-3"><HazardCard /><HeadcountStatus /></div>
       <DrillCard />
     </div>

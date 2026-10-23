@@ -3,6 +3,7 @@ import { Pencil, Plus, Trash2 } from "lucide-react";
 import { useApp } from "../lib/store";
 import type { RosterEntry } from "../lib/types";
 import { ConfirmModal, Modal } from "../components/Modal";
+import { Select } from "../components/Select";
 
 function TeacherForm({ initial, onClose }: { initial: RosterEntry | null; onClose: () => void }) {
   const { addTeacher, editTeacher } = useApp();
@@ -34,12 +35,11 @@ function TeacherForm({ initial, onClose }: { initial: RosterEntry | null; onClos
             <input value={val} onChange={(e) => set(e.target.value)} placeholder={ph} className="mt-1 min-h-12 w-full rounded-xl border border-slate-300 px-3 text-base font-normal outline-none focus:border-brand-500" />
           </label>
         ))}
-        <label className="block text-xs font-semibold text-slate-600">Status
-          <select value={status} onChange={(e) => setStatus(e.target.value as "active" | "inactive")} className="mt-1 min-h-12 w-full rounded-xl border border-slate-300 bg-white px-3 text-base font-normal">
-            <option value="active">On duty (can sign in and report)</option>
-            <option value="inactive">Off duty (cannot sign in)</option>
-          </select>
-        </label>
+        <Select label="Status" value={status} onChange={(v) => setStatus(v as "active" | "inactive")}
+          options={[
+            { value: "active", label: "On duty (can sign in and report)" },
+            { value: "inactive", label: "Off duty (cannot sign in)" },
+          ]} />
         {err && <p className="text-sm text-blush-700" role="alert">{err}</p>}
         <button onClick={save} disabled={busy} className="w-full min-h-12 bg-brand-600 text-white rounded-xl font-bold disabled:opacity-60">{busy ? "Saving…" : "Save"}</button>
       </div>
@@ -53,7 +53,7 @@ export default function RosterPanel() {
   const [deleting, setDeleting] = useState<RosterEntry | null>(null);
 
   return (
-    <div className="mx-auto w-full max-w-6xl px-3 py-3">
+    <div className="scroll-area mx-auto w-full max-w-6xl px-3 py-3 lg:h-full lg:overflow-y-auto">
       <div className="flex items-center justify-between mb-2">
         <h2 className="text-xs font-bold text-slate-500 uppercase tracking-wide">Teacher Roster &amp; Section Mapping</h2>
         <button onClick={() => setEditing("new")} className="flex min-h-12 items-center gap-1 rounded-xl bg-brand-600 px-3 text-sm font-bold text-white"><Plus size={16} /> Add teacher</button>

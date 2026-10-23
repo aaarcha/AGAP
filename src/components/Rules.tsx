@@ -8,6 +8,7 @@ import { ApiError } from "../lib/api";
 import { fmtMs, plainOverride } from "../lib/format";
 import type { Incident } from "../lib/types";
 import { Modal } from "./Modal";
+import { Select } from "./Select";
 
 const chip = "inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-bold";
 
@@ -113,10 +114,8 @@ export function HeadcountPanel({ inc }: { inc: Incident }) {
       {canRecord && (
         <div className="space-y-2">
           {isPrincipal && eligible.length > 1 && (
-            <select value={section} onChange={(e) => setSection(e.target.value)} aria-label="Section"
-              className="min-h-12 w-full rounded-xl border border-slate-300 bg-white px-3 text-sm">
-              {eligible.map((s) => <option key={s} value={s}>{s}</option>)}
-            </select>
+            <Select value={section} onChange={setSection} ariaLabel="Section"
+              options={eligible.map((s) => ({ value: s, label: s }))} />
           )}
           <div className="flex items-end gap-2">
             <label className="flex-1 text-xs font-semibold text-slate-600">

@@ -74,27 +74,29 @@ export default function LoginView() {
           </div>
 
           <form onSubmit={handlePasswordChange} className="w-full space-y-4">
-            <div className="relative">
+            <div>
               <label className="block text-sm font-medium text-slate-300 mb-1.5" htmlFor="new-password">New password</label>
-              <input
-                id="new-password"
-                type={showNew ? "text" : "password"}
-                autoComplete="new-password"
-                value={newPassword}
-                onChange={(e) => setNewPassword(e.target.value)}
-                disabled={changing}
-                required
-                placeholder="At least 8 characters"
-              className="w-full min-h-12 rounded-lg px-3 pr-10 bg-white text-slate-900 text-sm outline-none focus:ring-2 focus:ring-accent"
-            />
-            <button
-              type="button"
-              onClick={() => setShowNew(!showNew)}
-              className="absolute right-3 top-1/2 flex -translate-y-1/2 items-center justify-center text-slate-500 hover:text-brand-600"
-              aria-label={showNew ? "Hide password" : "Show password"}
-            >
-                {showNew ? <Eye size={18} /> : <EyeOff size={18} />}
-              </button>
+              <div className="relative">
+                <input
+                  id="new-password"
+                  type={showNew ? "text" : "password"}
+                  autoComplete="new-password"
+                  value={newPassword}
+                  onChange={(e) => setNewPassword(e.target.value)}
+                  disabled={changing}
+                  required
+                  placeholder="At least 8 characters"
+                  className="w-full min-h-12 rounded-lg px-3 pr-12 bg-white text-slate-900 text-sm outline-none focus:ring-2 focus:ring-accent"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowNew(!showNew)}
+                  className="absolute inset-y-0 right-0 flex w-12 items-center justify-center text-slate-500 hover:text-brand-600"
+                  aria-label={showNew ? "Hide password" : "Show password"}
+                >
+                  {showNew ? <Eye size={18} /> : <EyeOff size={18} />}
+                </button>
+              </div>
             </div>
 
             {changeError && <p role="alert" className="text-sm text-blush-300">{changeError}</p>}
@@ -163,29 +165,31 @@ export default function LoginView() {
           </div>
 
           {/* Password field – masked by default, show/hide toggle */}
-          <div className="relative">
+          <div>
             <label className="block text-sm font-medium text-slate-300 mb-1.5" htmlFor="password" aria-label="Password">
               Password
             </label>
-            <input
-              id="password"
-              type={showPassword ? "text" : "password"}
-              autoComplete="current-password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              disabled={busy}
-              required
-              placeholder="Enter your password"
-              className="w-full min-h-12 rounded-lg px-3 pr-10 bg-white text-slate-900 text-sm outline-none focus:ring-2 focus:ring-accent"
-            />
-            <button
-              type="button"
-              onClick={toggle}
-              className="absolute right-3 top-1/2 flex -translate-y-1/2 items-center justify-center text-slate-500 hover:text-brand-600 focus:outline-none focus:ring-2 focus:ring-accent focus:ring-opacity-50"
-              aria-label={showPassword ? "Hide password" : "Show password"}
-            >
-              {showPassword ? <Eye size={18} /> : <EyeOff size={18} />}
-            </button>
+            <div className="relative">
+              <input
+                id="password"
+                type={showPassword ? "text" : "password"}
+                autoComplete="current-password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                disabled={busy}
+                required
+                placeholder="Enter your password"
+                className="w-full min-h-12 rounded-lg px-3 pr-12 bg-white text-slate-900 text-sm outline-none focus:ring-2 focus:ring-accent"
+              />
+              <button
+                type="button"
+                onClick={toggle}
+                className="absolute inset-y-0 right-0 flex w-12 items-center justify-center text-slate-500 hover:text-brand-600 focus:outline-none focus:ring-2 focus:ring-accent focus:ring-opacity-50"
+                aria-label={showPassword ? "Hide password" : "Show password"}
+              >
+                {showPassword ? <Eye size={18} /> : <EyeOff size={18} />}
+              </button>
+            </div>
           </div>
 
           {/* Inline validation / server error message – announced to screen readers */}

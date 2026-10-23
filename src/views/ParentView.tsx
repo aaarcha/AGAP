@@ -168,7 +168,7 @@ export default function ParentView() {
   const lastClosed = incidents.filter((i) => i.status === "RESOLVED").sort((a, b) => (b.resolvedAt ?? 0) - (a.resolvedAt ?? 0))[0];
 
   return (
-    <div className={`mx-auto w-full ${wide ? "max-w-4xl" : "max-w-md"} space-y-3 px-3 py-3`}>
+    <div className={`scroll-area mx-auto w-full ${wide ? "max-w-4xl" : "max-w-md"} space-y-3 px-3 py-3 lg:h-full lg:overflow-y-auto`}>
       <div className="flex items-center justify-between gap-2">
         <p className="text-xs font-bold uppercase tracking-wide text-slate-500">{lang === "fil" ? "Wika ng abiso" : "Advisory language"}</p>
         <LangToggle />

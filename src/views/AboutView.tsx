@@ -7,7 +7,7 @@ export default function AboutView() {
   const phone = config?.school?.phone || "";
   const school = config?.school?.name || SCHOOL.name;
   return (
-    <div className="mx-auto w-full max-w-md space-y-4 px-4 py-4">
+    <div className="scroll-area mx-auto w-full max-w-md space-y-4 px-4 py-4 lg:max-h-[calc(100dvh-8rem)] lg:overflow-y-auto">
       <header>
         <h1 className="text-xl font-black tracking-tight text-brand-900">About ASPIRE</h1>
         <p className="mt-1 text-sm text-slate-600">
