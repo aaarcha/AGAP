@@ -10,12 +10,14 @@ import zlib from "node:zlib";
 import * as D from "../shared/domain.js";
 import * as C from "../shared/campus.js";
 import { createStore } from "./store.js";
+import { createConfigService, ConfigError } from "./config.js";
 
 class HttpError extends Error {
-  constructor(status, code, message) {
+  constructor(status, code, message, details = null) {
     super(message || code);
     this.status = status;
     this.code = code;
+    this.details = details;
   }
 }
 const bad = (msg, code = "bad_request") => new HttpError(400, code, msg);
@@ -146,6 +148,49 @@ export function createApp(opts = {}) {
     if (store.db.audit.length > 1000) store.db.audit.splice(0, store.db.audit.length - 800);
     store.save();
   }
+
+  // Admin configuration: versioned records, cached active version, safe fallback.
+  // ESCALATION_MINUTES from the environment only seeds the very first version.
+  const config = createConfigService({
+    store,
+    audit: (action, details) => audit(action, details),
+    now,
+    defaults: { escalation: envEscalation() },
+  });
+  function envEscalation() {
+    const [a, b] = Array.isArray(escalationMinutes) ? escalationMinutes : [];
+    const ok = (n) => Number.isInteger(n) && n >= 1 && n <= 60;
+    return ok(a) && ok(b) && a < b ? { barangayMinutes: a, cdrrmoMinutes: b } : undefined;
+  }
+  config.ensure();
+  // Every ticket scores against its own stamped version; legacy rows fall back to the active one.
+  const cfgFor = (inc) => config.forTicket(inc);
+
+  // Re-entering the current password for a sensitive write. Wrong attempts share the
+  // account lockout counter with sign-in and are audit-logged.
+  function requireReentry(account, password, req, scope) {
+    const t = now();
+    if (account.lockedUntil > t) {
+      const mins = Math.max(1, Math.ceil((account.lockedUntil - t) / 60000));
+      throw new HttpError(429, "account_locked", `Too many failed attempts. This account is locked for ${mins} more minute${mins === 1 ? "" : "s"}.`);
+    }
+    if (typeof password !== "string" || !password || !checkPassword(password, account.pwSalt, account.pwHash)) {
+      account.failed += 1;
+      if (account.failed >= lockoutFailures) {
+        account.lockedUntil = t + lockoutMinutes * 60000;
+        audit("account_locked", { target: account.email, detail: `${account.failed} failed password re-entries`, req });
+      }
+      store.save();
+      audit(`${scope}_failed`, { target: account.email, detail: "wrong current password", req });
+      throw new HttpError(401, "invalid_password", "Your password is incorrect.");
+    }
+    account.failed = 0;
+    account.lockedUntil = 0;
+  }
+
+  // Real tickets still open – a configuration change can silently reprioritise them,
+  // so saving while they exist needs an explicit confirmation.
+  const openRealTickets = () => store.db.incidents.filter((i) => i.status !== "RESOLVED" && !i.drill).length;
 
   function sign(payload) {
     const body = Buffer.from(JSON.stringify(payload)).toString("base64url");
@@ -435,7 +480,7 @@ export function createApp(opts = {}) {
       locationRisk: i.locationRisk,
       baseLocationRisk: i.baseLocationRisk,
       timeSensitivity: i.timeSensitivity,
-      hazardApplied: D.scoreIncident(i, { hazardActive: store.db.modes.hazard.active }).hazardApplied,
+      hazardApplied: D.scoreIncident(i, { hazardActive: store.db.modes.hazard.active, config: cfgFor(i) }).hazardApplied,
       drill: i.drill,
       reporterName: i.reporterName,
       reporterId: i.reporterId,
@@ -444,6 +489,9 @@ export function createApp(opts = {}) {
       log: i.log,
       metrics: metricsOf(i),
       canCancel: canCancel(i, user),
+      // Configuration version that scored this ticket (weights themselves never ship).
+      configId: i.configId || null,
+      configVersion: i.configVersion || null,
       // Final location of the ticket and how it was established (GPS-detected,
       // selected by the reporter, or the saved room).
       locationKind: i.locationKind || "saved",
@@ -476,13 +524,16 @@ export function createApp(opts = {}) {
       sections: user.role === "principal" ? sections() : [],
       modes: publicModes(user),
       drills: user.role === "principal" ? db.drills.slice(-10).reverse() : [],
-      rules: { escalationMinutes, tiers: D.ESCALATION_TIERS, hazardBoost: D.HAZARD_LOCATION_BOOST },
+      // Scoring internals (weights, thresholds) are deliberately absent: they are only
+      // available to Super Admin through /api/admin/config.
     };
   }
 
   // Single place where score / location risk / time sensitivity / override flags are (re)computed.
+  // A ticket always uses the configuration version stamped on it at creation, so a later
+  // configuration change can never alter an existing ticket's score.
   function rescore(inc) {
-    const r = D.scoreIncident(inc, { hazardActive: store.db.modes.hazard.active });
+    const r = D.scoreIncident(inc, { hazardActive: store.db.modes.hazard.active, config: cfgFor(inc) });
     inc.locationRisk = r.locationRisk;
     inc.timeSensitivity = r.timeSensitivity;
     inc.score = r.score;
@@ -497,8 +548,9 @@ export function createApp(opts = {}) {
     for (const inc of store.db.incidents) {
       if (inc.status !== "SENT" && inc.status !== "SEEN") continue;
       const age = t - inc.createdAt;
+      const limits = cfgFor(inc).escalationMinutes;
       let level = 0;
-      escalationMinutes.forEach((m, idx) => { if (age >= m * 60000) level = idx + 1; });
+      limits.forEach((m, idx) => { if (age >= m * 60000) level = idx + 1; });
       if (level > inc.escalationLevel) {
         const before = inc.score;
         inc.escalationLevel = level;
@@ -506,7 +558,7 @@ export function createApp(opts = {}) {
         rescore(inc);
         inc.log.push({
           at: t, by: "System", role: "system", action: "escalated",
-          note: `No acknowledgement after ${escalationMinutes[level - 1]} min — escalated to ${D.ESCALATION_TIERS[level]} (score ${before.toFixed(2)} → ${inc.score.toFixed(2)})`,
+          note: `No acknowledgement after ${limits[level - 1]} min — escalated to ${D.ESCALATION_TIERS[level]} (score ${before.toFixed(2)} → ${inc.score.toFixed(2)})`,
         });
         changed = true;
       }
@@ -631,8 +683,13 @@ export function createApp(opts = {}) {
       return { incident: dup, merged: true };
     }
 
+    const cfg = config.active();
     const incident = {
       id: store.nextId("INC-"),
+      // Stamp the version that scores this ticket; the score is never recomputed
+      // against a newer configuration.
+      configId: cfg.id,
+      configVersion: cfg.version,
       clientId,
       clientIds: [clientId],
       category: cat.categoryId,
@@ -711,7 +768,7 @@ export function createApp(opts = {}) {
         if (!mode) throw bad("Unknown transport mode.");
         if (!(km > 0 && km <= 50)) throw bad("Enter the distance to the school in km (0–50).");
         const route = store.db.modes.route.status;
-        const r = D.computeEta({ mode: mode.id, distanceKm: km, route });
+        const r = D.computeEta({ mode: mode.id, distanceKm: km, route, speeds: config.active().responderSpeeds });
         eta = { mode: mode.id, distanceKm: km, routeStatus: route, blocked: Boolean(r.blocked), minutes: r.minutes, startedAt: t, arriveBy: r.blocked ? null : t + r.minutes * 60000 };
         note = r.blocked ? `Acknowledged — ${mode.label}, ${km} km, route BLOCKED (no ETA)` : `Acknowledged — ${mode.label}, ${km} km, ETA ${r.minutes} min (route ${route})`;
       }
@@ -762,8 +819,10 @@ export function createApp(opts = {}) {
     const db = store.db;
     if (db.incidents.length) return;
     const t = now();
+    const cfg = config.active();
     db.incidents.push({
-      id: store.nextId("INC-"), clientId: "seed-1", clientIds: ["seed-1"], category: "flood", categoryLabel: "Flooding/Natural",
+      id: store.nextId("INC-"), configId: cfg.id, configVersion: cfg.version,
+      clientId: "seed-1", clientIds: ["seed-1"], category: "flood", categoryLabel: "Flooding/Natural",
       subLabel: "Flash Flood", severity: 4, vulnerability: 4, locationRisk: 2, timeSensitivity: 3,
       baseLocationRisk: 2, baseTimeSensitivity: 3, lowLying: true, escalationLevel: 0, escalatedAt: null, headcounts: [], overrideReasons: [],
       firstHeadcountAt: null, drill: false, drillId: null, interactions: 3, eta: null, enRouteAt: t - 3 * 60000, onSiteAt: null,
@@ -953,7 +1012,7 @@ export function createApp(opts = {}) {
     }
 
     // Everything below needs a signed-in user.
-    const { user } = authenticate(req, url, p);
+    const { user, account } = authenticate(req, url, p);
     if (m !== "GET") rateLimit(req, "write", 120);
     runEscalations(); // deterministic, time-based escalation (also runs on a timer)
 
@@ -1079,6 +1138,60 @@ export function createApp(opts = {}) {
       commit({ type: "school_year" });
       // Temporary credentials are returned ONCE to the Super Admin for distribution and are never logged.
       return send(res, 200, { year: store.db.schoolYear.count, startedAt: t, accounts: issued });
+    }
+
+    // ---- Admin configuration (Super Admin only). The weights and thresholds exist
+    // ONLY behind this role guard; /api/config and /api/state never carry them.
+    if (p === "/api/admin/config" && m === "GET") {
+      need(user, "super_admin");
+      const open = openRealTickets();
+      return send(res, 200, { activeId: config.active().id, versions: config.list().slice().reverse(), openTickets: open });
+    }
+
+    if (p === "/api/admin/config" && m === "PUT") {
+      need(user, "super_admin");
+      const body = await readJson(req);
+      requireReentry(account, body.password, req, "config_save");
+      const open = openRealTickets();
+      if (open > 0 && body.confirmOpenTickets !== true)
+        throw new HttpError(409, "open_tickets", `${open} real incident${open === 1 ? " is" : "s are"} still open. New values only apply to tickets created after saving — confirm to continue.`, { openTickets: open });
+      let saved;
+      try {
+        saved = config.save(body.config, { by: account.email });
+      } catch (err) {
+        if (err instanceof ConfigError) throw new HttpError(400, "invalid_config", "Some configuration values are not valid.", { fields: err.fields });
+        throw err;
+      }
+      audit("config_saved", {
+        by: account.email, target: saved.id, req,
+        detail: `v${saved.version} activated — weights ${saved.weights.severity}/${saved.weights.vulnerability}/${saved.weights.locationRisk}/${saved.weights.timeSensitivity} %, CR ${saved.consistency.cr}, panel ${saved.panelValidationDate}`,
+      });
+      commit({ type: "config_saved", id: saved.id });
+      return send(res, 200, { active: saved, versions: config.list(), openTickets: openRealTickets() });
+    }
+
+    const mcfg = p.match(/^\/api\/admin\/config\/([\w-]+)\/restore$/);
+    if (mcfg && m === "POST") {
+      need(user, "super_admin");
+      const body = await readJson(req);
+      requireReentry(account, body.password, req, "config_restore");
+      const source = config.list().find((v) => v.id === mcfg[1]);
+      if (!source) throw new HttpError(404, "not_found", "Configuration version not found.");
+      const open = openRealTickets();
+      if (open > 0 && body.confirmOpenTickets !== true)
+        throw new HttpError(409, "open_tickets", `${open} real incident${open === 1 ? " is" : "s are"} still open. Restoring only affects tickets created after saving — confirm to continue.`, { openTickets: open });
+      let saved;
+      try {
+        saved = config.restore(source.id, { by: account.email });
+      } catch (err) {
+        if (err instanceof ConfigError) throw new HttpError(400, "invalid_config", "That stored version is not valid.", { fields: err.fields });
+        throw err;
+      }
+      if (!saved) throw new HttpError(404, "not_found", "Configuration version not found.");
+      // Restoring never rewrites the old record – it appends a new version with the same values.
+      audit("config_restored", { by: account.email, target: saved.id, req, detail: `v${saved.version} created from v${source.version}` });
+      commit({ type: "config_saved", id: saved.id });
+      return send(res, 200, { active: saved, versions: config.list(), openTickets: openRealTickets() });
     }
 
     if (p === "/api/state" && m === "GET") return send(res, 200, stateFor(user));
@@ -1235,7 +1348,7 @@ export function createApp(opts = {}) {
         const e = inc.eta;
         const oldMs = e.blocked || !e.minutes ? null : e.minutes * 60000;
         const remainingFrac = oldMs ? Math.max(0, 1 - (t - e.startedAt) / oldMs) : 1;
-        const r = D.computeEta({ mode: e.mode, distanceKm: e.distanceKm, route: body.status });
+        const r = D.computeEta({ mode: e.mode, distanceKm: e.distanceKm, route: body.status, speeds: config.active().responderSpeeds });
         const oldMin = e.blocked ? "blocked" : `${Math.max(0, Math.ceil((e.arriveBy - t) / 60000))} min left`;
         if (r.blocked) inc.eta = { ...e, routeStatus: body.status, blocked: true, minutes: null, arriveBy: null };
         else inc.eta = { ...e, routeStatus: body.status, blocked: false, minutes: r.minutes, startedAt: t - (1 - remainingFrac) * r.minutes * 60000, arriveBy: t + remainingFrac * r.minutes * 60000 };
@@ -1422,7 +1535,7 @@ export function createApp(opts = {}) {
       return serveStatic(req, res, url.pathname);
     } catch (err) {
       if (res.headersSent) return res.end();
-      if (err instanceof HttpError) return send(res, err.status, { error: err.code, message: err.message });
+      if (err instanceof HttpError) return send(res, err.status, { error: err.code, message: err.message, ...(err.details || {}) });
       log("Unhandled error:", err);
       return send(res, 500, { error: "server_error", message: "Something went wrong on the server." });
     }

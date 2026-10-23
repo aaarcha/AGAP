@@ -23,6 +23,9 @@ function freshDb() {
     version: 1, seq: 0, roster: structuredClone(SEED_ROSTER), incidents: [], clientIds: {}, modes: freshModes(), drills: [],
     // Auth state: accounts (scrypt hashes, never plaintext), server-side sessions (revocable), append-only audit log.
     accounts: [], sessions: [], audit: [], schoolYear: { count: 0, startedAt: null },
+    // Admin configuration versions (see server/config.js). Append-only: the active
+    // version is resolved from here and never rewritten in place.
+    configs: [],
   };
 }
 
@@ -38,6 +41,7 @@ export function normalize(d) {
   d.accounts = Array.isArray(d.accounts) ? d.accounts : [];
   d.sessions = Array.isArray(d.sessions) ? d.sessions : [];
   d.audit = Array.isArray(d.audit) ? d.audit : [];
+  d.configs = Array.isArray(d.configs) ? d.configs : [];
   d.schoolYear = d.schoolYear && Number.isFinite(d.schoolYear.count) ? d.schoolYear : { count: 0, startedAt: null };
   for (const r of d.roster) if (!Number.isInteger(r.registry)) r.registry = 30;
   for (const i of d.incidents) {
@@ -56,6 +60,9 @@ export function normalize(d) {
     i.onSiteAt ??= null;
     i.firstHeadcountAt ??= null;
     i.hiddenBy ??= [];
+    // Which configuration version scored this ticket (stamped on creation, never recomputed).
+    i.configId ??= null;
+    i.configVersion ??= null;
   }
   return d;
 }
@@ -116,9 +123,9 @@ export function createStore({ dataDir, onPersistError = console.error } = {}) {
     reset({ keepRoster = true } = {}) {
       const roster = keepRoster ? db.roster : structuredClone(SEED_ROSTER);
       // Demo reset wipes incidents/modes but never auth state: accounts, sessions
-      // (the Principal stays signed in) and the audit trail must survive.
-      const { accounts, sessions, audit, schoolYear } = db;
-      db = { ...freshDb(), roster, accounts, sessions, audit, schoolYear, version: db.version };
+      // (the Principal stays signed in), the audit trail or the configuration history.
+      const { accounts, sessions, audit, schoolYear, configs } = db;
+      db = { ...freshDb(), roster, accounts, sessions, audit, schoolYear, configs, version: db.version };
       save();
     },
     // Keep the incident list from growing forever: drop resolved tickets older than `keepDays` (default 90).

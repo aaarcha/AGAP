@@ -30,7 +30,6 @@ interface Ctx {
   sections: string[];
   modes: Modes;
   drills: DrillSummary[];
-  escalationMinutes: number[];
   now: number;
   online: boolean;
   connected: boolean;
@@ -89,7 +88,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [sections, setSections] = useState<string[]>([]);
   const [modes, setModes] = useState<Modes>(DEFAULT_MODES);
   const [drills, setDrills] = useState<DrillSummary[]>([]);
-  const [escalationMinutes, setEscalationMinutes] = useState<number[]>([3, 6]);
   const [now, setNow] = useState(Date.now());
   const [online, setOnline] = useState(typeof navigator === "undefined" ? true : navigator.onLine);
   const [live, setLive] = useState(false);
@@ -201,7 +199,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
     setSections(s.sections);
     setModes(s.modes ?? DEFAULT_MODES);
     setDrills(s.drills ?? []);
-    if (s.rules?.escalationMinutes) setEscalationMinutes(s.rules.escalationMinutes);
     setNow(s.serverTime);
     try { localStorage.setItem(CACHE_KEY, JSON.stringify(s)); } catch { /* storage full */ }
   }
@@ -457,7 +454,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const queue = useMemo(() => queueAll.filter((q) => q.userId === user?.id), [queueAll, user?.id]);
 
   const value: Ctx = {
-    user, ready, config, incidents, roster, sections, modes, drills, escalationMinutes, now, online, connected, live,
+    user, ready, config, incidents, roster, sections, modes, drills, now, online, connected, live,
     queue, alerts, dismissAlert, notifPermission, enableNotifications, mustChange, login, changePassword, logout, refresh, submit, cancelQueued,
     act, recordHeadcount, setHazard, setDrill, setRoute, markSeen, cancelReport,  deleteIncident, clearHistory, saveProfile, addTeacher, editTeacher, deleteTeacher, changeSavedRoom,
   };

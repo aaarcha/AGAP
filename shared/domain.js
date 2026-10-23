@@ -11,7 +11,9 @@ export const SCHOOL = {
   phone: "",
 };
 
-// Illustrative AHP-derived weights (pending the final Expert Panel session).
+// Built-in defaults for the AHP-derived weights. The values actually used at runtime come
+// from the active admin configuration (server/config.js); this object is the seed and the
+// fallback when no valid configuration exists. Illustrative until the Expert Panel validates them.
 export const WEIGHTS = {
   severity: 0.5,
   vulnerability: 0.29,
@@ -102,14 +104,16 @@ export const STATUS_LABEL = {
 };
 
 // Integer arithmetic so band boundaries (e.g. exactly 4.00) never flip on float error.
-export function computeScore(severity, vulnerability, locationRisk, timeSensitivity) {
-  const w = WEIGHTS;
+// `weights` holds fractions (0.5 = 50 %) and defaults to the built-in seed weights, so the
+// formula and its results are unchanged when the admin configuration is untouched.
+export function computeScore(severity, vulnerability, locationRisk, timeSensitivity, weights = WEIGHTS) {
+  const w = weights || WEIGHTS;
   const total =
-    Math.round(w.severity * 100) * severity +
-    Math.round(w.vulnerability * 100) * vulnerability +
-    Math.round(w.locationRisk * 100) * locationRisk +
-    Math.round(w.timeSensitivity * 100) * timeSensitivity;
-  return total / 100;
+    Math.round(w.severity * 1000) * severity +
+    Math.round(w.vulnerability * 1000) * vulnerability +
+    Math.round(w.locationRisk * 1000) * locationRisk +
+    Math.round(w.timeSensitivity * 1000) * timeSensitivity;
+  return total / 1000;
 }
 
 export function bandFor(score, status, overrideReasons) {
@@ -276,12 +280,15 @@ export function headcountRequired(inc) {
 }
 
 // One place that decides location risk, time sensitivity, score and override flags.
-export function scoreIncident(inc, { hazardActive = false } = {}) {
+// `config` is the ticket's own active configuration (weights as fractions + hazard
+// adjustment); without it the built-in defaults apply, so existing scores are identical.
+export function scoreIncident(inc, { hazardActive = false, config = null } = {}) {
   const hazardApplied = Boolean(hazardActive && inc.lowLying);
-  const locationRisk = hazardApplied ? Math.min(5, inc.baseLocationRisk + HAZARD_LOCATION_BOOST) : inc.baseLocationRisk;
+  const boost = config && Number.isInteger(config.hazardAdjustment) ? config.hazardAdjustment : HAZARD_LOCATION_BOOST;
+  const locationRisk = hazardApplied ? Math.min(5, inc.baseLocationRisk + boost) : inc.baseLocationRisk;
   const mismatch = headcountRequired(inc) && (inc.headcounts || []).some((h) => h.present !== h.expected);
   const timeSensitivity = mismatch ? 5 : Math.min(5, inc.baseTimeSensitivity + (inc.escalationLevel || 0));
-  const score = computeScore(inc.severity, inc.vulnerability, locationRisk, timeSensitivity);
+  const score = computeScore(inc.severity, inc.vulnerability, locationRisk, timeSensitivity, config ? config.weights : WEIGHTS);
   const overrideReasons = [];
   if (inc.severity >= 5) overrideReasons.push("SEVERITY_5");
   if (mismatch) overrideReasons.push("HEADCOUNT_MISMATCH");
@@ -305,12 +312,15 @@ export const ROUTE_SPEED_FACTOR = {
   flooded: { walking: 0.75, motorcycle: 0.5, vehicle: 0.4 },
   blocked: null,
 };
-export function computeEta({ mode, distanceKm, route = "passable" }) {
+// `speeds` optionally holds admin-configured km/h per mode (assumed responder speeds).
+export function computeEta({ mode, distanceKm, route = "passable", speeds = null }) {
   const m = TRANSPORT_MODES.find((x) => x.id === mode);
   if (!m || !(distanceKm > 0)) return null;
+  const configured = speeds && Number(speeds[mode]);
+  const kmh = configured > 0 ? configured : m.kmh;
   const factors = ROUTE_SPEED_FACTOR[route];
   if (!factors) return { blocked: true, minutes: null };
-  return { blocked: false, minutes: Math.max(1, Math.round((distanceKm / (m.kmh * factors[mode])) * 60)) };
+  return { blocked: false, minutes: Math.max(1, Math.round((distanceKm / (kmh * factors[mode])) * 60)) };
 }
 
 // Feature: drill metrics are in milliseconds; helper for labelling.

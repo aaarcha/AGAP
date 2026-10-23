@@ -1,18 +1,16 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, type ReactNode } from "react";
 import {
   Users, ClipboardList, Calendar, Plus, RefreshCw, Unlock, UserX, UserCheck, Key, Eye, EyeOff, Copy, Check, AlertCircle,
-  SlidersHorizontal, User, Search, X,
+  SlidersHorizontal, User, Search, X, History, Pencil, RotateCcw, Save,
 } from "lucide-react";
-import { useApp } from "../lib/store";
 import { api } from "../lib/api";
-import type { AccountRecord, AuditEntry, SchoolYear, TempCredential } from "../lib/types";
+import type { AccountRecord, AuditEntry, ConfigPayload, ConfigVersion, SchoolYear, TempCredential } from "../lib/types";
 import { Modal, ConfirmModal } from "../components/Modal";
 import { dateTime } from "../lib/format";
 import { Header, StatusBanner, BottomNav, SideNav, type NavTab } from "../components/Chrome";
 import { MasterDetail } from "../components/MasterDetail";
 import { Select } from "../components/Select";
 import AccountView from "./AccountView";
-import { WEIGHTS, CONSISTENCY, HAZARD_LOCATION_BOOST, TRANSPORT_MODES } from "../../shared/domain.js";
 
 const card = "rounded-2xl border border-slate-200 bg-white p-4";
 const h2 = "flex items-center gap-1.5 text-xs font-bold uppercase tracking-wide text-slate-500";
@@ -48,6 +46,16 @@ export default function AdminConsole() {
   const [deactivateTarget, setDeactivateTarget] = useState<AccountRecord | null>(null);
   const [rolloverConfirm, setRolloverConfirm] = useState(false);
   const [rolloverResult, setRolloverResult] = useState<TempCredential[] | null>(null);
+
+  // Leaving Configuration with unsaved edits asks first (ConfigTab reports its dirty state).
+  const [configDirty, setConfigDirty] = useState(false);
+  const [leaveTo, setLeaveTo] = useState<Tab | null>(null);
+
+  function guardedSetTab(next: Tab) {
+    if (tab === "config" && next !== "config" && configDirty) { setLeaveTo(next); return; }
+    setConfigDirty(false);
+    setTab(next);
+  }
 
   useEffect(() => {
     void loadData();
@@ -111,7 +119,7 @@ export default function AdminConsole() {
 
   return (
     <div className="flex h-dvh overflow-hidden bg-cream">
-      <SideNav tab={tab} setTab={setTab} tabs={TABS} subtitle="Super Admin" />
+      <SideNav tab={tab} setTab={guardedSetTab} tabs={TABS} subtitle="Super Admin" />
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
         <Header title="Super Admin" subtitle="Accounts, audit and configuration" />
         <StatusBanner />
@@ -187,10 +195,10 @@ export default function AdminConsole() {
             </div>
           )}
 
-          {tab === "config" && <ConfigTab />}
+          {tab === "config" && <ConfigTab onDirtyChange={setConfigDirty} />}
           {tab === "account" && <AccountView />}
         </main>
-        <BottomNav tab={tab} setTab={setTab} tabs={TABS} />
+        <BottomNav tab={tab} setTab={guardedSetTab} tabs={TABS} />
       </div>
 
       {showProvision && (
@@ -215,6 +223,12 @@ export default function AdminConsole() {
           confirmLabel="Start new year" onConfirm={() => void handleRollover()} />
       )}
       {rolloverResult && <RolloverResultModal credentials={rolloverResult} onClose={() => setRolloverResult(null)} />}
+      {leaveTo && (
+        <ConfirmModal title="Discard unsaved changes?" danger onClose={() => setLeaveTo(null)}
+          message="Your configuration edits have not been saved. Leaving this tab discards them."
+          confirmLabel="Discard"
+          onConfirm={() => { setConfigDirty(false); setTab(leaveTo); setLeaveTo(null); }} />
+      )}
     </div>
   );
 }
@@ -344,39 +358,565 @@ function AccountsPane({ accounts, onUnlock, onActivate, onReset, onDeactivate }:
   );
 }
 
-function ConfigTab() {
-  const { escalationMinutes } = useApp();
-  const bands: [string, string][] = [["Critical", "4.0 and up"], ["High", "3.0 – 3.99"], ["Moderate", "below 3.0"]];
+// ------------------------------------------------------------------ configuration
+// Admin > Configuration is the ONLY place weights, the consistency ratio, escalation
+// limits and assumed responder speeds appear on the client. They come from the
+// Super-Admin endpoint (/api/admin/config) and never ship to other roles.
+
+type ConfigDraft = {
+  severity: string; vulnerability: string; locationRisk: string; timeSensitivity: string;
+  cr: string; panelValidationDate: string;
+  hazardAdjustment: string; barangayMinutes: string; cdrrmoMinutes: string;
+  walking: string; motorcycle: string; vehicle: string;
+};
+
+type ChangeRow = { label: string; from: string; to: string };
+
+const numOf = (s: string) => (String(s).trim() === "" ? NaN : Number(s));
+const oneDecimal = (n: number) => Math.abs(n * 10 - Math.round(n * 10)) < 1e-9;
+const isDateString = (s: string) => /^\d{4}-\d{2}-\d{2}$/.test(s) && !Number.isNaN(Date.parse(`${s}T00:00:00Z`));
+
+function draftFrom(v: ConfigVersion): ConfigDraft {
+  return {
+    severity: String(v.weights.severity),
+    vulnerability: String(v.weights.vulnerability),
+    locationRisk: String(v.weights.locationRisk),
+    timeSensitivity: String(v.weights.timeSensitivity),
+    cr: String(v.consistency.cr),
+    panelValidationDate: v.panelValidationDate ?? "",
+    hazardAdjustment: String(v.hazardAdjustment),
+    barangayMinutes: String(v.escalation.barangayMinutes),
+    cdrrmoMinutes: String(v.escalation.cdrrmoMinutes),
+    walking: String(v.responderSpeeds.walking),
+    motorcycle: String(v.responderSpeeds.motorcycle),
+    vehicle: String(v.responderSpeeds.vehicle),
+  };
+}
+
+function payloadFrom(d: ConfigDraft): ConfigPayload {
+  return {
+    weights: {
+      severity: numOf(d.severity),
+      vulnerability: numOf(d.vulnerability),
+      locationRisk: numOf(d.locationRisk),
+      timeSensitivity: numOf(d.timeSensitivity),
+    },
+    consistency: { cr: numOf(d.cr) },
+    panelValidationDate: d.panelValidationDate,
+    hazardAdjustment: numOf(d.hazardAdjustment),
+    escalation: { barangayMinutes: numOf(d.barangayMinutes), cdrrmoMinutes: numOf(d.cdrrmoMinutes) },
+    responderSpeeds: { walking: numOf(d.walking), motorcycle: numOf(d.motorcycle), vehicle: numOf(d.vehicle) },
+  };
+}
+
+function payloadOfVersion(v: ConfigVersion): ConfigPayload {
+  return {
+    weights: { ...v.weights },
+    consistency: { cr: v.consistency.cr },
+    panelValidationDate: v.panelValidationDate ?? "",
+    hazardAdjustment: v.hazardAdjustment,
+    escalation: { ...v.escalation },
+    responderSpeeds: { ...v.responderSpeeds },
+  };
+}
+
+const sameDraft = (a: ConfigDraft, b: ConfigDraft) =>
+  (Object.keys(a) as (keyof ConfigDraft)[]).every((k) => a[k] === b[k]);
+
+// Mirrors server/config.js so the form tells the admin before anything is sent.
+function localErrors(d: ConfigDraft): Record<string, string> {
+  const out: Record<string, string> = {};
+  const weights: [keyof ConfigDraft, string][] = [
+    ["severity", "Severity"], ["vulnerability", "Vulnerability"],
+    ["locationRisk", "Location risk"], ["timeSensitivity", "Time sensitivity"],
+  ];
+  let total = 0;
+  let weightsOk = true;
+  for (const [key, label] of weights) {
+    const n = numOf(d[key]);
+    if (!Number.isFinite(n)) { out[`weights.${key}`] = `${label}: enter a number.`; weightsOk = false; continue; }
+    if (n < 0 || n > 100) { out[`weights.${key}`] = `${label}: 0–100.`; weightsOk = false; continue; }
+    if (!oneDecimal(n)) { out[`weights.${key}`] = `${label}: one decimal place at most.`; weightsOk = false; continue; }
+    total += Math.round(n * 1000);
+  }
+  if (weightsOk && total !== 100000)
+    out["weights.sum"] = `The four weights must add up to exactly 100.0 (currently ${(total / 1000).toFixed(1)}).`;
+
+  const cr = numOf(d.cr);
+  if (!Number.isFinite(cr) || cr < 0 || cr > 0.1) out["consistency.cr"] = "The consistency ratio must be 0.10 or lower.";
+  if (!d.panelValidationDate.trim()) out.panelValidationDate = "Enter the date the Expert Panel validated these values.";
+  else if (!isDateString(d.panelValidationDate)) out.panelValidationDate = "Use a valid date.";
+
+  const hz = numOf(d.hazardAdjustment);
+  if (!Number.isInteger(hz) || hz < 0 || hz > 4) out.hazardAdjustment = "Use a whole number from 0 to 4.";
+
+  const b = numOf(d.barangayMinutes);
+  const c = numOf(d.cdrrmoMinutes);
+  if (!Number.isInteger(b) || b < 1 || b > 60) out["escalation.barangayMinutes"] = "1–60 minutes.";
+  if (!Number.isInteger(c) || c < 1 || c > 60) out["escalation.cdrrmoMinutes"] = "1–60 minutes.";
+  if (Number.isInteger(b) && Number.isInteger(c) && b >= c)
+    out["escalation.order"] = "The Barangay limit must be shorter than the CDRRMO limit.";
+
+  for (const [key, label] of [["walking", "Walking"], ["motorcycle", "Motorcycle"], ["vehicle", "Vehicle"]] as [keyof ConfigDraft, string][]) {
+    const n = numOf(d[key]);
+    if (!Number.isFinite(n) || n < 1 || n > 120) out[`responderSpeeds.${key}`] = `${label}: 1–120 km/h.`;
+  }
+  return out;
+}
+
+function changeRows(from: ConfigVersion, to: ConfigPayload): ChangeRow[] {
+  const pct = (v: number) => `${v} %`;
+  const when = (s?: string | null) => (s ? s : "not set");
+  return [
+    { label: "Severity weight", from: pct(from.weights.severity), to: pct(to.weights.severity) },
+    { label: "Vulnerability weight", from: pct(from.weights.vulnerability), to: pct(to.weights.vulnerability) },
+    { label: "Location risk weight", from: pct(from.weights.locationRisk), to: pct(to.weights.locationRisk) },
+    { label: "Time sensitivity weight", from: pct(from.weights.timeSensitivity), to: pct(to.weights.timeSensitivity) },
+    { label: "AHP consistency ratio", from: String(from.consistency.cr), to: String(to.consistency.cr) },
+    { label: "Expert panel validation", from: when(from.panelValidationDate), to: when(to.panelValidationDate) },
+    { label: "Hazard Location Risk adjustment", from: `+${from.hazardAdjustment}`, to: `+${to.hazardAdjustment}` },
+    { label: "Barangay escalation limit", from: `${from.escalation.barangayMinutes} min`, to: `${to.escalation.barangayMinutes} min` },
+    { label: "CDRRMO escalation limit", from: `${from.escalation.cdrrmoMinutes} min`, to: `${to.escalation.cdrrmoMinutes} min` },
+    { label: "Walking speed", from: `${from.responderSpeeds.walking} km/h`, to: `${to.responderSpeeds.walking} km/h` },
+    { label: "Motorcycle speed", from: `${from.responderSpeeds.motorcycle} km/h`, to: `${to.responderSpeeds.motorcycle} km/h` },
+    { label: "Vehicle speed", from: `${from.responderSpeeds.vehicle} km/h`, to: `${to.responderSpeeds.vehicle} km/h` },
+  ];
+}
+
+function ConfigField({ label, suffix, error, children }: {
+  label: string; suffix?: string; error?: string; children: ReactNode;
+}) {
   return (
-    <div className="scroll-area mx-auto w-full max-w-3xl space-y-3 lg:h-full lg:overflow-y-auto">
-      <section className={card}>
-        <h2 className={`${h2} mb-2`}>Urgency model (read-only)</h2>
-        <dl className="divide-y divide-slate-100 text-sm">
-          {([["Severity", WEIGHTS.severity], ["Vulnerability", WEIGHTS.vulnerability], ["Location risk", WEIGHTS.locationRisk], ["Time sensitivity", WEIGHTS.timeSensitivity]] as const).map(([k, v]) => (
-            <div key={k} className="flex items-center justify-between py-1.5"><dt className="text-slate-600">{k}</dt><dd className="font-mono font-bold text-brand-700">{v.toFixed(2)}</dd></div>
-          ))}
-        </dl>
-        <p className="mt-2 text-xs text-slate-500">Consistency ratio {CONSISTENCY.cr} · λmax {CONSISTENCY.lambdaMax} · CI {CONSISTENCY.ci} · RI {CONSISTENCY.ri}. Default values until the expert panel validates them.</p>
-      </section>
-      <section className={card}>
-        <h2 className={`${h2} mb-2`}>Priority rules</h2>
-        <dl className="divide-y divide-slate-100 text-sm">
-          <div className="flex justify-between py-1.5"><dt className="text-slate-600">Score bands</dt><dd className="text-right text-slate-800">{bands.map(([k, v]) => `${k} ${v}`).join(" · ")}</dd></div>
-          <div className="flex justify-between py-1.5"><dt className="text-slate-600">Critical override</dt><dd className="text-slate-800">Severity 5 or headcount mismatch</dd></div>
-          <div className="flex justify-between py-1.5"><dt className="text-slate-600">Escalation</dt><dd className="text-slate-800">Barangay after {escalationMinutes[0]} min · CDRRMO after {escalationMinutes[1]} min</dd></div>
-          <div className="flex justify-between py-1.5"><dt className="text-slate-600">Hazard mode boost</dt><dd className="font-mono text-slate-800">+{HAZARD_LOCATION_BOOST}</dd></div>
-        </dl>
-      </section>
-      <section className={card}>
-        <h2 className={`${h2} mb-2`}>Responder speeds</h2>
-        <ul className="space-y-1 text-sm text-slate-700">
-          {TRANSPORT_MODES.map((m) => <li key={m.id}>{m.label}: <span className="font-mono">{m.kmh} km/h</span></li>)}
-        </ul>
-        <p className="mt-2 text-xs text-slate-500">Read-only. Change these in code after expert-panel validation.</p>
-      </section>
+    <label className="block text-xs font-semibold text-slate-600">
+      <span>{label}{suffix ? <span className="font-normal text-slate-400"> ({suffix})</span> : null}</span>
+      <span className="mt-1 block">{children}</span>
+      {error && <span className="mt-1 block text-xs font-semibold text-blush-700">{error}</span>}
+    </label>
+  );
+}
+
+function ConfigRow({ label, value }: { label: string; value: ReactNode }) {
+  return (
+    <div className="flex flex-col gap-0.5 py-1.5 sm:flex-row sm:items-center sm:justify-between sm:gap-3">
+      <dt className="text-slate-600">{label}</dt>
+      <dd className="font-mono font-bold text-slate-800 sm:text-right">{value}</dd>
     </div>
   );
 }
+
+// Old → new comparison, password re-entry and the open-ticket warning, in one place.
+function ConfigReviewModal({ title, intro, rows, openTickets, confirmLabel, onClose, onConfirm }: {
+  title: string; intro: string; rows: ChangeRow[]; openTickets: number; confirmLabel: string;
+  onClose: () => void; onConfirm: (password: string, confirmOpen: boolean) => Promise<void>;
+}) {
+  const [password, setPassword] = useState("");
+  const [show, setShow] = useState(false);
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const changed = rows.filter((r) => r.from !== r.to);
+  const needsConfirm = openTickets > 0;
+
+  async function submit() {
+    setBusy(true);
+    setError("");
+    try {
+      await onConfirm(password, confirmOpen);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not save the configuration.");
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Modal title={title} onClose={() => { if (!busy) onClose(); }} wide>
+      <div className="space-y-3">
+        <p className="text-sm leading-relaxed text-slate-600">{intro}</p>
+
+        {changed.length === 0 ? (
+          <p className="rounded-xl bg-slate-50 p-3 text-sm text-slate-700">No values changed.</p>
+        ) : (
+          <div className="overflow-hidden rounded-xl border border-slate-200">
+            <table className="w-full text-sm">
+              <thead className="bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-500">
+                <tr>
+                  <th className="px-3 py-2">Setting</th>
+                  <th className="px-3 py-2">Current</th>
+                  <th className="px-3 py-2">New</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {changed.map((r) => (
+                  <tr key={r.label}>
+                    <td className="px-3 py-2 text-slate-600">{r.label}</td>
+                    <td className="px-3 py-2 font-mono text-slate-500 line-through">{r.from}</td>
+                    <td className="px-3 py-2 font-mono font-bold text-brand-700">{r.to}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        {needsConfirm && (
+          <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+            <p className="font-bold">
+              ⚠️ {openTickets} real incident{openTickets === 1 ? " is" : "s are"} still open
+            </p>
+            <p className="mt-1">
+              New values apply only to tickets created after saving. Open tickets keep the weights
+              they were scored with, so nothing is re-scored.
+            </p>
+            <label className="mt-2 flex min-h-12 items-center gap-2 font-semibold">
+              <input type="checkbox" checked={confirmOpen} onChange={(e) => setConfirmOpen(e.target.checked)}
+                className="h-5 w-5 accent-amber-600" />
+              I understand and want to continue
+            </label>
+          </div>
+        )}
+
+        <label className="block text-xs font-semibold text-slate-600">
+          Your current password
+          <span className="relative mt-1 block">
+            <input type={show ? "text" : "password"} autoComplete="current-password" value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              className={`${input} pr-12`} aria-label="Your current password" />
+            <button type="button" onClick={() => setShow((v) => !v)}
+              aria-label={show ? "Hide password" : "Show password"}
+              className="absolute inset-y-0 right-0 flex w-12 items-center justify-center text-slate-500">
+              {show ? <EyeOff size={16} /> : <Eye size={16} />}
+            </button>
+          </span>
+        </label>
+
+        {error && <p role="alert" className="text-sm font-semibold text-blush-700">{error}</p>}
+
+        <div className="flex gap-2">
+          <button onClick={onClose} disabled={busy} className={`${btnSecondary} flex-1 justify-center`}>Cancel</button>
+          <button onClick={() => void submit()}
+            disabled={busy || !password || changed.length === 0 || (needsConfirm && !confirmOpen)}
+            className={`${btnPrimary} flex-1 justify-center`}>
+            {busy ? "Saving…" : confirmLabel}
+          </button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+function ConfigTab({ onDirtyChange }: { onDirtyChange: (dirty: boolean) => void }) {
+  const [versions, setVersions] = useState<ConfigVersion[]>([]);
+  const [openTickets, setOpenTickets] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState<ConfigDraft | null>(null);
+  const [reviewing, setReviewing] = useState(false);
+  const [restoreTarget, setRestoreTarget] = useState<ConfigVersion | null>(null);
+
+  const active = versions.find((v) => v.active) ?? versions[0] ?? null;
+  const errors = draft ? localErrors(draft) : {};
+  const dirty = Boolean(editing && draft && active && !sameDraft(draft, draftFrom(active)));
+
+  useEffect(() => {
+    let alive = true;
+    void (async () => {
+      try {
+        const r = await api<{ versions: ConfigVersion[]; openTickets: number }>("GET", "/api/admin/config");
+        if (!alive) return;
+        setVersions(r.versions);
+        setOpenTickets(r.openTickets);
+      } catch (e) {
+        if (alive) setError(e instanceof Error ? e.message : "Failed to load configuration");
+      } finally {
+        if (alive) setLoading(false);
+      }
+    })();
+    return () => { alive = false; };
+  }, []);
+
+  useEffect(() => { onDirtyChange(dirty); }, [dirty, onDirtyChange]);
+
+  // Closing the tab or reloading with unsaved edits asks first.
+  useEffect(() => {
+    if (!dirty) return;
+    const warn = (e: BeforeUnloadEvent) => { e.preventDefault(); e.returnValue = ""; };
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, [dirty]);
+
+  function apply(
+    r: { active: ConfigVersion; versions: ConfigVersion[]; openTickets: number },
+    message: string,
+  ) {
+    setVersions(r.versions);
+    setOpenTickets(r.openTickets);
+    setEditing(false);
+    setDraft(null);
+    setReviewing(false);
+    setRestoreTarget(null);
+    setError("");
+    setNotice(message);
+  }
+
+  const set = (patch: Partial<ConfigDraft>) => setDraft((d) => (d ? { ...d, ...patch } : d));
+
+  if (loading) return <div className="py-8 text-center text-slate-500">Loading…</div>;
+  if (!active) {
+    return (
+      <div className="mx-auto w-full max-w-3xl">
+        <p className="rounded-xl border border-blush-200 bg-blush-100 p-3 text-sm text-blush-800">
+          {error || "No configuration available."}
+        </p>
+      </div>
+    );
+  }
+
+  const bands: [string, string][] = [["Critical", "4.0 and up"], ["High", "3.0 – 3.99"], ["Moderate", "below 3.0"]];
+
+  return (
+    <div className="scroll-area mx-auto w-full max-w-3xl space-y-3 lg:h-full lg:overflow-y-auto">
+      {error && (
+        <p role="alert" className="rounded-xl border border-blush-200 bg-blush-100 p-3 text-sm text-blush-800">{error}</p>
+      )}
+      {notice && (
+        <div role="status" className="flex items-start gap-2 rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-800">
+          <Check size={16} className="mt-0.5 shrink-0" />
+          <span className="min-w-0 flex-1">{notice}</span>
+          <button onClick={() => setNotice("")} aria-label="Dismiss" className="shrink-0 text-emerald-700"><X size={16} /></button>
+        </div>
+      )}
+
+      {editing && draft ? (
+        <form className="space-y-3" onSubmit={(e) => { e.preventDefault(); if (Object.keys(errors).length === 0) setReviewing(true); }}>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <h2 className={h2}><SlidersHorizontal size={14} /> Edit configuration</h2>
+            <span className="text-xs text-slate-500">Based on v{active.version}</span>
+          </div>
+
+          <section className={card}>
+            <h3 className={`${h2} mb-2`}>Urgency weights</h3>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <ConfigField label="Severity" suffix="%" error={errors["weights.severity"]}>
+                <input type="number" inputMode="decimal" step="0.1" min="0" max="100" value={draft.severity}
+                  onChange={(e) => set({ severity: e.target.value })} className={input} aria-label="Severity weight" />
+              </ConfigField>
+              <ConfigField label="Vulnerability" suffix="%" error={errors["weights.vulnerability"]}>
+                <input type="number" inputMode="decimal" step="0.1" min="0" max="100" value={draft.vulnerability}
+                  onChange={(e) => set({ vulnerability: e.target.value })} className={input} aria-label="Vulnerability weight" />
+              </ConfigField>
+              <ConfigField label="Location risk" suffix="%" error={errors["weights.locationRisk"]}>
+                <input type="number" inputMode="decimal" step="0.1" min="0" max="100" value={draft.locationRisk}
+                  onChange={(e) => set({ locationRisk: e.target.value })} className={input} aria-label="Location risk weight" />
+              </ConfigField>
+              <ConfigField label="Time sensitivity" suffix="%" error={errors["weights.timeSensitivity"]}>
+                <input type="number" inputMode="decimal" step="0.1" min="0" max="100" value={draft.timeSensitivity}
+                  onChange={(e) => set({ timeSensitivity: e.target.value })} className={input} aria-label="Time sensitivity weight" />
+              </ConfigField>
+            </div>
+            <p className={`mt-2 text-xs ${errors["weights.sum"] ? "font-bold text-blush-700" : "text-slate-500"}`}>
+              {errors["weights.sum"] ?? "The four weights must add up to exactly 100.0."}
+            </p>
+          </section>
+
+          <section className={card}>
+            <h3 className={`${h2} mb-2`}>AHP consistency</h3>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <ConfigField label="Consistency ratio" suffix="max 0.10" error={errors["consistency.cr"]}>
+                <input type="number" inputMode="decimal" step="0.001" min="0" max="0.1" value={draft.cr}
+                  onChange={(e) => set({ cr: e.target.value })} className={input} aria-label="Consistency ratio" />
+              </ConfigField>
+              <ConfigField label="Expert panel validation date" error={errors.panelValidationDate}>
+                <input type="date" value={draft.panelValidationDate}
+                  onChange={(e) => set({ panelValidationDate: e.target.value })} className={input}
+                  aria-label="Expert panel validation date" />
+              </ConfigField>
+            </div>
+          </section>
+
+          <section className={card}>
+            <h3 className={`${h2} mb-2`}>Priority rules</h3>
+            <div className="grid gap-3 sm:grid-cols-3">
+              <ConfigField label="Hazard Location Risk" suffix="0–4" error={errors.hazardAdjustment}>
+                <input type="number" inputMode="numeric" step="1" min="0" max="4" value={draft.hazardAdjustment}
+                  onChange={(e) => set({ hazardAdjustment: e.target.value })} className={input} aria-label="Hazard Location Risk adjustment" />
+              </ConfigField>
+              <ConfigField label="Barangay limit" suffix="min" error={errors["escalation.barangayMinutes"]}>
+                <input type="number" inputMode="numeric" step="1" min="1" max="60" value={draft.barangayMinutes}
+                  onChange={(e) => set({ barangayMinutes: e.target.value })} className={input} aria-label="Barangay escalation limit in minutes" />
+              </ConfigField>
+              <ConfigField label="CDRRMO limit" suffix="min" error={errors["escalation.cdrrmoMinutes"]}>
+                <input type="number" inputMode="numeric" step="1" min="1" max="60" value={draft.cdrrmoMinutes}
+                  onChange={(e) => set({ cdrrmoMinutes: e.target.value })} className={input} aria-label="CDRRMO escalation limit in minutes" />
+              </ConfigField>
+            </div>
+            {errors["escalation.order"] && (
+              <p className="mt-2 text-xs font-bold text-blush-700">{errors["escalation.order"]}</p>
+            )}
+            <p className="mt-2 text-xs text-slate-500">Score bands, the Severity 5 override and the headcount override are fixed.</p>
+          </section>
+
+          <section className={card}>
+            <h3 className={`${h2} mb-2`}>Assumed responder speeds</h3>
+            <div className="grid gap-3 sm:grid-cols-3">
+              <ConfigField label="On foot (Tanod)" suffix="km/h" error={errors["responderSpeeds.walking"]}>
+                <input type="number" inputMode="decimal" step="0.1" min="1" max="120" value={draft.walking}
+                  onChange={(e) => set({ walking: e.target.value })} className={input} aria-label="Walking speed" />
+              </ConfigField>
+              <ConfigField label="Motorcycle" suffix="km/h" error={errors["responderSpeeds.motorcycle"]}>
+                <input type="number" inputMode="decimal" step="0.1" min="1" max="120" value={draft.motorcycle}
+                  onChange={(e) => set({ motorcycle: e.target.value })} className={input} aria-label="Motorcycle speed" />
+              </ConfigField>
+              <ConfigField label="Vehicle / ambulance" suffix="km/h" error={errors["responderSpeeds.vehicle"]}>
+                <input type="number" inputMode="decimal" step="0.1" min="1" max="120" value={draft.vehicle}
+                  onChange={(e) => set({ vehicle: e.target.value })} className={input} aria-label="Vehicle speed" />
+              </ConfigField>
+            </div>
+          </section>
+
+          <div className="flex gap-2">
+            <button type="button" onClick={() => { setEditing(false); setDraft(null); setReviewing(false); }}
+              className={`${btnSecondary} flex-1 justify-center`}>Cancel</button>
+            <button type="submit" disabled={!dirty || Object.keys(errors).length > 0}
+              className={`${btnPrimary} flex-1 justify-center disabled:opacity-50`}>
+              <Save size={15} /> Review changes
+            </button>
+          </div>
+        </form>
+      ) : (
+        <>
+          <section className={card}>
+            <div className="flex flex-wrap items-start justify-between gap-2">
+              <div>
+                <h2 className={h2}>Active configuration</h2>
+                <p className="mt-1 text-sm font-bold text-slate-800">Version {active.version}</p>
+                <p className="text-xs text-slate-500">
+                  Set by {active.createdBy} · {dateTime(active.createdAt)}
+                </p>
+              </div>
+              <button onClick={() => { setEditing(true); setDraft(draftFrom(active)); setReviewing(false); setRestoreTarget(null); setNotice(""); }}
+                className={btnPrimary}><Pencil size={15} /> Edit</button>
+            </div>
+            <p className="mt-2 text-xs text-slate-500">
+              Read-only until you edit. Every save creates a new version; tickets already created keep the
+              weights they were scored with.
+            </p>
+          </section>
+
+          <section className={card}>
+            <h2 className={`${h2} mb-2`}>Urgency model</h2>
+            <dl className="divide-y divide-slate-100 text-sm">
+              <ConfigRow label="Severity weight" value={`${active.weights.severity} %`} />
+              <ConfigRow label="Vulnerability weight" value={`${active.weights.vulnerability} %`} />
+              <ConfigRow label="Location risk weight" value={`${active.weights.locationRisk} %`} />
+              <ConfigRow label="Time sensitivity weight" value={`${active.weights.timeSensitivity} %`} />
+            </dl>
+            <p className="mt-2 text-xs text-slate-500">
+              Consistency ratio {active.consistency.cr} · λmax {active.consistency.lambdaMax} · CI {active.consistency.ci} ·
+              RI {active.consistency.ri}. Expert panel validation: {active.panelValidationDate ?? "not yet validated"}.
+            </p>
+          </section>
+
+          <section className={card}>
+            <h2 className={`${h2} mb-2`}>Priority rules</h2>
+            <dl className="divide-y divide-slate-100 text-sm">
+              <ConfigRow label="Score bands" value={bands.map(([k, v]) => `${k} ${v}`).join(" · ")} />
+              <ConfigRow label="Critical override" value="Severity 5 or headcount mismatch" />
+              <ConfigRow label="Barangay escalation" value={`${active.escalation.barangayMinutes} min`} />
+              <ConfigRow label="CDRRMO escalation" value={`${active.escalation.cdrrmoMinutes} min`} />
+              <ConfigRow label="Hazard Location Risk" value={`+${active.hazardAdjustment}`} />
+            </dl>
+          </section>
+
+          <section className={card}>
+            <h2 className={`${h2} mb-2`}>Assumed responder speeds</h2>
+            <dl className="divide-y divide-slate-100 text-sm">
+              <ConfigRow label="On foot (Barangay Tanod)" value={`${active.responderSpeeds.walking} km/h`} />
+              <ConfigRow label="Motorcycle" value={`${active.responderSpeeds.motorcycle} km/h`} />
+              <ConfigRow label="Vehicle / ambulance" value={`${active.responderSpeeds.vehicle} km/h`} />
+            </dl>
+          </section>
+        </>
+      )}
+
+      <section className={card}>
+        <h2 className={`${h2} mb-2`}><History size={14} /> Version history</h2>
+        {versions.length === 0 ? (
+          <p className="text-sm text-slate-500">No versions yet.</p>
+        ) : (
+          <ul className="divide-y divide-slate-100">
+            {versions.map((v) => (
+              <li key={v.id} className="flex flex-wrap items-center gap-2 py-2">
+                <div className="min-w-0 flex-1">
+                  <p className="flex items-center gap-2 text-sm font-bold text-slate-800">
+                    v{v.version}
+                    {v.active && (
+                      <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[11px] font-bold text-emerald-700">Active</span>
+                    )}
+                  </p>
+                  <p className="text-[11px] text-slate-500">
+                    {v.createdBy} · {dateTime(v.createdAt)} · {v.weights.severity}/{v.weights.vulnerability}/
+                    {v.weights.locationRisk}/{v.weights.timeSensitivity} % · CR {v.consistency.cr} · panel{" "}
+                    {v.panelValidationDate ?? "not set"}
+                  </p>
+                </div>
+                {!v.active && (
+                  <button onClick={() => { setRestoreTarget(v); setNotice(""); }}
+                    disabled={dirty}
+                    title={dirty ? "Finish or cancel your edit first" : "Restore this version"}
+                    className={`${btnSecondary} shrink-0 disabled:opacity-40`}>
+                    <RotateCcw size={15} /> Restore this version
+                  </button>
+                )}
+              </li>
+            ))}
+          </ul>
+        )}
+        <p className="mt-2 text-xs text-slate-500">
+          Restoring copies an old version into a new one — earlier versions are never modified or deleted.
+        </p>
+      </section>
+
+      {reviewing && draft && (
+        <ConfigReviewModal
+          title="Review configuration change"
+          intro={`These values become version ${(versions[0]?.version ?? 0) + 1} and apply to tickets created from now on.`}
+          rows={changeRows(active, payloadFrom(draft))}
+          openTickets={openTickets}
+          confirmLabel="Save version"
+          onClose={() => setReviewing(false)}
+          onConfirm={async (password, confirmOpen) => {
+            const r = await api<{ active: ConfigVersion; versions: ConfigVersion[]; openTickets: number }>(
+              "PUT", "/api/admin/config",
+              { config: payloadFrom(draft), password, confirmOpenTickets: confirmOpen },
+            );
+            apply(r, `Version ${r.active.version} saved. Existing tickets keep their original weights.`);
+          }}
+        />
+      )}
+
+      {restoreTarget && (
+        <ConfigReviewModal
+          title={`Restore version ${restoreTarget.version}`}
+          intro="Restoring creates a new version with these values. Nothing is deleted and open tickets are not re-scored."
+          rows={changeRows(active, payloadOfVersion(restoreTarget))}
+          openTickets={openTickets}
+          confirmLabel="Restore version"
+          onClose={() => setRestoreTarget(null)}
+          onConfirm={async (password, confirmOpen) => {
+            const r = await api<{ active: ConfigVersion; versions: ConfigVersion[]; openTickets: number }>(
+              "POST", `/api/admin/config/${restoreTarget.id}/restore`,
+              { password, confirmOpenTickets: confirmOpen },
+            );
+            apply(r, `Version ${r.active.version} restored from v${restoreTarget.version}.`);
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
 
 // ----------------------------------------------------------- Sub-components
 

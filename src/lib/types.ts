@@ -118,7 +118,38 @@ export interface ServerState {
   sections: string[];
   modes: Modes;
   drills: DrillSummary[];
-  rules: { escalationMinutes: number[]; tiers: string[]; hazardBoost: number };
+}
+
+// ---- admin configuration (Super Admin only) -----------------------------------
+export interface ConfigWeights {
+  severity: number;
+  vulnerability: number;
+  locationRisk: number;
+  timeSensitivity: number;
+}
+
+/** One immutable configuration version. Percent weights must sum to exactly 100.0. */
+export interface ConfigVersion {
+  id: string;
+  version: number;
+  active: boolean;
+  weights: ConfigWeights;
+  consistency: { cr: number; lambdaMax: number; ci: number; ri: number; n: number };
+  panelValidationDate: string | null;
+  hazardAdjustment: number;
+  escalation: { barangayMinutes: number; cdrrmoMinutes: number };
+  responderSpeeds: { walking: number; motorcycle: number; vehicle: number };
+  createdBy: string;
+  createdAt: number;
+}
+
+export interface ConfigPayload {
+  weights: ConfigWeights;
+  consistency: { cr: number; lambdaMax?: number; ci?: number; ri?: number; n?: number };
+  panelValidationDate: string;
+  hazardAdjustment: number;
+  escalation: { barangayMinutes: number; cdrrmoMinutes: number };
+  responderSpeeds: { walking: number; motorcycle: number; vehicle: number };
 }
 
 export interface ReportPayload {
