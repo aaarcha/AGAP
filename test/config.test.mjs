@@ -124,7 +124,7 @@ test("configuration is readable and writable only by the Super Admin", async () 
 
   // Weights and thresholds never leave the Super-Admin endpoint.
   const pub = (await s.call("GET", "/api/config")).json;
-  assert.deepEqual(Object.keys(pub).sort(), ["accessCodeRequired", "demoReset", "passwordMin", "school"]);
+  assert.deepEqual(Object.keys(pub).sort(), ["accessCodeRequired", "demoReset", "passwordMin", "passwordPolicy", "school"]);
   assert.equal(pub.weights, undefined);
   assert.equal(pub.thresholds, undefined);
   const state = (await s.call("GET", "/api/state", { token: tokens.principal })).json;

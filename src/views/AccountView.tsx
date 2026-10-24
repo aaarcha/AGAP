@@ -12,6 +12,14 @@ const ROLE_LABEL: Record<string, string> = {
   super_admin: "Super Admin",
 };
 
+const POLICY_PLACEHOLDER: Record<string, string> = {
+  principal: "Use 10 characters or more with a number and a letter.",
+  parent: "Use 8 characters or more.",
+  teacher: "Use 8 characters or more.",
+  responder: "Use 8 characters or more.",
+  super_admin: "Use 10 characters or more with a number and a letter.",
+};
+
 export default function AccountView() {
   const { user, changePassword, logout } = useApp();
   const [current, setCurrent] = useState("");
@@ -22,9 +30,12 @@ export default function AccountView() {
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [about, setAbout] = useState(false);
 
+  const policy = user ? POLICY_PLACEHOLDER[user.role] ?? "Use 8 characters or more." : "Use 8 characters or more.";
+  const minLen = user?.role === "principal" || user?.role === "super_admin" ? 10 : 8;
+
   async function submit(e: React.FormEvent) {
     e.preventDefault();
-    if (next.length < 8) { setMsg({ ok: false, text: "New password must be at least 8 characters." }); return; }
+    if (next.length < minLen) { setMsg({ ok: false, text: policy }); return; }
     setBusy(true); setMsg(null);
     try {
       await changePassword(next, current);
@@ -78,11 +89,13 @@ export default function AccountView() {
             </span>
           </label>
 
+          <p className="text-xs text-slate-500">{policy}</p>
+
           <label className="block text-xs font-semibold text-slate-600" htmlFor="new-password">
             New password
             <span className="relative mt-1 block">
               <input id="new-password" type={showNext ? "text" : "password"} autoComplete="new-password"
-                value={next} onChange={(e) => setNext(e.target.value)} required placeholder="At least 8 characters"
+                value={next} onChange={(e) => setNext(e.target.value)} required placeholder={policy}
                 className="min-h-12 w-full rounded-xl border border-slate-300 px-3 pr-12 text-base font-normal outline-none focus:border-brand-500" />
               <button type="button" onClick={() => setShowNext((v) => !v)} aria-label={showNext ? "Hide new password" : "Show new password"}
                 className="absolute inset-y-0 right-0 flex w-12 items-center justify-center text-slate-500">

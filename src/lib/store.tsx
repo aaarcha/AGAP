@@ -41,6 +41,8 @@ interface Ctx {
   enableNotifications: () => Promise<void>;
   /** true while the signed-in account must set a new password (first sign-in / yearly rollover) */
   mustChange: boolean;
+  /** Role-specific password policy text from the server. */
+  passwordPolicy: string;
   login: (email: string, password: string, code?: string) => Promise<boolean>;
   changePassword: (password: string, currentPassword?: string) => Promise<void>;
   changeSavedRoom: (roomId: string) => Promise<void>;
@@ -97,6 +99,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     notificationsSupported() ? Notification.permission : "unsupported",
   );
   const [mustChange, setMustChange] = useState(false);
+  const [passwordPolicy, setPasswordPolicy] = useState("Use 8 characters or more.");
 
   const offset = useRef(0);
   const reqSeq = useRef(0);
@@ -247,6 +250,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     setToken(r.token);
     setUser(r.user);
     setMustChange(Boolean(r.mustChange));
+    setPasswordPolicy((r as any).passwordPolicy ?? "Use 8 characters or more.");
     if (!r.mustChange) await refresh();
     return Boolean(r.mustChange);
   }, [refresh, resetLocal]);
@@ -272,8 +276,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
         } catch { /* ignore bad cache */ }
         // Validate the persisted session: revoked/expired → sign out; pending password change → force screen.
         try {
-          const me = await api<{ user: User; mustChange: boolean }>("GET", "/api/me");
+          const me = await api<{ user: User; mustChange: boolean; policy?: string }>("GET", "/api/me");
           setMustChange(Boolean(me.mustChange));
+          setPasswordPolicy(me.policy ?? passwordPolicy);
           if (!me.mustChange) await refresh();
         } catch (e) {
           if (e instanceof ApiError && e.status === 401) {
@@ -455,7 +460,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   const value: Ctx = {
     user, ready, config, incidents, roster, sections, modes, drills, now, online, connected, live,
-    queue, alerts, dismissAlert, notifPermission, enableNotifications, mustChange, login, changePassword, logout, refresh, submit, cancelQueued,
+    queue, alerts, dismissAlert, notifPermission, enableNotifications, mustChange, passwordPolicy, login, changePassword, logout, refresh, submit, cancelQueued,
     act, recordHeadcount, setHazard, setDrill, setRoute, markSeen, cancelReport,  deleteIncident, clearHistory, saveProfile, addTeacher, editTeacher, deleteTeacher, changeSavedRoom,
   };
   return <AppCtx.Provider value={value}>{children}</AppCtx.Provider>;

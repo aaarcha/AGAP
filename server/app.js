@@ -66,10 +66,24 @@ const normEmail = (v) => String(v ?? "").trim().toLowerCase();
 const emailOk = (e) => e.length <= 160 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e);
 const slugify = (s) => String(s).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
 
-function validatePassword(pw) {
+const ROLE_PASSWORD_POLICY = {
+  principal:  { min: 10, needLetter: true, needNumber: true, text: "Use 10 characters or more with a number and a letter." },
+  parent:    { min: 8,  needLetter: false, needNumber: false, text: "Use 8 characters or more." },
+  teacher:   { min: 8,  needLetter: false, needNumber: false, text: "Use 8 characters or more." },
+  responder: { min: 8,  needLetter: false, needNumber: false, text: "Use 8 characters or more." },
+  super_admin: { min: 10, needLetter: true, needNumber: true, text: "Use 10 characters or more with a number and a letter." },
+};
+function policyFor(role) {
+  return ROLE_PASSWORD_POLICY[role] ?? { min: PASSWORD_MIN, needLetter: false, needNumber: false, text: `Use ${PASSWORD_MIN} characters or more.` };
+}
+
+function validatePassword(pw, role) {
   const s = String(pw ?? "");
-  if (s.length < PASSWORD_MIN) return `Password must be at least ${PASSWORD_MIN} characters.`;
+  const pol = policyFor(role);
+  if (s.length < pol.min) return `Password must be at least ${pol.min} characters.`;
   if (s.length > 200) return "Password must be 200 characters or fewer.";
+  if (pol.needLetter && !/[a-zA-Z]/.test(s)) return "Your password must include at least one letter.";
+  if (pol.needNumber && !/[0-9]/.test(s)) return "Your password must include at least one number.";
   if (COMMON_PASSWORDS.has(s.toLowerCase())) return "That password is too common. Please choose a different one.";
   return null;
 }
@@ -876,7 +890,7 @@ export function createApp(opts = {}) {
     if (p === "/api/health" && m === "GET") return send(res, 200, { ok: true, version: store.db.version, uptime: Math.round(process.uptime()) });
 
     if (p === "/api/config" && m === "GET")
-      return send(res, 200, { accessCodeRequired: Boolean(accessCode), demoReset: Boolean(allowReset), passwordMin: PASSWORD_MIN, school: { ...D.SCHOOL, phone: schoolPhone } });
+      return send(res, 200, { accessCodeRequired: Boolean(accessCode), demoReset: Boolean(allowReset), passwordMin: PASSWORD_MIN, passwordPolicy: policyFor("principal").text, school: { ...D.SCHOOL, phone: schoolPhone } });
 
       if (p === "/api/login" && m === "POST") {
       rateLimit(req, "login", 30);
@@ -974,7 +988,7 @@ export function createApp(opts = {}) {
         account.failed = 0;
         account.lockedUntil = 0;
       }
-      const problem = validatePassword(body.password);
+      const problem = validatePassword(body.password, account.role);
       if (problem) throw bad(problem, "weak_password");
       const cred = hashPassword(body.password);
       account.pwSalt = cred.salt;
@@ -992,7 +1006,7 @@ export function createApp(opts = {}) {
 
     if (p === "/api/me" && m === "GET") {
       const { account, user } = authenticate(req, url, p);
-      return send(res, 200, { user, mustChange: Boolean(account.mustChange) });
+      return send(res, 200, { user, mustChange: Boolean(account.mustChange), policy: policyFor(account.role).text });
     }
 
     if (p === "/api/stream" && m === "GET") {
