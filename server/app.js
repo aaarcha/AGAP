@@ -494,6 +494,7 @@ export function createApp(opts = {}) {
       locationRisk: i.locationRisk,
       baseLocationRisk: i.baseLocationRisk,
       timeSensitivity: i.timeSensitivity,
+      tier: D.bandFor(i.score, i.status, i.overrideReasons),
       hazardApplied: D.scoreIncident(i, { hazardActive: store.db.modes.hazard.active, config: cfgFor(i) }).hazardApplied,
       drill: i.drill,
       reporterName: i.reporterName,

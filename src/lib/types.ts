@@ -60,6 +60,8 @@ export interface Incident {
   hazardApplied?: boolean;
   drill?: boolean;
   metrics?: Metrics;
+  /** Urgency band from the server (bandFor): CRITICAL, HIGH, or MODERATE. Never compute on client. */
+  tier?: "CRITICAL" | "HIGH" | "MODERATE";
   locationKind?: "saved" | "area" | "unverified" | "room";
   /** How the final location was established. */
   locationSetBy?: LocationSetBy;

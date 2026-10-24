@@ -88,29 +88,19 @@ export default function App() {
 
   if (user.role === "super_admin") return <AdminConsole />;
 
-  const compact = user.role === "teacher" || user.role === "parent";
   const title = { teacher: "Teacher", principal: "Principal", parent: "Parent/PTA", responder: "Responder" }[user.role];
   const subtitle = user.role === "principal" ? SCHOOL.name : user.role === "responder" ? "Barangay Sinalhan + CDRRMO" : user.subtitle;
 
   return (
     <div className="h-dvh overflow-hidden bg-cream">
       <div className="flex h-full min-h-0 overflow-hidden">
-        {user.role === "principal" && <SideNav tab={pTab} setTab={setPTab} tabs={PRINCIPAL_TABS} subtitle="Principal" />}
-        {user.role === "responder" && <SideNav tab={rTab} setTab={setRTab} tabs={RESPONDER_TABS} subtitle="Responder" />}
-        {(user.role === "teacher" || user.role === "parent") && (
-          <SideNav
-            tab={user.role === "teacher" ? teacherTab : parentTab}
-            setTab={(t: any) => (user.role === "teacher" ? setTeacherTab(t) : setParentTab(t))}
-            tabs={(user.role === "teacher" ? TEACHER_TABS : PARENT_TABS) as any}
-            subtitle={title}
-          />
-        )}
-
+        <SideNav tab={pTab} setTab={setPTab} tabs={PRINCIPAL_TABS} subtitle="Principal" />
+        <SideNav tab={rTab} setTab={setRTab} tabs={RESPONDER_TABS} subtitle="Responder" />
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
           <Header title={title} subtitle={subtitle} />
           <StatusBanner />
           <main className="scroll-area min-h-0 flex-1 overflow-x-hidden pb-24 md:pb-6 lg:pb-0">
-            <div className="mx-auto w-full max-w-6xl lg:h-full lg:min-h-0">
+            <div className="w-full max-w-6xl lg:h-full lg:min-h-0">
               {user.role === "teacher" && (
                 <>
                   {teacherTab === "report" && <ReportView />}
