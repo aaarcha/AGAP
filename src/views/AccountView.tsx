@@ -32,10 +32,21 @@ export default function AccountView() {
 
   const policy = user ? POLICY_PLACEHOLDER[user.role] ?? "Use 8 characters or more." : "Use 8 characters or more.";
   const minLen = user?.role === "principal" || user?.role === "super_admin" ? 10 : 8;
+  const needsComposition = user?.role === "principal" || user?.role === "super_admin";
+
+  function clientSideIssue() {
+    if (next.length < minLen) return policy;
+    if (needsComposition) {
+      if (!/[a-zA-Z]/.test(next)) return "Your password must include at least one letter.";
+      if (!/[0-9]/.test(next)) return "Your password must include at least one number.";
+    }
+    return null;
+  }
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
-    if (next.length < minLen) { setMsg({ ok: false, text: policy }); return; }
+    const issue = clientSideIssue();
+    if (issue) { setMsg({ ok: false, text: issue }); return; }
     setBusy(true); setMsg(null);
     try {
       await changePassword(next, current);
@@ -90,6 +101,18 @@ export default function AccountView() {
           </label>
 
           <p className="text-xs text-slate-500">{policy}</p>
+
+          {needsComposition && next.length > 0 && (
+            <p className="text-xs text-slate-500">
+              {next.length < minLen
+                ? `At least ${minLen - next.length} more character${minLen - next.length === 1 ? "" : "s"}.`
+                : (!/[a-zA-Z]/.test(next)
+                  ? "Add at least one letter."
+                  : !/[0-9]/.test(next)
+                    ? "Add at least one number."
+                    : "")}
+            </p>
+          )}
 
           <label className="block text-xs font-semibold text-slate-600" htmlFor="new-password">
             New password

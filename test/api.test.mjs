@@ -947,6 +947,56 @@ test("voluntary password change failures count toward the account lockout", asyn
   await s.close();
 });
 
+test("principal and super admin must meet the 10-char + letter + number policy; others need only 8 chars", async () => {
+  const s = await boot();
+  const principalTok = await s.login("principal");
+  const teacherTok = await s.login("teacher", "t1");
+  const responderTok = await s.login("responder");
+  const parentTok = await s.login("parent", "Grade 3 - Sec A");
+
+  // Principal: too short
+  assert.equal(
+    (await s.call("POST", "/api/password", { token: principalTok, body: { currentPassword: DEMO_PASSWORD, password: "Abc12345" } })).status,
+    400,
+    "principal rejects 8-char password");
+  assert.equal(
+    (await s.call("POST", "/api/password", { token: principalTok, body: { currentPassword: DEMO_PASSWORD, password: "abcdefghij" } })).status,
+    400,
+    "principal rejects letter-only password");
+  assert.equal(
+    (await s.call("POST", "/api/password", { token: principalTok, body: { currentPassword: DEMO_PASSWORD, password: "1234567890" } })).status,
+    400,
+    "principal rejects number-only password");
+  assert.equal(
+    (await s.call("POST", "/api/password", { token: principalTok, body: { currentPassword: DEMO_PASSWORD, password: "Principal-2026" } })).status,
+    200,
+    "principal accepts 10+ char password with letter and number");
+
+  // Teacher: 8 chars is fine, no composition required
+  assert.equal(
+    (await s.call("POST", "/api/password", { token: teacherTok, body: { currentPassword: DEMO_PASSWORD, password: "MsReyes26" } })).status,
+    200,
+    "teacher accepts 8-char password with letter and number (no composition rule)");
+  assert.equal(
+    (await s.call("POST", "/api/password", { token: teacherTok, body: { currentPassword: "MsReyes26", password: "abcdefgh" } })).status,
+    200,
+    "teacher accepts letter-only 8-char password");
+
+  // Responder: same as teacher
+  assert.equal(
+    (await s.call("POST", "/api/password", { token: responderTok, body: { currentPassword: DEMO_PASSWORD, password: "Barangay26" } })).status,
+    200,
+    "responder accepts 8-char password");
+
+  // Parent: same as teacher
+  assert.equal(
+    (await s.call("POST", "/api/password", { token: parentTok, body: { currentPassword: DEMO_PASSWORD, password: "PTA2026Sec3" } })).status,
+    200,
+    "parent accepts 8-char password");
+
+  await s.close();
+});
+
 test("idle timeout is role-based: short for principal/super admin, long for teachers, refreshed by activity", async () => {
   let t = Date.now();
   const s = await boot({ now: () => t });
