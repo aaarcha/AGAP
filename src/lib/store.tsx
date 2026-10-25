@@ -1,5 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { api, ApiError, clearToken, getToken, setToken } from "./api";
+import { POLICY_TEXT } from "./password";
 import { notificationsSupported, showSystemNotification } from "./pwa";
 import { STATUS_LABEL } from "../../shared/domain.js";
 import { ESCALATION_TIERS, HAZARD_KINDS } from "../../shared/domain.js";
@@ -41,7 +42,7 @@ interface Ctx {
   enableNotifications: () => Promise<void>;
   /** true while the signed-in account must set a new password (first sign-in / yearly rollover) */
   mustChange: boolean;
-  /** Role-specific password policy text from the server. */
+  /** The shared password policy text from the server. */
   passwordPolicy: string;
   login: (email: string, password: string, code?: string) => Promise<boolean>;
   changePassword: (password: string, currentPassword?: string) => Promise<void>;
@@ -99,7 +100,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     notificationsSupported() ? Notification.permission : "unsupported",
   );
   const [mustChange, setMustChange] = useState(false);
-  const [passwordPolicy, setPasswordPolicy] = useState("Use 8 characters or more.");
+  const [passwordPolicy, setPasswordPolicy] = useState(POLICY_TEXT);
 
   const offset = useRef(0);
   const reqSeq = useRef(0);
@@ -250,7 +251,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     setToken(r.token);
     setUser(r.user);
     setMustChange(Boolean(r.mustChange));
-    setPasswordPolicy((r as any).passwordPolicy ?? "Use 8 characters or more.");
+    setPasswordPolicy((r as any).passwordPolicy ?? POLICY_TEXT);
     if (!r.mustChange) await refresh();
     return Boolean(r.mustChange);
   }, [refresh, resetLocal]);

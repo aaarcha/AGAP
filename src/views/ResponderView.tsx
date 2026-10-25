@@ -1,17 +1,21 @@
 import { useMemo } from "react";
 import { useMediaQuery } from "../lib/hooks";
-import { BookOpen, Check, History, Radio, User } from "lucide-react";
+import { Check } from "lucide-react";
 import { STATUS_LABEL, bandFor } from "../../shared/domain.js";
 import { useApp } from "../lib/store";
 import type { Incident } from "../lib/types";
 import { BAND_STYLE, catTheme } from "../lib/theme";
 import { EscalationTable, IncidentCard } from "../components/Incident";
 import { MasterDetail } from "../components/MasterDetail";
+import { sortQueue } from "../lib/command";
 import HistorySection from "../components/History";
 import { RouteControl } from "../components/Rules";
 import AccountView from "./AccountView";
+import type { ResponderTab } from "../lib/navigation";
 
-function QueueRow({ inc, active }: { inc: Incident; active: boolean }) {
+export type { ResponderTab };
+
+export function QueueRow({ inc, active }: { inc: Incident; active: boolean }) {
   const ct = catTheme(inc.category);
   const band = bandFor(inc.score, inc.status, inc.overrideReasons);
   const bs = BAND_STYLE[band];
@@ -35,10 +39,7 @@ function QueueRow({ inc, active }: { inc: Incident; active: boolean }) {
 export function IncidentQueue({ incidents, title, empty }: { incidents: Incident[]; title: string; empty: string }) {
   // Real emergencies first, then critical overrides, then by urgency, then oldest first.
   const active = useMemo(
-    () => incidents.filter((i) => i.status !== "RESOLVED").sort((a, b) =>
-      Number(Boolean(a.drill)) - Number(Boolean(b.drill)) ||
-      Number(b.overrideReasons.length > 0) - Number(a.overrideReasons.length > 0) ||
-      b.score - a.score || a.createdAt - b.createdAt),
+    () => sortQueue(incidents.filter((i) => i.status !== "RESOLVED")),
     [incidents],
   );
   return (
@@ -64,15 +65,6 @@ export function IncidentQueue({ incidents, title, empty }: { incidents: Incident
     </section>
   );
 }
-
-export const RESPONDER_TABS = [
-  { id: "queue" as const, label: "Queue", icon: Radio },
-  { id: "history" as const, label: "History", icon: History },
-  { id: "ref" as const, label: "Escalation", icon: BookOpen },
-  { id: "account" as const, label: "Account", icon: User },
-];
-
-export type ResponderTab = (typeof RESPONDER_TABS)[number]["id"];
 
 export default function ResponderView({ tab }: { tab: ResponderTab }) {
   const wide = useMediaQuery("screen and (min-width: 1024px)");

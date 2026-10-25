@@ -6,6 +6,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { createStore } from "../server/store.js";
+import { validatePassword } from "../shared/password.js";
 
 if (process.env.NODE_ENV === "production") {
   console.error("seed:dev refuses to run in NODE_ENV=production");
@@ -26,12 +27,13 @@ function hashPassword(pw) {
 const normEmail = (v) => String(v ?? "").trim().toLowerCase();
 const slugify = (s) => String(s).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
 
+// Every dev credential obeys the same password policy as production accounts.
 const PASSWORD = {
-  teacher: "DevTeacher-2026!",
-  principal: "DevPrincipal-2026!",
-  responder: "DevResponder-2026!",
-  parent: "DevParent-2026!",
-  super_admin: "DevSuperAdmin-2026!",
+  teacher: "Dev-Staff-2026!",
+  principal: "Dev-Head-2026!",
+  responder: "Dev-Brgy-2026!",
+  parent: "Dev-Guardian-2026!",
+  super_admin: "Dev-Console-2026!",
 };
 
 const db = store.db;
@@ -70,6 +72,14 @@ targets.push(
   { role: "parent", email: normEmail(`parent-${slugify(parentSection)}@sinalhanes.deped.ph`), name: "Dev Parent", section: parentSection, password: PASSWORD.parent },
   { role: "super_admin", email: normEmail("superadmin@sinalhanes.deped.ph"), name: "Dev Super Admin", id: "super-admin-dev", password: PASSWORD.super_admin },
 );
+
+for (const t of targets) {
+  const problem = validatePassword(t.password, { email: t.email, name: t.name });
+  if (problem) {
+    console.error(`seed:dev password for ${t.role} (${t.email}) is not policy-compliant: ${problem}`);
+    process.exit(1);
+  }
+}
 
 const results = [];
 

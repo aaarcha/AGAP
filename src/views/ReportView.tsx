@@ -5,7 +5,6 @@ import {
   MapPin,
   RefreshCw,
   Search,
-  Settings,
   ShieldAlert,
   Siren,
   Waves,
@@ -29,7 +28,7 @@ import { useApp } from "../lib/store";
 import { catTheme } from "../lib/theme";
 import { locationSetByLabel } from "../lib/format";
 import type { Incident, ReportPayload } from "../lib/types";
-import { ConfirmModal, Modal } from "../components/Modal";
+import { ConfirmModal } from "../components/Modal";
 import { WaitingLine } from "../components/Incident";
 import { HeadcountPanel, RuleBadges } from "../components/Rules";
 import { CampusPicker, type DetectedPlace, type PickedPlace } from "../components/CampusPicker";
@@ -46,13 +45,12 @@ const CAT_ICON: Record<string, React.ElementType> = {
 const POOR_ACCURACY_METERS = 100;
 const ROOM_MATCH_UNITS = 3;
 
-function LocationCard({ headline, caption, how, failed, onChange, onProfile, onRecheck }: {
+function LocationCard({ headline, caption, how, failed, onChange, onRecheck }: {
   headline: string;
   caption: string;
   how: string;
   failed: boolean;
   onChange: () => void;
-  onProfile?: () => void;
   onRecheck: () => void;
 }) {
   return (
@@ -76,15 +74,6 @@ function LocationCard({ headline, caption, how, failed, onChange, onProfile, onR
           >
             Change location
           </button>
-          {onProfile && (
-            <button
-              onClick={onProfile}
-              aria-label="Edit profile and default room"
-              className="flex min-h-12 items-center justify-center rounded-xl bg-slate-100 px-3 text-slate-600"
-            >
-              <Settings size={16} />
-            </button>
-          )}
         </div>
       </div>
       {failed && (
@@ -204,7 +193,6 @@ export default function ReportView() {
   const [query, setQuery] = useState("");
   const [section, setSection] = useState("");
   const [moreOpen, setMoreOpen] = useState(false);
-  const [modal, setModal] = useState<"profile" | null>(null);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [confirmCancel, setConfirmCancel] = useState(false);
   const [notice, setNotice] = useState<Notice>(null);
@@ -576,7 +564,6 @@ export default function ReportView() {
               how={location.how}
               failed={gps === "failed"}
               onChange={() => setPickerOpen(true)}
-              onProfile={isTeacher ? () => setModal("profile") : undefined}
               onRecheck={checkLocation}
             />
           </div>
@@ -907,7 +894,6 @@ export default function ReportView() {
             how={location.how}
             failed={gps === "failed"}
             onChange={() => setPickerOpen(true)}
-            onProfile={isTeacher ? () => setModal("profile") : undefined}
             onRecheck={checkLocation}
           />
           <SendPanel
@@ -948,12 +934,6 @@ export default function ReportView() {
           </div>
         </div>
       )}
-      {modal === "profile" && (
-        <div>
-          <ProfileModal onClose={() => setModal(null)} />
-        </div>
-      )}
-
       {pickerOpen && (
         <div>
           <CampusPicker
@@ -1102,92 +1082,3 @@ function ResponsivePopulationGrid({
   );
 }
 
-
-function ProfileModal({ onClose }: { onClose: () => void }) {
-  const { user, saveProfile } = useApp();
-  const [name, setName] = useState(user!.name);
-  const [section, setSection] = useState(user!.section ?? "");
-  const [room, setRoom] = useState(user!.room ?? "");
-  const [registry, setRegistry] = useState(String(user!.registry ?? ""));
-  const [err, setErr] = useState("");
-  const [busy, setBusy] = useState(false);
-
-  async function save() {
-    setBusy(true);
-    setErr("");
-    try {
-      await saveProfile({
-        name,
-        section,
-        room,
-        ...(registry !== ""
-          ? { registry: Number(registry) }
-          : {}),
-      });
-      onClose();
-    } catch (e) {
-      setErr(
-        e instanceof Error ? e.message : "Could not save."
-      );
-      setBusy(false);
-    }
-  }
-
-  const fields: [string, string, (v: string) => void, string][] = [
-    ["Name", name, setName, "Ms. Reyes"],
-    [
-      "Grade / Section",
-      section,
-      setSection,
-      "Grade 3 - Sec A",
-    ],
-    ["Default Room", room, setRoom, "Bldg A | Flr 2 | Rm 204"],
-    [
-      "Today's registry (number of pupils)",
-      registry,
-      (v: string) =>
-        setRegistry(v.replace(/\D/g, "").slice(0, 3)),
-      "28",
-    ],
-  ];
-
-  return (
-    <Modal title="Edit Profile / Room" onClose={onClose}>
-      <div className="space-y-3">
-        {fields.map(([label, val, set, ph]) => (
-          <div key={label}>
-            <label className="text-xs font-semibold text-slate-600">
-              {label}
-              <input
-                value={val}
-                onChange={(e) => set(e.target.value)}
-                placeholder={ph}
-                className="mt-1 min-h-12 w-full rounded-xl border border-slate-300 px-3 text-base font-normal outline-none focus:border-brand-500"
-              />
-            </label>
-          </div>
-        ))}
-        {err && (
-          <p role="alert" className="text-sm text-blush-700">
-            {err}
-          </p>
-        )}
-        <p className="text-xs text-slate-500">
-          Registry = pupils expected today. It is the baseline for the
-          headcount.
-        </p>
-        <p className="text-xs text-slate-500">
-          To pick the classroom from the campus map, use “Change location”
-          on the report screen.
-        </p>
-        <button
-          onClick={() => void save()}
-          disabled={busy}
-          className="min-h-12 w-full rounded-xl bg-brand-600 font-bold text-white disabled:opacity-60"
-        >
-          {busy ? "Saving…" : "Save Changes"}
-        </button>
-      </div>
-    </Modal>
-  );
-}

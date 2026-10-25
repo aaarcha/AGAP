@@ -11,6 +11,7 @@ import * as D from "../shared/domain.js";
 import * as C from "../shared/campus.js";
 import { createStore } from "./store.js";
 import { createConfigService, ConfigError } from "./config.js";
+import { validatePassword, POLICY_TEXT, PASSWORD_MIN, tempPasswordFromBytes } from "../shared/password.js";
 
 class HttpError extends Error {
   constructor(status, code, message, details = null) {
@@ -45,56 +46,24 @@ const PRINCIPAL_ROOM = D.PRINCIPAL_ROOM;
 // Demo-mode credentials – only seeded when SEED_DEMO_INCIDENT / SEED_DEMO_ACCOUNTS is on.
 export const DEMO_PASSWORD = "Sinalhan-Demo-2026!";
 export const DEMO_ADMIN_EMAIL = "admin@sinalhanes.deped.ph";
-export const DEMO_ADMIN_PASSWORD = "Aspire-Admin-2026!";
 
 const ACCOUNT_ROLES = new Set(["teacher", "principal", "responder", "parent", "super_admin"]);
 const ADMIN_ROLES = new Set(["super_admin", "principal"]); // role-based idle timeout: short for admins
-const PASSWORD_MIN = 8;
-
-// No composition rules (letters+digits+symbols are NOT required) – just length and
-// a blocklist of the passwords that get tried first anyway.
-const COMMON_PASSWORDS = new Set([
-  "password", "password1", "password12", "password123", "12345678", "123456789", "1234567890", "qwerty", "qwerty123",
-  "qwertyuiop", "letmein", "letmein123", "welcome", "welcome1", "admin", "admin123", "iloveyou", "iloveyou1",
-  "monkey", "dragon", "dragon123", "football", "baseball", "abc123", "passw0rd", "p@ssw0rd", "master",
-  "sunshine", "princess", "trustno1", "superman", "michael", "shadow", "11111111", "00000000", "aa123456",
-  "asdfgh", "asdfghjkl", "zxcvbn", "qazwsx", "changeme", "temp1234", "test1234", "school123", "teacher1",
-  "deped123", "sinalhan", "blanket", "flower", "chocolate", "internet",
-]);
-
 const normEmail = (v) => String(v ?? "").trim().toLowerCase();
 const emailOk = (e) => e.length <= 160 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e);
 const slugify = (s) => String(s).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
 
-const ROLE_PASSWORD_POLICY = {
-  principal:  { min: 10, needLetter: true, needNumber: true, text: "Use 10 characters or more with a number and a letter." },
-  parent:    { min: 8,  needLetter: false, needNumber: false, text: "Use 8 characters or more." },
-  teacher:   { min: 8,  needLetter: false, needNumber: false, text: "Use 8 characters or more." },
-  responder: { min: 8,  needLetter: false, needNumber: false, text: "Use 8 characters or more." },
-  super_admin: { min: 10, needLetter: true, needNumber: true, text: "Use 10 characters or more with a number and a letter." },
-};
-function policyFor(role) {
-  return ROLE_PASSWORD_POLICY[role] ?? { min: PASSWORD_MIN, needLetter: false, needNumber: false, text: `Use ${PASSWORD_MIN} characters or more.` };
-}
+const passwordProblem = (pw, account = {}) => validatePassword(String(pw ?? ""), account);
 
-function validatePassword(pw, role) {
-  const s = String(pw ?? "");
-  const pol = policyFor(role);
-  if (s.length < pol.min) return `Password must be at least ${pol.min} characters.`;
-  if (s.length > 200) return "Password must be 200 characters or fewer.";
-  if (pol.needLetter && !/[a-zA-Z]/.test(s)) return "Your password must include at least one letter.";
-  if (pol.needNumber && !/[0-9]/.test(s)) return "Your password must include at least one number.";
-  if (COMMON_PASSWORDS.has(s.toLowerCase())) return "That password is too common. Please choose a different one.";
-  return null;
-}
-
-const TEMP_ALPHABET = "abcdefghjkmnpqrstuvwxyz23456789";
-function makeTempPassword() {
-  // Per-account temporary credential (readable, ≥20 chars) – always flagged must-change at first sign-in.
-  const bytes = crypto.randomBytes(20);
-  let out = "";
-  for (let i = 0; i < 20; i++) out += TEMP_ALPHABET[bytes[i] % TEMP_ALPHABET.length];
-  return `${out.slice(0, 5)}-${out.slice(5, 10)}-${out.slice(10, 15)}-${out.slice(15, 20)}`;
+// Per-account temporary credential (readable, ≥20 chars) – always flagged must-change at
+// first sign-in. The generator satisfies the shared policy by construction; the loop only
+// guards the account-specific rules (email local-part / account name).
+function makeTempPassword(account = {}) {
+  for (let i = 0; i < 50; i++) {
+    const pw = tempPasswordFromBytes(crypto.randomBytes(48));
+    if (!passwordProblem(pw, account)) return pw;
+  }
+  throw new Error("Could not generate a policy-compliant temporary password.");
 }
 
 export function createApp(opts = {}) {
@@ -872,10 +841,13 @@ export function createApp(opts = {}) {
   if (seedDemoAccounts) seedDemoAccountsFn();
 
   // First Super Admin: created once from the environment (one-time bootstrap).
-  // The password must be changed at first sign-in; it is never written to the audit log.
+  // The bootstrap password obeys the same policy as every other account and must be
+  // changed at first sign-in; it is never written to the audit log.
   if (superAdminEmail && superAdminPassword) {
     const email = normEmail(superAdminEmail);
+    const problem = passwordProblem(superAdminPassword, { email, name: "Super Admin" });
     if (!emailOk(email)) log("ASPIRE_SUPER_ADMIN_EMAIL is not a valid email – no Super Admin account created.");
+    else if (problem) log(`ASPIRE_SUPER_ADMIN_PASSWORD does not meet the password policy (${problem}) – no Super Admin account created.`);
     else if (!findAccount(email)) {
       newAccount({ email, role: "super_admin", name: "Super Admin", password: superAdminPassword, mustChange: true, id: "super-admin" });
       audit("account_created", { by: "bootstrap", target: email, detail: "initial Super Admin (env bootstrap)" });
@@ -891,9 +863,9 @@ export function createApp(opts = {}) {
     if (p === "/api/health" && m === "GET") return send(res, 200, { ok: true, version: store.db.version, uptime: Math.round(process.uptime()) });
 
     if (p === "/api/config" && m === "GET")
-      return send(res, 200, { accessCodeRequired: Boolean(accessCode), demoReset: Boolean(allowReset), passwordMin: PASSWORD_MIN, passwordPolicy: policyFor("principal").text, school: { ...D.SCHOOL, phone: schoolPhone } });
+      return send(res, 200, { accessCodeRequired: Boolean(accessCode), demoReset: Boolean(allowReset), passwordMin: PASSWORD_MIN, passwordPolicy: POLICY_TEXT, school: { ...D.SCHOOL, phone: schoolPhone } });
 
-      if (p === "/api/login" && m === "POST") {
+    if (p === "/api/login" && m === "POST") {
       rateLimit(req, "login", 30);
       const body = await readJson(req);
       const email = normEmail(body.email);
@@ -989,8 +961,11 @@ export function createApp(opts = {}) {
         account.failed = 0;
         account.lockedUntil = 0;
       }
-      const problem = validatePassword(body.password, account.role);
+      const problem = passwordProblem(body.password, account);
       if (problem) throw bad(problem, "weak_password");
+      // "Must differ from the current password" is only provable against the stored hash.
+      if (account.pwHash && checkPassword(String(body.password ?? ""), account.pwSalt, account.pwHash))
+        throw bad("Your new password must be different from your current password.", "weak_password");
       const cred = hashPassword(body.password);
       account.pwSalt = cred.salt;
       account.pwHash = cred.hash;
@@ -1007,7 +982,7 @@ export function createApp(opts = {}) {
 
     if (p === "/api/me" && m === "GET") {
       const { account, user } = authenticate(req, url, p);
-      return send(res, 200, { user, mustChange: Boolean(account.mustChange), policy: policyFor(account.role).text });
+      return send(res, 200, { user, mustChange: Boolean(account.mustChange), policy: POLICY_TEXT });
     }
 
     if (p === "/api/stream" && m === "GET") {
@@ -1058,8 +1033,8 @@ export function createApp(opts = {}) {
       let password = body.password === undefined || body.password === null || body.password === "" ? "" : String(body.password);
       let temp = false;
       let mustChange = false;
-      if (!password) { password = makeTempPassword(); temp = true; mustChange = true; }
-      else { const problem = validatePassword(password); if (problem) throw bad(problem, "weak_password"); }
+      if (!password) { password = makeTempPassword({ email, name }); temp = true; mustChange = true; }
+      else { const problem = passwordProblem(password, { email, name }); if (problem) throw bad(problem, "weak_password"); }
 
       let teacherId = null;
       if (role === "teacher") {
@@ -1085,7 +1060,7 @@ export function createApp(opts = {}) {
       const action = mact[2];
       const t = now();
       if (action === "reset-password") {
-        const pw = makeTempPassword();
+        const pw = makeTempPassword(acc);
         const cred = hashPassword(pw);
             acc.pwSalt = cred.salt;
             acc.pwHash = cred.hash;
@@ -1140,7 +1115,7 @@ export function createApp(opts = {}) {
       const issued = [];
       for (const acc of store.db.accounts) {
         if (acc.role === "super_admin") continue; // admins are not rolled over
-        const pw = makeTempPassword();
+        const pw = makeTempPassword(acc);
         const cred = hashPassword(pw);
         acc.pwSalt = cred.salt; acc.pwHash = cred.hash;
         acc.mustChange = true; acc.temp = true; acc.failed = 0; acc.lockedUntil = 0;
@@ -1413,7 +1388,7 @@ export function createApp(opts = {}) {
       store.db.roster.push(entry);
       // No self-registration: creating a roster row also provisions its sign-in account.
       const email = `${entry.id}@sinalhanes.deped.ph`;
-      const tempPassword = makeTempPassword();
+      const tempPassword = makeTempPassword({ email, name: entry.name });
       const acc = newAccount({ email, role: "teacher", name: entry.name, password: tempPassword, mustChange: true, temp: true, teacherId: entry.id, section: entry.section });
       store.save();
       audit("account_created", { by: user.email, target: email, detail: "teacher (via roster)", req });

@@ -3,12 +3,12 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { createApp, DEMO_PASSWORD, DEMO_ADMIN_EMAIL, DEMO_ADMIN_PASSWORD } from "../server/app.js";
+import { createApp, DEMO_PASSWORD, DEMO_ADMIN_EMAIL } from "../server/app.js";
 import { computeScore } from "../shared/domain.js";
 
 const ADMIN_EMAIL = DEMO_ADMIN_EMAIL;
-const ADMIN_PASSWORD = "Sinalhan-Admin-2026!";
-const ADMIN_BOOTSTRAP_PASSWORD = DEMO_ADMIN_PASSWORD;
+const ADMIN_PASSWORD = "Sinalhan-SchoolHead-2026!";
+const ADMIN_BOOTSTRAP_PASSWORD = "Aspire-Bootstrap-2026!";
 
 // Close every server the tests open, even when an assertion fails mid-test.
 const openApps = [];
@@ -20,7 +20,7 @@ async function boot(opts = {}) {
     seedDemoAccounts: true,
     scryptN: 1024, // real scrypt, fast in tests
     superAdminEmail: ADMIN_EMAIL,
-    superAdminPassword: DEMO_ADMIN_PASSWORD,
+    superAdminPassword: ADMIN_BOOTSTRAP_PASSWORD,
     autoTick: false,
     ...opts,
   });

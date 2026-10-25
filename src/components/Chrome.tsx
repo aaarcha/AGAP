@@ -1,8 +1,11 @@
-import type { ElementType, ReactNode } from "react";
+import type { ReactNode } from "react";
 import { Bell, Download, X, WifiOff } from "lucide-react";
 import { HAZARD_KINDS } from "../../shared/domain.js";
 import { useApp } from "../lib/store";
 import { usePwaInstall } from "../lib/pwa";
+import type { NavTab } from "../lib/navigation";
+
+export type { NavTab };
 
 export function Header({ title, subtitle }: { title: string; subtitle?: string }) {
   const { user, notifPermission, enableNotifications } = useApp();
@@ -109,8 +112,6 @@ export function AlertToasts() {
   );
 }
 
-export type NavTab<T extends string> = { id: T; label: string; icon: ElementType };
-
 function navButton<T extends string>(t: NavTab<T>, tab: T, setTab: (t: T) => void, layout: "bottom" | "side"): ReactNode {
   const Icon = t.icon;
   const active = tab === t.id;
@@ -125,8 +126,10 @@ function navButton<T extends string>(t: NavTab<T>, tab: T, setTab: (t: T) => voi
   }
   return (
     <button key={t.id} onClick={() => setTab(t.id)} aria-current={active ? "page" : undefined}
-      className={`flex min-h-12 w-full items-center gap-3 rounded-xl px-3 text-sm font-bold ${active ? "bg-white/15 text-white" : "text-white/70 hover:bg-white/10"}`}>
-      <Icon size={18} /> {t.label}
+      aria-label={t.label} title={t.label}
+      className={`flex min-h-12 w-full items-center justify-center gap-3 rounded-xl px-3 text-sm font-bold lg:justify-start ${active ? "bg-white/15 text-white" : "text-white/70 hover:bg-white/10"}`}>
+      <Icon size={18} className="shrink-0" />
+      <span className="hidden lg:inline">{t.label}</span>
     </button>
   );
 }
@@ -146,10 +149,12 @@ export function SideNav<T extends string>({ tab, setTab, tabs, subtitle }: {
   tab: T; setTab: (t: T) => void; tabs: NavTab<T>[]; subtitle?: string;
 }) {
   return (
-    <aside className="scroll-area sticky top-0 hidden h-dvh w-60 shrink-0 flex-col bg-brand-900 text-white md:flex">
-      <div className="flex h-16 items-center gap-2.5 border-b border-white/10 px-4">
-        <img src="/icons/logo-256.png" alt="" className="h-9 w-9 rounded-lg bg-cream object-contain p-0.5" width={36} height={36} />
-        <div className="min-w-0">
+    // Hidden below 768px (the bottom nav takes over); 72px icon-only rail on
+    // tablets and the full 240px rail from 1024px up.
+    <aside className="scroll-area sticky top-0 hidden h-dvh w-[72px] shrink-0 flex-col bg-brand-900 text-white md:flex lg:w-60">
+      <div className="flex h-16 items-center justify-center gap-2.5 border-b border-white/10 px-2 lg:justify-start lg:px-4">
+        <img src="/icons/logo-256.png" alt="" className="h-9 w-9 shrink-0 rounded-lg bg-cream object-contain p-0.5" width={36} height={36} />
+        <div className="hidden min-w-0 lg:block">
           <p className="truncate text-sm font-black tracking-tight">ASPIRE</p>
           {subtitle && <p className="truncate text-[11px] text-white/70">{subtitle}</p>}
         </div>

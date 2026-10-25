@@ -1,17 +1,5 @@
-import { useMemo, useState, type ReactNode, useCallback } from "react";
-import {
-  ChevronRight,
-  ClipboardList,
-  History as HistoryIcon,
-  Info,
-  Menu,
-  ShieldAlert,
-  Siren,
-  User,
-  Users,
-  MapPin,
-  Building2,
-} from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode, type RefObject } from "react";
+import { ArrowLeft, Building2, ChevronRight, Info, MapPin, User, Users } from "lucide-react";
 import { useApp } from "../lib/store";
 import { startOfToday } from "../lib/format";
 import HistorySection from "../components/History";
@@ -20,358 +8,501 @@ import RosterPanel from "./RosterPanel";
 import SafetyView from "./SafetyView";
 import AccountView from "./AccountView";
 import AboutView from "./AboutView";
-import { IncidentQueue } from "./ResponderView";
+import { QueueRow } from "./ResponderView";
 import { IncidentCard } from "../components/Incident";
-import { CAMPUS_BUILDINGS, CAMPUS_COMMON_AREAS, featureLabel, roomById } from "../../shared/campus.js";
-import type { Incident } from "../lib/types";
-import { Modal } from "../components/Modal";
-import { fmtMs } from "../lib/format";
+import { SchoolMap, type RoomMarker } from "../components/SchoolMap";
+import { CAMPUS_BUILDINGS } from "../../shared/campus.js";
 import { useMediaQuery } from "../lib/hooks";
+import {
+  activeIncidents,
+  commandCounts,
+  countOnFloor,
+  floorHints,
+  pinsForCommonAreas,
+  pinsForFloor,
+  sortQueue,
+  useIncidentSelection,
+  type CommandPlace,
+} from "../lib/command";
+import type { Incident } from "../lib/types";
+import type { PrincipalTab } from "../lib/navigation";
 
-export const PRINCIPAL_TABS = [
-  { id: "command" as const, label: "Command", icon: ClipboardList },
-  { id: "report" as const, label: "Report", icon: Siren },
-  { id: "safety" as const, label: "Safety", icon: ShieldAlert },
-  { id: "history" as const, label: "History", icon: HistoryIcon },
-  { id: "more" as const, label: "More", icon: Menu },
-];
-export type PrincipalTab = (typeof PRINCIPAL_TABS)[number]["id"];
+export type { PrincipalTab };
+
+const EMPTY_QUEUE = "No active incidents.";
+
+/* ------------------------------------------------------------------ stats */
 
 function Stat({ value, label, tone }: { value: string | number; label: string; tone: string }) {
   return (
-    <div className="rounded-2xl border border-slate-200 bg-white p-3 text-center">
+    <div className="min-w-0 rounded-2xl border border-slate-200 bg-white p-3 text-center">
       <p className={`font-mono text-2xl font-extrabold leading-none ${tone}`}>{value}</p>
-      <p className="mt-1.5 text-xs text-slate-500">{label}</p>
+      <p className="mt-1.5 truncate text-xs text-slate-500">{label}</p>
     </div>
   );
 }
 
-function Command() {
-  // Read everything at the top, never inside JSX conditionals.
-  const { incidents, roster, now } = useApp();
-  const active = incidents.filter((i) => i.status !== "RESOLVED" && !i.drill).length;
-  const critical = incidents.filter((i) => i.status !== "RESOLVED" && !i.drill && i.overrideReasons.length > 0).length;
-  const today = incidents.filter((i) => !i.drill && i.createdAt >= startOfToday(now)).reduce((n, i) => n + i.confirmedBy, 0);
-  const staff = roster.filter((r) => r.status === "active").length;
-
-  // Active (non-resolved, non-drill) incidents only.
-  const activeIncidents = useMemo(
-    () => incidents.filter((i) => i.status !== "RESOLVED" && !i.drill),
-    [incidents],
-  );
-
-  // Floor counts from the room label stored on the incident (e.g. "Bldg A | Flr 2 | Rm 204").
-  const incidentsByFloor = useMemo(() => {
-    const counts: Record<string, number> = {};
-    for (const inc of activeIncidents) {
-      if (!inc.room) continue;
-      const m = inc.room.match(/Flr\s*(\d+)/i);
-      if (m) counts[m[1]] = (counts[m[1]] || 0) + 1;
-    }
-    return counts;
-  }, [activeIncidents]);
-
-  // Building ⇒ floor list from campus.js, plus per-floor incident counts.
-  const buildings = CAMPUS_BUILDINGS;
-
-  // Common areas from campus.js.
-  const commonAreas = CAMPUS_COMMON_AREAS;
-
-  // Hints: when the selected floor has fewer incidents than another floor that has some.
-  const [selectedBuildingId, setSelectedBuildingId] = useState<string>(buildings[0].id);
-  const [selectedFloor, setSelectedFloor] = useState<number>(buildings[0].floors[0].floor);
-
-  const currentBuilding = buildings.find((b) => b.id === selectedBuildingId) ?? buildings[0];
-  const currentFloor = currentBuilding.floors.find((f) => f.floor === selectedFloor) ?? currentBuilding.floors[0];
-  const currentFloorCount = incidentsByFloor[String(selectedFloor)] || 0;
-
-  // Hints for other floors that have incidents.
-  const floorHints = useMemo(() => {
-    const hints: string[] = [];
-    for (const b of buildings) {
-      for (const f of b.floors) {
-        if (f.floor === selectedFloor && b.id === selectedBuildingId) continue;
-        const count = incidentsByFloor[String(f.floor)] || 0;
-        if (count > 0) {
-          hints.push(`${count} more on ${b.label} Floor ${f.floor}`);
-        }
-      }
-    }
-    // Also hint at common-area incidents.
-    const commonCount = activeIncidents.filter((i) => {
-      if (!i.room) return false;
-      return commonAreas.some((a) => i.room.includes(a.label) || i.room.includes(a.id));
-    }).length;
-    if (commonCount > 0) hints.push(`${commonCount} at common areas`);
-    return hints;
-  }, [activeIncidents, incidentsByFloor, selectedBuildingId, selectedFloor, buildings, commonAreas]);
-
-  // The selected incident (from pin tap) — opens its details.
-  const [selectedInc, setSelectedInc] = useState<Incident | null>(null);
-
-  function openDetails(inc: Incident) {
-    setSelectedInc(inc);
-  }
-  function closeDetails() { setSelectedInc(null); }
-
-  // Phone: List/Map toggle. Wide (>= 1024): Details | Map segmented control.
-  const wide = useMediaQuery("screen and (min-width: 1024px)");
-  const [view, setView] = useState<"list" | "map">("list");
-
+function StatsStrip({ active, critical, today, staff }: { active: number; critical: number; today: number; staff: number }) {
   return (
-    <div className="mx-auto flex w-full flex-col gap-3 px-3 py-3 lg:h-full lg:min-h-0">
-      <div className="grid shrink-0 grid-cols-3 gap-2">
-        <Stat value={active} label={critical ? `Active · ${critical} critical` : "Active incidents"} tone="text-brand-600" />
-        <Stat value={today} label="Reports today" tone="text-slate-700" />
-        <Stat value={staff} label="Active staff" tone="text-emerald-600" />
-      </div>
+    <div className="grid shrink-0 grid-cols-3 gap-2">
+      <Stat value={active} label={critical ? `Active · ${critical} critical` : "Active incidents"} tone="text-brand-600" />
+      <Stat value={today} label="Reports today" tone="text-slate-700" />
+      <Stat value={staff} label="Active staff" tone="text-emerald-600" />
+    </div>
+  );
+}
 
-      {/* Main area: queue + map panel */}
-      <div className="lg:min-h-0 lg:flex-1 lg:flex lg:gap-3">
-        {/* Left: incident queue */}
-        <div className="lg:flex-1 min-w-0">
-          <IncidentQueue incidents={incidents} title="Active incident command queue" empty="No active incidents." />
-        </div>
+/* ------------------------------------------------------------------ layout */
 
-        {/* Right: Details | Map (wide) or List | Map toggle (phone) */}
-        <div className="lg:w-320 shrink-0 bg-white rounded-xl border border-slate-200 p-4 mt-3 lg:mt-0 flex flex-col">
-          {/* View toggle */}
-          {wide ? (
-            <div className="flex items-center gap-2 border-b border-slate-200 pb-2 mb-3">
-              <button
-                onClick={() => setView("list")}
-                className={`flex-1 min-h-10 rounded-lg px-3 text-xs font-bold transition-colors ${view === "list" ? "bg-brand-100 text-brand-800" : "text-slate-600 hover:bg-slate-50"}`}
-              >
-                Details
-              </button>
-              <button
-                onClick={() => setView("map")}
-                className={`flex-1 min-h-10 rounded-lg px-3 text-xs font-bold transition-colors ${view === "map" ? "bg-brand-100 text-brand-800" : "text-slate-600 hover:bg-slate-50"}`}
-              >
-                Map
-              </button>
-            </div>
-          ) : (
-            <div className="flex items-center gap-2 mb-3">
-              <button
-                onClick={() => setView("list")}
-                className={`flex-1 min-h-10 rounded-lg px-3 text-xs font-bold transition-colors ${view === "list" ? "bg-brand-100 text-brand-800" : "text-slate-600 hover:bg-slate-50"}`}
-              >
-                List
-              </button>
-              <button
-                onClick={() => setView("map")}
-                className={`flex-1 min-h-10 rounded-lg px-3 text-xs font-bold transition-colors ${view === "map" ? "bg-brand-100 text-brand-800" : "text-slate-600 hover:bg-slate-50"}`}
-              >
-                Map
-              </button>
-            </div>
-          )}
+/**
+ * Desktop Command layout: [queue 320–400px, own scroll] | [details/map, own scroll].
+ * `minmax(0,1fr)` plus `min-w-0`/`overflow-hidden` on both panes is what keeps a
+ * long location or a wide map from pushing the page past the viewport.
+ */
+export function CommandPanes({ queue, detail }: { queue: ReactNode; detail: ReactNode }) {
+  return (
+    <div
+      data-command-panes
+      className="grid min-h-0 w-full min-w-0 flex-1 grid-cols-[minmax(320px,400px)_minmax(0,1fr)] gap-3 overflow-hidden"
+    >
+      <section
+        aria-label="Active incident command queue"
+        className="flex min-h-0 min-w-0 flex-col overflow-hidden rounded-xl border border-slate-200 bg-white"
+      >
+        {queue}
+      </section>
+      <section
+        aria-label="Selected incident"
+        className="flex min-h-0 min-w-0 flex-col overflow-hidden rounded-xl border border-slate-200 bg-white"
+      >
+        {detail}
+      </section>
+    </div>
+  );
+}
 
-          {/* Floor selector */}
-          <div className="mb-3">
-            <p className="text-xs font-medium text-slate-600 mb-1">
-              <Building2 size={12} className="inline mr-1" /> Building / Floor
-            </p>
-            <div className="flex flex-wrap gap-1">
-              {buildings.map((b) => (
-                <button
-                  key={b.id}
-                  onClick={() => { setSelectedBuildingId(b.id); setSelectedFloor(b.floors[0].floor); }}
-                  className={`min-h-10 rounded-xl px-2 text-xs font-bold border transition-colors ${selectedBuildingId === b.id ? "border-brand-600 bg-brand-50 text-brand-800" : "border-slate-300 bg-white text-slate-700"}`}
-                >
-                  {b.label}
-                </button>
-              ))}
-            </div>
-            <div className="mt-2 flex flex-wrap gap-1">
-              {currentBuilding.floors.map((f) => (
-                <button
-                  key={f.floor}
-                  onClick={() => setSelectedFloor(f.floor)}
-                  className={`min-h-10 rounded-xl px-2 text-xs font-bold border transition-colors ${selectedFloor === f.floor ? "border-brand-600 bg-brand-50 text-brand-800" : "border-slate-300 bg-white text-slate-700"}`}
-                >
-                  Floor {f.floor}
-                  <span className="ml-1 text-slate-400">({incidentsByFloor[String(f.floor)] || 0})</span>
-                </button>
-              ))}
-              {/* Common areas as floor-level items */}
-              <button
-                onClick={() => { setSelectedBuildingId("common"); setSelectedFloor(0); }}
-                className={`min-h-10 rounded-xl px-2 text-xs font-bold border transition-colors ${selectedBuildingId === "common" ? "border-brand-600 bg-brand-50 text-brand-800" : "border-slate-300 bg-white text-slate-700"}`}
-              >
-                Common areas
-                <span className="ml-1 text-slate-400">({commonAreas.length})</span>
-              </button>
-            </div>
+function Segmented<T extends string>({
+  value,
+  onChange,
+  options,
+  label,
+}: {
+  value: T;
+  onChange: (v: T) => void;
+  options: { id: T; label: string }[];
+  label: string;
+}) {
+  return (
+    <div role="tablist" aria-label={label} className="flex shrink-0 gap-1 border-b border-slate-200 p-2">
+      {options.map((o) => (
+        <button
+          key={o.id}
+          type="button"
+          role="tab"
+          aria-selected={value === o.id}
+          onClick={() => onChange(o.id)}
+          className={`min-h-10 flex-1 rounded-lg px-3 text-xs font-bold transition-colors ${
+            value === o.id ? "bg-brand-100 text-brand-800" : "text-slate-600 hover:bg-slate-50"
+          }`}
+        >
+          {o.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------- queue */
+
+function QueuePane({
+  incidents,
+  selectedId,
+  onSelect,
+  onKeyDown,
+  listRef,
+  title,
+  empty,
+}: {
+  incidents: Incident[];
+  selectedId: string | null;
+  onSelect: (id: string) => void;
+  onKeyDown: (event: KeyboardEvent<HTMLUListElement>) => void;
+  listRef: RefObject<HTMLUListElement | null>;
+  title: string;
+  empty: string;
+}) {
+  return (
+    <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+      <h2 className="shrink-0 border-b border-slate-200 px-3 py-2 text-xs font-bold uppercase tracking-wide text-slate-500">
+        {title}
+      </h2>
+      {incidents.length === 0 ? (
+        <div className="min-h-0 flex-1 overflow-y-auto p-3">
+          <div className="rounded-2xl border border-dashed border-slate-200 px-4 py-10 text-center">
+            <p className="text-3xl" aria-hidden>🟢</p>
+            <p className="mt-1 text-sm text-slate-500">{empty}</p>
           </div>
-
-          {/* Floor hints */}
-          {floorHints.length > 0 && (
-            <div className="mb-2 p-2 bg-amber-50 rounded border border-amber-200">
-              {floorHints.map((h, i) => (
-                <p key={i} className="text-xs text-amber-800">
-                  {h}
-                </p>
-              ))}
-            </div>
-          )}
-
-          {/* Map view or List view */}
-          {view === "map" ? (
-            <div className="flex-1 min-h-0 overflow-y-auto">
-              {/* Building A floor rooms */}
-              {selectedBuildingId === "bldg-a" && currentBuilding.floors.map((f) => (
-                f.floor === selectedFloor && (
-                  <div key={f.floor} className="mb-2">
-                    <p className="text-xs font-medium text-slate-600 mb-1">
-                      <MapPin size={12} className="inline mr-1" /> Building A Floor {f.floor}
-                    </p>                    <div className="flex flex-wrap gap-1">
-                      {f.rooms.map((r) => {
-                        const inc = activeIncidents.find((i) => i.room?.includes(r.label));
-                        const tier = inc?.tier ?? "MODERATE";
-                        const isCrit = tier === "CRITICAL";
-                        const isHigh = tier === "HIGH";
-                        const borderCol = isCrit ? "border-blush-600" : isHigh ? "border-brand-600" : "border-slate-300";
-                        const bgCol = inc ? (isCrit ? "bg-blush-50" : isHigh ? "bg-brand-50" : "bg-white") : "bg-white";
-                        const textCol = inc ? (isCrit ? "text-blush-800" : isHigh ? "text-brand-800" : "text-slate-700") : "text-slate-700";
-                        return (
-                          <button
-                            key={r.id}
-                            onClick={() => inc && openDetails(inc)}
-                            className={`min-h-12 rounded-xl px-2 text-xs font-bold border transition-colors ${borderCol} ${bgCol} ${textCol}`}
-                            aria-label={inc ? `${r.label}: ${inc.subLabel || inc.categoryLabel}, ${tier} urgency` : r.label}
-                          >
-                            <MapPin size={12} className="inline mr-1" />
-                            {r.label}
-                            {inc && <span className="block text-[10px] opacity-70">{tier}</span>}
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </div>
-                )
-              ))}
-
-              {/* Building B floor rooms */}
-              {selectedBuildingId === "bldg-b" && currentBuilding.floors.map((f) => (
-                f.floor === selectedFloor && (
-                  <div key={f.floor} className="mb-2">
-                    <p className="text-xs font-medium text-slate-600 mb-1">
-                      <MapPin size={12} className="inline mr-1" /> Building B Floor {f.floor}
-                    </p>
-                    <div className="flex flex-wrap gap-1">
-                      {f.rooms.map((r) => {
-                        const inc = activeIncidents.find((i) => i.room?.includes(r.label));
-                        const tier = inc?.tier ?? "MODERATE";
-                        const isCrit = tier === "CRITICAL";
-                        const isHigh = tier === "HIGH";
-                        const borderCol = isCrit ? "border-blush-600" : isHigh ? "border-brand-600" : "border-slate-300";
-                        const bgCol = inc ? (isCrit ? "bg-blush-50" : isHigh ? "bg-brand-50" : "bg-white") : "bg-white";
-                        const textCol = inc ? (isCrit ? "text-blush-800" : isHigh ? "text-brand-800" : "text-slate-700") : "text-slate-700";
-                        return (
-                          <button
-                            key={r.id}
-                            onClick={() => inc && openDetails(inc)}
-                            className={`min-h-12 rounded-xl px-2 text-xs font-bold border transition-colors ${borderCol} ${bgCol} ${textCol}`}
-                            aria-label={inc ? `${r.label}: ${inc.subLabel || inc.categoryLabel}, ${tier} urgency` : r.label}
-                          >
-                            <MapPin size={12} className="inline mr-1" />
-                            {r.label}
-                            {inc && <span className="block text-[10px] opacity-70">{tier}</span>}
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </div>
-                )
-              ))}
-
-              {/* Common areas */}
-              {selectedBuildingId === "common" && (
-                <div className="mb-2">
-                  <p className="text-xs font-medium text-slate-600 mb-1">
-                    <MapPin size={12} className="inline mr-1" /> Common Areas
-                  </p>
-                  <div className="flex flex-wrap gap-1">
-                    {commonAreas.map((a) => {
-                      const inc = activeIncidents.find((i) => i.room?.includes(a.label));
-                      const tier = inc?.tier ?? "MODERATE";
-                      const isCrit = tier === "CRITICAL";
-                      const isHigh = tier === "HIGH";
-                      const borderCol = isCrit ? "border-blush-600" : isHigh ? "border-brand-600" : "border-slate-300";
-                      const bgCol = inc ? (isCrit ? "bg-blush-50" : isHigh ? "bg-brand-50" : "bg-white") : "bg-white";
-                      const textCol = inc ? (isCrit ? "text-blush-800" : isHigh ? "text-brand-800" : "text-slate-700") : "text-slate-700";
-                      return (
-                        <button
-                          key={a.id}
-                          onClick={() => inc && openDetails(inc)}
-                          className={`min-h-12 rounded-xl px-2 text-xs font-bold border transition-colors ${borderCol} ${bgCol} ${textCol}`}
-                          aria-label={inc ? `${a.label}: ${inc.subLabel || inc.categoryLabel}, ${tier} urgency` : a.label}
-                        >
-                          <MapPin size={12} className="inline mr-1" />
-                          {a.label}
-                          {inc && <span className="block text-[10px] opacity-70">{tier}</span>}
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-              )}
-           </div>
-          ) : (
-            /* List view: incident pins */
-            <div className="flex-1 min-h-0 overflow-y-auto">
-              {activeIncidents.length === 0 ? (
-                <p className="text-xs text-slate-500 text-center py-4">No active incidents.</p>
-              ) : (
-                <div className="space-y-1">
-                  {activeIncidents.map((inc) => {
-                    const room = roomById(inc.room?.match(/Rm\s*(\d+)/i)?.[1] ?? "");
-                    const floorNumber = inc.room?.match(/Flr\s*(\d+)/i)?.[1];
-
-                    return (
-                      <button
-                        key={inc.id}
-                        onClick={() => openDetails(inc)}
-                        className="block w-full rounded-xl border border-slate-200 bg-white p-2 text-left transition-colors hover:bg-slate-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-brand-600"
-                        aria-label={`${inc.subLabel || inc.categoryLabel}, ${inc.room || "no location"}, ${inc.tier} urgency`}
-                      >
-                        <div className="flex items-start gap-2">
-                          {/* Tier badge — text label, not color-alone */}
-                          <span className={`shrink-0 rounded-lg px-1.5 py-0.5 text-[10px] font-extrabold uppercase ${inc.tier === "CRITICAL" ? "bg-blush-100 text-blush-800" : inc.tier === "HIGH" ? "bg-brand-100 text-brand-800" : "bg-slate-100 text-slate-700"}`}>
-                            {inc.tier}
-                          </span>
-                          <div className="min-w-0 flex-1 text-xs">
-                            <b className="text-slate-800">{inc.subLabel || inc.categoryLabel}</b>
-                            <div className="text-slate-500 mt-0.5">
-                              {inc.room || "Location not set"}
-                              {floorNumber && <span className="ml-1">· Floor {floorNumber}</span>}
-                            </div>
-                            {inc.overrideReasons.length > 0 && (
-                              <div className="text-blush-700 mt-0.5">Critical: {inc.overrideReasons.join(", ")}</div>
-                            )}
-                          </div>
-                        </div>
-                      </button>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-          )}
         </div>
-      </div>
-
-      {/* Ticket detail modal (from pin tap) */}
-      {selectedInc && (
-        <Modal title={selectedInc.subLabel || selectedInc.categoryLabel} onClose={closeDetails}>
-          <IncidentCard inc={selectedInc} showActions showLog />
-        </Modal>
+      ) : (
+        <ul
+          ref={listRef}
+          aria-label={title}
+          tabIndex={0}
+          onKeyDown={onKeyDown}
+          className="scroll-area min-h-0 flex-1 space-y-2 overflow-y-auto p-2"
+        >
+          {incidents.map((inc) => {
+            const active = inc.id === selectedId;
+            return (
+              <li key={inc.id}>
+                <button
+                  type="button"
+                  data-incident-id={inc.id}
+                  onClick={() => onSelect(inc.id)}
+                  aria-current={active ? "true" : undefined}
+                  className="block w-full min-w-0 rounded-xl text-left focus-visible:outline focus-visible:outline-2 focus-visible:outline-brand-600"
+                >
+                  <QueueRow inc={inc} active={active} />
+                </button>
+              </li>
+            );
+          })}
+        </ul>
       )}
     </div>
   );
 }
+
+/* --------------------------------------------------------------------- map */
+
+function chipClass(active: boolean, muted = false) {
+  if (active) return "min-h-10 min-w-0 rounded-xl border border-brand-600 bg-brand-50 px-2.5 text-xs font-bold text-brand-800 transition-colors";
+  if (muted) return "min-h-10 min-w-0 rounded-xl border border-slate-200 bg-slate-50 px-2.5 text-xs font-bold text-slate-400 transition-colors";
+  return "min-h-10 min-w-0 rounded-xl border border-slate-300 bg-white px-2.5 text-xs font-bold text-slate-700 transition-colors";
+}
+
+function MapPane({
+  incidents,
+  place,
+  onPickPlace,
+  selectedId,
+  onPickIncident,
+}: {
+  incidents: Incident[];
+  place: CommandPlace;
+  onPickPlace: (place: CommandPlace) => void;
+  selectedId: string | null;
+  onPickIncident: (id: string) => void;
+}) {
+  const counts = useMemo(() => commandCounts(incidents), [incidents]);
+  const pins = useMemo(
+    () => (place.kind === "common" ? pinsForCommonAreas(incidents) : pinsForFloor(incidents, place.buildingId, place.floor)),
+    [incidents, place],
+  );
+  const hints = useMemo(() => floorHints(incidents, place), [incidents, place]);
+
+  // The floor row always belongs to a building, even while common areas are selected.
+  const buildingId = place.kind === "floor" ? place.buildingId : CAMPUS_BUILDINGS[0].id;
+  const building = CAMPUS_BUILDINGS.find((b) => b.id === buildingId) ?? CAMPUS_BUILDINGS[0];
+  const commonCount = counts.common;
+
+  const markers: RoomMarker[] = pins.map((p) => ({
+    id: p.incidentId,
+    x: p.x,
+    y: p.y,
+    label: p.label,
+    active: p.incidentId === selectedId,
+    tier: p.tier,
+  }));
+
+  return (
+    <div className="min-w-0 space-y-3">
+      <div className="min-w-0 space-y-2">
+        <p className="text-xs font-medium text-slate-600">
+          <Building2 size={12} className="mr-1 inline" /> Building
+        </p>
+        <div className="flex flex-wrap gap-1.5">
+          {CAMPUS_BUILDINGS.map((b) => {
+            const on = place.kind === "floor" && place.buildingId === b.id;
+            return (
+              <button
+                key={b.id}
+                type="button"
+                aria-pressed={on}
+                onClick={() => onPickPlace({ kind: "floor", buildingId: b.id, floor: b.floors[0].floor })}
+                className={chipClass(on)}
+              >
+                {b.label}
+              </button>
+            );
+          })}
+        </div>
+
+        <p className="text-xs font-medium text-slate-600">
+          <MapPin size={12} className="mr-1 inline" /> Floor
+        </p>
+        <div className="flex flex-wrap gap-1.5">
+          {building.floors.map((f) => {
+            const count = countOnFloor(counts, building.id, f.floor);
+            const on = place.kind === "floor" && place.buildingId === building.id && place.floor === f.floor;
+            return (
+              <button
+                key={f.floor}
+                type="button"
+                aria-pressed={on}
+                onClick={() => onPickPlace({ kind: "floor", buildingId: building.id, floor: f.floor })}
+                className={chipClass(on, count === 0)}
+              >
+                Floor {f.floor}
+                <span className={`ml-1 ${count === 0 ? "text-slate-400" : "text-slate-500"}`}>({count})</span>
+              </button>
+            );
+          })}
+          <button
+            type="button"
+            aria-pressed={place.kind === "common"}
+            aria-label={`Common areas (${commonCount})`}
+            onClick={() => onPickPlace({ kind: "common" })}
+            className={chipClass(place.kind === "common", commonCount === 0)}
+          >
+            Common areas
+            <span className={`ml-1 ${commonCount === 0 ? "text-slate-400" : "text-slate-500"}`}>({commonCount})</span>
+          </button>
+        </div>
+      </div>
+
+      {hints.length > 0 && (
+        <div className="rounded-lg border border-amber-200 bg-amber-50 p-2">
+          {hints.map((h) => (
+            <p key={h} className="text-xs text-amber-800">{h}</p>
+          ))}
+        </div>
+      )}
+
+      <SchoolMap showSavedRoom={false} roomMarkers={markers} onRoomMarkerClick={onPickIncident} />
+      <p className="text-xs text-slate-500">Tap a pin to open that incident’s details.</p>
+    </div>
+  );
+}
+
+/* ----------------------------------------------------------------- details */
+
+function DetailsPane({ inc, empty }: { inc: Incident | null; empty: string }) {
+  return (
+    <div className="scroll-area min-h-0 min-w-0 flex-1 overflow-y-auto p-3">
+      {inc ? (
+        <IncidentCard inc={inc} showActions showLog defaultExpanded />
+      ) : (
+        <div className="rounded-2xl border border-dashed border-slate-200 px-6 py-16 text-center">
+          <p className="text-3xl" aria-hidden>📋</p>
+          <p className="mt-2 text-sm text-slate-500">{empty}</p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ------------------------------------------------------- phone detail sheet */
+
+/** Full-screen ticket on phones; the browser Back button closes it too. */
+function usePhoneDetail() {
+  const [open, setOpen] = useState(false);
+  const pushed = useRef(false);
+
+  const openDetail = useCallback(() => {
+    if (pushed.current) return;
+    pushed.current = true;
+    setOpen(true);
+    try {
+      window.history.pushState({ commandDetail: true }, "");
+    } catch {
+      /* history unavailable (sandboxed WebView): the Back button still closes the sheet */
+    }
+  }, []);
+
+  const close = useCallback(() => {
+    setOpen(false);
+    const hadPushed = pushed.current;
+    pushed.current = false;
+    if (!hadPushed) return;
+    try {
+      if ((window.history.state as { commandDetail?: boolean } | null)?.commandDetail) window.history.back();
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!open) return;
+    const onPop = () => {
+      pushed.current = false;
+      setOpen(false);
+    };
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, [open]);
+
+  return { open, openDetail, close };
+}
+
+function PhoneDetail({ inc, onClose }: { inc: Incident; onClose: () => void }) {
+  return (
+    <div role="dialog" aria-modal="true" aria-label="Incident details" className="fixed inset-0 z-50 flex flex-col bg-cream">
+      <div className="flex shrink-0 items-center gap-2 border-b border-slate-200 bg-white px-2 py-2 pt-[max(0.5rem,env(safe-area-inset-top))]">
+        <button
+          type="button"
+          onClick={onClose}
+          className="flex min-h-12 shrink-0 items-center gap-1.5 rounded-xl px-3 text-sm font-bold text-brand-700"
+        >
+          <ArrowLeft size={18} /> Back
+        </button>
+        <p className="min-w-0 flex-1 truncate text-sm font-bold text-slate-700">{inc.subLabel}</p>
+      </div>
+      <div className="scroll-area min-h-0 flex-1 overflow-y-auto px-3 py-3 pb-[max(1rem,env(safe-area-inset-bottom))]">
+        <IncidentCard inc={inc} showActions showLog defaultExpanded />
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ command */
+
+export function Command() {
+  const { incidents, roster, now } = useApp();
+  const wide = useMediaQuery("screen and (min-width: 1024px)");
+
+  // Every open ticket stays in the queue; counts and pins ignore drills.
+  const queue = useMemo(() => sortQueue(incidents.filter((i) => i.status !== "RESOLVED")), [incidents]);
+  const active = useMemo(() => activeIncidents(incidents), [incidents]);
+  const critical = active.filter((i) => i.overrideReasons.length > 0).length;
+  const today = incidents.filter((i) => !i.drill && i.createdAt >= startOfToday(now)).reduce((n, i) => n + i.confirmedBy, 0);
+  const staff = roster.filter((r) => r.status === "active").length;
+
+  const { select, selected, selectedId, onKeyDown } = useIncidentSelection(queue);
+  const listRef = useRef<HTMLUListElement>(null);
+
+  const [pane, setPane] = useState<"details" | "map">("details");
+  const [phonePane, setPhonePane] = useState<"list" | "map">("list");
+  const [place, setPlace] = useState<CommandPlace>({
+    kind: "floor",
+    buildingId: CAMPUS_BUILDINGS[0].id,
+    floor: CAMPUS_BUILDINGS[0].floors[0].floor,
+  });
+  const phoneDetail = usePhoneDetail();
+  const closePhoneDetail = phoneDetail.close;
+
+  // Keep the selected row visible when the queue refreshes or the arrow keys move it.
+  useEffect(() => {
+    if (!selectedId) return;
+    const el = listRef.current?.querySelector<HTMLElement>(`[data-incident-id="${selectedId}"]`);
+    el?.scrollIntoView?.({ block: "nearest" });
+  }, [selectedId]);
+
+  // A ticket that resolves while its sheet is open closes the sheet.
+  useEffect(() => {
+    if (!selected) closePhoneDetail();
+  }, [selected, closePhoneDetail]);
+
+  // Growing to the desktop layout replaces the sheet with the Details pane.
+  useEffect(() => {
+    if (wide) closePhoneDetail();
+  }, [wide, closePhoneDetail]);
+
+  const openIncident = useCallback(
+    (id: string) => {
+      select(id);
+      if (wide) setPane("details");
+      else phoneDetail.openDetail();
+    },
+    [wide, select, phoneDetail.openDetail],
+  );
+
+  const stats = <StatsStrip active={active.length} critical={critical} today={today} staff={staff} />;
+
+  if (!wide) {
+    return (
+      <div className="mx-auto flex h-full min-h-0 w-full min-w-0 flex-col gap-3 overflow-hidden px-3 py-3">
+        {stats}
+        <Segmented
+          label="Command view"
+          value={phonePane}
+          onChange={setPhonePane}
+          options={[{ id: "list", label: "List" }, { id: "map", label: "Map" }]}
+        />
+
+        {phonePane === "list" ? (
+          <section className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-xl border border-slate-200 bg-white">
+            <QueuePane
+              incidents={queue}
+              selectedId={selectedId}
+              onSelect={openIncident}
+              onKeyDown={onKeyDown}
+              listRef={listRef}
+              title="Active incident command queue"
+              empty={EMPTY_QUEUE}
+            />
+          </section>
+        ) : (
+          <section className="min-h-0 min-w-0 flex-1 overflow-y-auto">
+            <MapPane
+              incidents={incidents}
+              place={place}
+              onPickPlace={setPlace}
+              selectedId={selectedId}
+              onPickIncident={openIncident}
+            />
+          </section>
+        )}
+
+        {phoneDetail.open && selected && <PhoneDetail inc={selected} onClose={phoneDetail.close} />}
+      </div>
+    );
+  }
+
+  return (
+    <div className="mx-auto flex h-full min-h-0 w-full min-w-0 flex-col gap-3 overflow-hidden px-3 py-3">
+      {stats}
+      <CommandPanes
+        queue={
+          <QueuePane
+            incidents={queue}
+            selectedId={selectedId}
+            onSelect={openIncident}
+            onKeyDown={onKeyDown}
+            listRef={listRef}
+            title="Active incident command queue"
+            empty={EMPTY_QUEUE}
+          />
+        }
+        detail={
+          <>
+            <Segmented
+              label="Command view"
+              value={pane}
+              onChange={setPane}
+              options={[{ id: "details", label: "Details" }, { id: "map", label: "Map" }]}
+            />
+            {pane === "details" ? (
+              <DetailsPane inc={selected} empty={EMPTY_QUEUE} />
+            ) : (
+              <div className="scroll-area min-h-0 min-w-0 flex-1 overflow-y-auto p-3">
+                <MapPane
+                  incidents={incidents}
+                  place={place}
+                  onPickPlace={setPlace}
+                  selectedId={selectedId}
+                  onPickIncident={openIncident}
+                />
+              </div>
+            )}
+          </>
+        }
+      />
+    </div>
+  );
+}
+
+/* --------------------------------------------------------------------- more */
 
 function BackBar({ title, onBack }: { title: string; onBack: () => void }) {
   return (
@@ -417,12 +548,12 @@ function More() {
 
 export default function PrincipalView({ tab }: { tab: PrincipalTab }) {
   return (
-    < >
+    <>
       {tab === "command" && <Command />}
       {tab === "report" && <ReportView />}
       {tab === "safety" && <SafetyView />}
       {tab === "history" && <div className="scroll-area mx-auto w-full max-w-3xl px-3 py-3 lg:h-full lg:overflow-y-auto"><HistorySection title="Incident history (official record)" /></div>}
       {tab === "more" && <More />}
-    </ >
+    </>
   );
 }

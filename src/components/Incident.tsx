@@ -32,14 +32,14 @@ const ACTION_LABEL: Record<string, string> = {
   on_site: "On site", resolved: "Resolved", false_alarm: "False alarm",
 };
 
-export function IncidentCard({ inc, showActions, showLog }: { inc: Incident; showActions?: boolean; showLog?: boolean }) {
+export function IncidentCard({ inc, showActions, showLog, defaultExpanded = false }: { inc: Incident; showActions?: boolean; showLog?: boolean; defaultExpanded?: boolean }) {
   const { now, modes, act, markSeen } = useApp();
   const ct = catTheme(inc.category);
   const closed = inc.status === "RESOLVED";
   const band = bandFor(inc.score, inc.status, inc.overrideReasons);
   const bs = BAND_STYLE[closed ? "RESOLVED" : band];
   const [confirm, setConfirm] = useState<"resolved" | "false_alarm" | null>(null);
-  const [expanded, setExpanded] = useState(false);
+  const [expanded, setExpanded] = useState(defaultExpanded);
   const [busy, setBusy] = useState(false);
   const [ackOpen, setAckOpen] = useState(false);
 

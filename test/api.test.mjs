@@ -4,7 +4,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import http from "node:http";
-import { createApp, DEMO_PASSWORD, DEMO_ADMIN_EMAIL, DEMO_ADMIN_PASSWORD } from "../server/app.js";
+import { createApp, DEMO_PASSWORD, DEMO_ADMIN_EMAIL } from "../server/app.js";
+import { validatePassword } from "../shared/password.js";
 import { SEED_ROSTER } from "../server/store.js";
 import { LOCATION_RISK_SAVED_ROOM, computeScore, bandFor } from "../shared/domain.js";
 import {
@@ -13,8 +14,9 @@ import {
 } from "../shared/campus.js";
 
 const ADMIN_EMAIL = DEMO_ADMIN_EMAIL;
-const ADMIN_BOOTSTRAP_PASSWORD = DEMO_ADMIN_PASSWORD;
-const ADMIN_PASSWORD = "Sinalhan-Admin-2026!";
+// Test fixtures: both satisfy the shared policy for admin@sinalhanes.deped.ph.
+const ADMIN_BOOTSTRAP_PASSWORD = "Aspire-Bootstrap-2026!";
+const ADMIN_PASSWORD = "Sinalhan-SchoolHead-2026!";
 const slug = (s) => String(s).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
 const emailFor = (role, accountId) => {
   if (role === "principal") return "principal@sinalhanes.deped.ph";
@@ -800,22 +802,30 @@ test("deactivated accounts cannot sign in and their sessions are revoked", async
   const admin = await s.loginSuper();
   const prov = await s.call("POST", "/api/admin/accounts", {
     token: admin,
-    body: { email: "ptagrade3@example.com", role: "parent", section: "Grade 3 - Sec A", password: "Grade3PTA-2026" },
+    body: { email: "ptagrade3@example.com", role: "parent", section: "Grade 3 - Sec A", password: "Grade3PTA-2026!" },
   });
   assert.equal(prov.status, 201);
   assert.equal(prov.json.tempPassword, null, "an admin-chosen password is not a temporary one");
-  const tok = (await s.loginWith("ptagrade3@example.com", "Grade3PTA-2026")).json.token;
+  const tok = (await s.loginWith("ptagrade3@example.com", "Grade3PTA-2026!")).json.token;
   assert.equal((await s.call("GET", "/api/state", { token: tok })).status, 200);
 
   const id = prov.json.account.id;
   assert.equal((await s.call("POST", `/api/admin/accounts/${id}/deactivate`, { token: admin })).status, 200);
-  const blocked = await s.loginWith("ptagrade3@example.com", "Grade3PTA-2026");
+  const blocked = await s.loginWith("ptagrade3@example.com", "Grade3PTA-2026!");
   assert.equal(blocked.status, 401);
   assert.equal(blocked.json.message, "Invalid email or password.", "deactivation is not disclosed");
   assert.equal((await s.call("GET", "/api/state", { token: tok })).status, 401, "session revoked on deactivation");
 
   assert.equal((await s.call("POST", `/api/admin/accounts/${id}/activate`, { token: admin })).status, 200);
-  assert.equal((await s.loginWith("ptagrade3@example.com", "Grade3PTA-2026")).status, 200, "sign-in works again after reactivation");
+  assert.equal((await s.loginWith("ptagrade3@example.com", "Grade3PTA-2026!")).status, 200, "sign-in works again after reactivation");
+
+  // An admin-chosen password is held to the same policy as any other password.
+  const weak = await s.call("POST", "/api/admin/accounts", {
+    token: admin,
+    body: { email: "weak@example.com", role: "parent", section: "Grade 3 - Sec A", password: "weakpassword" },
+  });
+  assert.equal(weak.status, 400);
+  assert.equal(weak.json.error, "weak_password");
 
   const adminId = (await s.call("GET", "/api/admin/accounts", { token: admin })).json.accounts.find((a) => a.email === ADMIN_EMAIL).id;
   assert.equal((await s.call("POST", `/api/admin/accounts/${adminId}/deactivate`, { token: admin })).status, 400, "Super Admin cannot deactivate their own account");
@@ -845,12 +855,15 @@ test("school-year rollover issues temporary credentials, forces a new password a
   const tok = forced.json.token;
   assert.equal((await s.call("GET", "/api/state", { token: tok })).status, 403, "data access is blocked until the change");
   assert.equal((await s.call("POST", "/api/incidents", { token: tok, body: report() })).status, 403);
+  assert.equal(validatePassword(entry.tempPassword, { email: entry.email, name: entry.name }), null, "the issued credential satisfies the policy");
   assert.equal((await s.call("POST", "/api/password", { token: tok, body: { password: "short" } })).status, 400, "minimum 8 characters");
   assert.equal((await s.call("POST", "/api/password", { token: tok, body: { password: "12345678" } })).status, 400, "common passwords rejected");
-  assert.equal((await s.call("POST", "/api/password", { token: tok, body: { password: "abcdefgh" } })).status, 200, "no composition rules – 8 letters is a valid password");
+  assert.equal((await s.call("POST", "/api/password", { token: tok, body: { password: "abcdefgh" } })).status, 400, "composition rules apply to a first-time set too");
+  assert.equal((await s.call("POST", "/api/password", { token: tok, body: { password: entry.tempPassword } })).status, 400, "the new password must differ from the current one");
+  assert.equal((await s.call("POST", "/api/password", { token: tok, body: { password: "Grade5-New-2026!" } })).status, 200, "a policy-compliant password is accepted");
   assert.equal((await s.call("GET", "/api/state", { token: tok })).status, 200, "in with the new password");
   assert.equal((await s.loginWith(entry.email, entry.tempPassword)).status, 401, "the temporary credential is spent");
-  assert.equal((await s.loginWith(entry.email, "abcdefgh")).status, 200);
+  assert.equal((await s.loginWith(entry.email, "Grade5-New-2026!")).status, 200);
 
   // The audit log covers the whole flow – and never contains a password or a token.
   const entries = (await s.call("GET", "/api/admin/audit", { token: admin })).json.entries;
@@ -859,7 +872,7 @@ test("school-year rollover issues temporary credentials, forces a new password a
     assert.ok(actions.includes(a), `audit records ${a}`);
   const raw = JSON.stringify(entries);
   assert.equal(raw.includes(entry.tempPassword), false, "audit never stores temporary passwords");
-  assert.equal(raw.includes("abcdefgh"), false, "audit never stores passwords");
+  assert.equal(raw.includes("Grade5-New-2026!"), false, "audit never stores passwords");
   assert.equal(raw.includes(tok), false, "audit never stores tokens");
   await s.close();
 });
@@ -909,6 +922,29 @@ test("first Super Admin is bootstrapped from the environment with a forced passw
   await s.close();
 });
 
+test("a bootstrap Super Admin password must meet the shared policy too", async () => {
+  const logs = [];
+  const weak = await boot({
+    seedDemoAccounts: false,
+    superAdminEmail: "boss@sinalhanes.deped.ph",
+    superAdminPassword: "boss-password",
+    log: (...args) => logs.push(args.join(" ")),
+  });
+  assert.equal(weak.app.store.db.accounts.length, 0, "no account is created from a weak bootstrap password");
+  assert.ok(logs.some((l) => /ASPIRE_SUPER_ADMIN_PASSWORD does not meet the password policy/.test(l)), "the refusal is logged");
+  assert.equal(logs.join(" ").includes("boss-password"), false, "the password itself is never logged");
+  await weak.close();
+
+  const ok = await boot({
+    seedDemoAccounts: false,
+    superAdminEmail: "boss@sinalhanes.deped.ph",
+    superAdminPassword: "Bootstrap-School-2026!",
+  });
+  assert.equal(ok.app.store.db.accounts.length, 1, "a compliant bootstrap password creates the account");
+  assert.equal(ok.app.store.db.accounts[0].mustChange, true);
+  await ok.close();
+});
+
 test("voluntary password change requires the current password and revokes other sessions", async () => {
   const s = await boot();
   const phone = await s.login("teacher", "t1");
@@ -947,53 +983,37 @@ test("voluntary password change failures count toward the account lockout", asyn
   await s.close();
 });
 
-test("principal and super admin must meet the 10-char + letter + number policy; others need only 8 chars", async () => {
+test("all roles share one password policy: 8+ chars with upper, lower, digit and special", async () => {
   const s = await boot();
-  const principalTok = await s.login("principal");
-  const teacherTok = await s.login("teacher", "t1");
-  const responderTok = await s.login("responder");
-  const parentTok = await s.login("parent", "Grade 3 - Sec A");
+  const tokens = {
+    teacher: await s.login("teacher", "t1"),
+    principal: await s.login("principal"),
+    responder: await s.login("responder"),
+    parent: await s.login("parent", "Grade 3 - Sec A"),
+    super_admin: await s.loginSuper(),
+  };
+  const change = (token, password, currentPassword = DEMO_PASSWORD) =>
+    s.call("POST", "/api/password", { token, body: { currentPassword, password } });
 
-  // Principal: too short
-  assert.equal(
-    (await s.call("POST", "/api/password", { token: principalTok, body: { currentPassword: DEMO_PASSWORD, password: "Abc12345" } })).status,
-    400,
-    "principal rejects 8-char password");
-  assert.equal(
-    (await s.call("POST", "/api/password", { token: principalTok, body: { currentPassword: DEMO_PASSWORD, password: "abcdefghij" } })).status,
-    400,
-    "principal rejects letter-only password");
-  assert.equal(
-    (await s.call("POST", "/api/password", { token: principalTok, body: { currentPassword: DEMO_PASSWORD, password: "1234567890" } })).status,
-    400,
-    "principal rejects number-only password");
-  assert.equal(
-    (await s.call("POST", "/api/password", { token: principalTok, body: { currentPassword: DEMO_PASSWORD, password: "Principal-2026" } })).status,
-    200,
-    "principal accepts 10+ char password with letter and number");
+  // Every role gets exactly the same rejections.
+  for (const [role, token] of Object.entries(tokens)) {
+    if (role === "super_admin") continue; // its current password is not the demo one
+    assert.equal((await change(token, "Abc1234")).status, 400, `${role}: shorter than 8 rejected`);
+    assert.equal((await change(token, "abcdefg1!")).status, 400, `${role}: no uppercase rejected`);
+    assert.equal((await change(token, "ABCDEFG1!")).status, 400, `${role}: no lowercase rejected`);
+    assert.equal((await change(token, "Abcdefgh!")).status, 400, `${role}: no digit rejected`);
+    assert.equal((await change(token, "Abcdefgh1")).status, 400, `${role}: no special character rejected`);
+    assert.equal((await change(token, `Abcdef1!${"x".repeat(60)}`)).status, 400, `${role}: longer than 64 rejected`);
+    assert.equal((await change(token, " Abcdef1!")).status, 400, `${role}: leading space rejected`);
+    assert.equal((await change(token, DEMO_PASSWORD)).status, 400, `${role}: same as the current password rejected`);
+  }
 
-  // Teacher: 8 chars is fine, no composition required
-  assert.equal(
-    (await s.call("POST", "/api/password", { token: teacherTok, body: { currentPassword: DEMO_PASSWORD, password: "MsReyes26" } })).status,
-    200,
-    "teacher accepts 8-char password with letter and number (no composition rule)");
-  assert.equal(
-    (await s.call("POST", "/api/password", { token: teacherTok, body: { currentPassword: "MsReyes26", password: "abcdefgh" } })).status,
-    200,
-    "teacher accepts letter-only 8-char password");
-
-  // Responder: same as teacher
-  assert.equal(
-    (await s.call("POST", "/api/password", { token: responderTok, body: { currentPassword: DEMO_PASSWORD, password: "Barangay26" } })).status,
-    200,
-    "responder accepts 8-char password");
-
-  // Parent: same as teacher
-  assert.equal(
-    (await s.call("POST", "/api/password", { token: parentTok, body: { currentPassword: DEMO_PASSWORD, password: "PTA2026Sec3" } })).status,
-    200,
-    "parent accepts 8-char password");
-
+  // …and the same acceptances.
+  assert.equal((await change(tokens.teacher, "Room204-Strong!")).status, 200, "teacher accepts a compliant password");
+  assert.equal((await change(tokens.principal, "Command-Center-1!")).status, 200, "principal accepts a compliant password");
+  assert.equal((await change(tokens.responder, "Dispatch-Unit-1!")).status, 200, "responder accepts a compliant password");
+  assert.equal((await change(tokens.parent, "Guardian-Pickup-1!")).status, 200, "parent accepts a compliant password");
+  assert.equal((await change(tokens.super_admin, "Console-Desk-1!", ADMIN_PASSWORD)).status, 200, "super admin accepts a compliant password");
   await s.close();
 });
 

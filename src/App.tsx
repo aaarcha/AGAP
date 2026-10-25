@@ -1,32 +1,21 @@
 import { useState } from "react";
-import { Bell, Check, History as HistoryIcon, Siren, User } from "lucide-react";
+import { Check } from "lucide-react";
 import { SCHOOL, STATUS_LABEL } from "../shared/domain.js";
 import { useApp } from "./lib/store";
-import { AlertToasts, BottomNav, Header, SideNav, StatusBanner, type NavTab } from "./components/Chrome";
+import { AlertToasts, Header, StatusBanner } from "./components/Chrome";
+import { RoleNav } from "./components/RoleNav";
+import type { ParentTab, PrincipalTab, ResponderTab, TeacherTab } from "./lib/navigation";
 import LoginView from "./views/LoginView";
 import ReportView from "./views/ReportView";
 import ParentView from "./views/ParentView";
-import ResponderView, { RESPONDER_TABS, type ResponderTab } from "./views/ResponderView";
+import ResponderView from "./views/ResponderView";
 import HistorySection from "./components/History";
 import { IncidentCard } from "./components/Incident";
 import { MasterDetail } from "./components/MasterDetail";
 import type { Incident } from "./lib/types";
-import PrincipalView, { PRINCIPAL_TABS, type PrincipalTab } from "./views/PrincipalView";
+import PrincipalView from "./views/PrincipalView";
 import AdminConsole from "./views/AdminConsole";
 import AccountView from "./views/AccountView";
-
-type TeacherTab = "report" | "reports" | "account";
-type ParentTab = "alerts" | "account";
-
-const TEACHER_TABS: NavTab<TeacherTab>[] = [
-  { id: "report", label: "Report", icon: Siren },
-  { id: "reports", label: "My Reports", icon: HistoryIcon },
-  { id: "account", label: "Account", icon: User },
-];
-const PARENT_TABS: NavTab<ParentTab>[] = [
-  { id: "alerts", label: "Alerts", icon: Bell },
-  { id: "account", label: "Account", icon: User },
-];
 
 function ReportRow({ inc, active }: { inc: Incident; active: boolean }) {
   return (
@@ -94,8 +83,11 @@ export default function App() {
   return (
     <div className="h-dvh overflow-hidden bg-cream">
       <div className="flex h-full min-h-0 overflow-hidden">
-        <SideNav tab={pTab} setTab={setPTab} tabs={PRINCIPAL_TABS} subtitle="Principal" />
-        <SideNav tab={rTab} setTab={setRTab} tabs={RESPONDER_TABS} subtitle="Responder" />
+        {/* Exactly one rail, carrying only this role's tabs. */}
+        {user.role === "teacher" && <RoleNav role="teacher" tab={teacherTab} setTab={setTeacherTab} />}
+        {user.role === "parent" && <RoleNav role="parent" tab={parentTab} setTab={setParentTab} />}
+        {user.role === "principal" && <RoleNav role="principal" tab={pTab} setTab={setPTab} />}
+        {user.role === "responder" && <RoleNav role="responder" tab={rTab} setTab={setRTab} />}
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
           <Header title={title} subtitle={subtitle} />
           <StatusBanner />
@@ -113,10 +105,6 @@ export default function App() {
               {user.role === "responder" && <ResponderView tab={rTab} />}
             </div>
           </main>
-
-          {(user.role === "teacher" || user.role === "parent") && <BottomNav tab={user.role === "teacher" ? teacherTab : parentTab} setTab={(t: any) => (user.role === "teacher" ? setTeacherTab(t) : setParentTab(t))} tabs={(user.role === "teacher" ? TEACHER_TABS : PARENT_TABS) as any} />}
-          {user.role === "principal" && <BottomNav tab={pTab} setTab={setPTab} tabs={PRINCIPAL_TABS} />}
-          {user.role === "responder" && <BottomNav tab={rTab} setTab={setRTab} tabs={RESPONDER_TABS} />}
         </div>
       </div>
       <AlertToasts />

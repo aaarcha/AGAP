@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Eye, EyeOff } from "lucide-react";
 import { SCHOOL } from "../../shared/domain.js";
 import { useApp } from "../lib/store";
+import { validatePassword } from "../lib/password";
 import { BRAND } from "../lib/brand";
 import { Modal } from "../components/Modal";
 import AboutView from "./AboutView";
@@ -25,7 +26,8 @@ export default function LoginView() {
 
   async function handlePasswordChange(e: React.FormEvent) {
     e.preventDefault();
-    if (newPassword.length < 8) { setChangeError("Password must be at least 8 characters."); return; }
+    const issue = validatePassword(newPassword, {});
+    if (issue) { setChangeError(issue); return; }
     setChanging(true); setChangeError("");
     try {
       await changePassword(newPassword);
@@ -85,7 +87,7 @@ export default function LoginView() {
                   onChange={(e) => setNewPassword(e.target.value)}
                   disabled={changing}
                   required
-                  placeholder="At least 8 characters"
+                  placeholder="Upper, lower, digit and symbol"
                   className="w-full min-h-12 rounded-lg px-3 pr-12 bg-white text-slate-900 text-sm outline-none focus:ring-2 focus:ring-accent"
                 />
                 <button

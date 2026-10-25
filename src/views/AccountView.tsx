@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Eye, EyeOff } from "lucide-react";
 import { useApp } from "../lib/store";
 import { Modal } from "../components/Modal";
+import { POLICY_TEXT, validatePassword } from "../lib/password";
 import AboutView from "./AboutView";
 
 const ROLE_LABEL: Record<string, string> = {
@@ -12,13 +13,91 @@ const ROLE_LABEL: Record<string, string> = {
   super_admin: "Super Admin",
 };
 
-const POLICY_PLACEHOLDER: Record<string, string> = {
-  principal: "Use 10 characters or more with a number and a letter.",
-  parent: "Use 8 characters or more.",
-  teacher: "Use 8 characters or more.",
-  responder: "Use 8 characters or more.",
-  super_admin: "Use 10 characters or more with a number and a letter.",
-};
+/** Teachers edit their own classroom here (Account → My classroom). */
+function MyClassroom() {
+  const { user, saveProfile } = useApp();
+  const [name, setName] = useState(user!.name);
+  const [section, setSection] = useState(user!.section ?? "");
+  const [room, setRoom] = useState(user!.room ?? "");
+  const [registry, setRegistry] = useState(String(user!.registry ?? ""));
+  const [err, setErr] = useState("");
+  const [saved, setSaved] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  async function save() {
+    setBusy(true);
+    setErr("");
+    setSaved(false);
+    try {
+      await saveProfile({
+        name,
+        section,
+        room,
+        ...(registry !== "" ? { registry: Number(registry) } : {}),
+      });
+      setSaved(true);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "Could not save.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const fields: [string, string, (v: string) => void, string, string][] = [
+    ["Name", name, setName, "Ms. Reyes", "name"],
+    ["Grade / Section", section, setSection, "Grade 3 - Sec A", "section"],
+    ["Default Room", room, setRoom, "Bldg A | Flr 2 | Rm 204", "room"],
+    [
+      "Today's registry (number of pupils)",
+      registry,
+      (v: string) => setRegistry(v.replace(/\D/g, "").slice(0, 3)),
+      "28",
+      "registry",
+    ],
+  ];
+
+  return (
+    <section className="rounded-2xl border border-slate-200 bg-white p-4">
+      <h2 className="text-xs font-bold uppercase tracking-wide text-slate-500">My classroom</h2>
+      <div className="mt-2 space-y-3">
+        {fields.map(([label, val, set, ph, id]) => (
+          <label key={id} htmlFor={`classroom-${id}`} className="block text-xs font-semibold text-slate-600">
+            {label}
+            <input
+              id={`classroom-${id}`}
+              value={val}
+              onChange={(e) => set(e.target.value)}
+              placeholder={ph}
+              inputMode={id === "registry" ? "numeric" : undefined}
+              className="mt-1 min-h-12 w-full rounded-xl border border-slate-300 px-3 text-base font-normal outline-none focus:border-brand-500"
+            />
+          </label>
+        ))}
+        <p className="text-xs text-slate-500">
+          Registry = pupils expected today. It is the baseline for the headcount. To pick the
+          classroom from the campus map, use “Change location” on the report screen.
+        </p>
+        {err && (
+          <p role="alert" className="text-sm text-blush-700">
+            {err}
+          </p>
+        )}
+        {saved && (
+          <p role="status" className="text-sm text-emerald-700">
+            Classroom saved.
+          </p>
+        )}
+        <button
+          onClick={() => void save()}
+          disabled={busy}
+          className="min-h-12 w-full rounded-xl bg-brand-600 font-bold text-white disabled:opacity-60"
+        >
+          {busy ? "Saving…" : "Save classroom"}
+        </button>
+      </div>
+    </section>
+  );
+}
 
 export default function AccountView() {
   const { user, changePassword, logout } = useApp();
@@ -30,22 +109,12 @@ export default function AccountView() {
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [about, setAbout] = useState(false);
 
-  const policy = user ? POLICY_PLACEHOLDER[user.role] ?? "Use 8 characters or more." : "Use 8 characters or more.";
-  const minLen = user?.role === "principal" || user?.role === "super_admin" ? 10 : 8;
-  const needsComposition = user?.role === "principal" || user?.role === "super_admin";
-
-  function clientSideIssue() {
-    if (next.length < minLen) return policy;
-    if (needsComposition) {
-      if (!/[a-zA-Z]/.test(next)) return "Your password must include at least one letter.";
-      if (!/[0-9]/.test(next)) return "Your password must include at least one number.";
-    }
-    return null;
-  }
+  const isTeacher = user!.role === "teacher";
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
-    const issue = clientSideIssue();
+    // Same policy as the server; the account-specific rules are enforced there.
+    const issue = validatePassword(next, {});
     if (issue) { setMsg({ ok: false, text: issue }); return; }
     setBusy(true); setMsg(null);
     try {
@@ -72,6 +141,8 @@ export default function AccountView() {
             </p>
             {user!.room && <p className="mt-0.5 text-xs text-slate-500">{user!.room}</p>}
           </section>
+
+          {isTeacher && <MyClassroom />}
 
           <button onClick={() => setAbout(true)}
             className="min-h-12 w-full rounded-xl border border-slate-200 bg-white text-sm font-bold text-brand-700">
@@ -100,25 +171,13 @@ export default function AccountView() {
             </span>
           </label>
 
-          <p className="text-xs text-slate-500">{policy}</p>
-
-          {needsComposition && next.length > 0 && (
-            <p className="text-xs text-slate-500">
-              {next.length < minLen
-                ? `At least ${minLen - next.length} more character${minLen - next.length === 1 ? "" : "s"}.`
-                : (!/[a-zA-Z]/.test(next)
-                  ? "Add at least one letter."
-                  : !/[0-9]/.test(next)
-                    ? "Add at least one number."
-                    : "")}
-            </p>
-          )}
+          <p className="text-xs text-slate-500">{POLICY_TEXT}</p>
 
           <label className="block text-xs font-semibold text-slate-600" htmlFor="new-password">
             New password
             <span className="relative mt-1 block">
               <input id="new-password" type={showNext ? "text" : "password"} autoComplete="new-password"
-                value={next} onChange={(e) => setNext(e.target.value)} required placeholder={policy}
+                value={next} onChange={(e) => setNext(e.target.value)} required placeholder="Choose a strong password"
                 className="min-h-12 w-full rounded-xl border border-slate-300 px-3 pr-12 text-base font-normal outline-none focus:border-brand-500" />
               <button type="button" onClick={() => setShowNext((v) => !v)} aria-label={showNext ? "Hide new password" : "Show new password"}
                 className="absolute inset-y-0 right-0 flex w-12 items-center justify-center text-slate-500">

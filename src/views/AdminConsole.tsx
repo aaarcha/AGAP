@@ -1,13 +1,15 @@
 import { useState, useEffect, useMemo, type ReactNode } from "react";
 import {
   Users, ClipboardList, Calendar, Plus, RefreshCw, Unlock, UserX, UserCheck, Key, Eye, EyeOff, Copy, Check, AlertCircle,
-  SlidersHorizontal, User, Search, X, History, Pencil, RotateCcw, Save,
+  SlidersHorizontal, Search, X, History, Pencil, RotateCcw, Save,
 } from "lucide-react";
 import { api } from "../lib/api";
 import type { AccountRecord, AuditEntry, ConfigPayload, ConfigVersion, SchoolYear, TempCredential } from "../lib/types";
 import { Modal, ConfirmModal } from "../components/Modal";
 import { dateTime } from "../lib/format";
-import { Header, StatusBanner, BottomNav, SideNav, type NavTab } from "../components/Chrome";
+import { Header, StatusBanner } from "../components/Chrome";
+import { RoleNav } from "../components/RoleNav";
+import { ADMIN_TABS, type AdminTab } from "../lib/navigation";
 import { MasterDetail } from "../components/MasterDetail";
 import { Select } from "../components/Select";
 import AccountView from "./AccountView";
@@ -20,18 +22,8 @@ const btnPrimary = `${btn} bg-brand-600 text-white`;
 const btnSecondary = `${btn} bg-slate-100 text-slate-700`;
 const btnDanger = `${btn} bg-blush-100 text-blush-700`;
 
-type Tab = "accounts" | "audit" | "schoolyear" | "config" | "account";
-
-const TABS: NavTab<Tab>[] = [
-  { id: "accounts", label: "Accounts", icon: Users },
-  { id: "audit", label: "Audit", icon: ClipboardList },
-  { id: "schoolyear", label: "Year", icon: Calendar },
-  { id: "config", label: "Configuration", icon: SlidersHorizontal },
-  { id: "account", label: "Account", icon: User },
-];
-
 export default function AdminConsole() {
-  const [tab, setTab] = useState<Tab>("accounts");
+  const [tab, setTab] = useState<AdminTab>("accounts");
   const [accounts, setAccounts] = useState<AccountRecord[]>([]);
   const [auditEntries, setAuditEntries] = useState<AuditEntry[]>([]);
   const [schoolYear, setSchoolYear] = useState<SchoolYear | null>(null);
@@ -49,9 +41,9 @@ export default function AdminConsole() {
 
   // Leaving Configuration with unsaved edits asks first (ConfigTab reports its dirty state).
   const [configDirty, setConfigDirty] = useState(false);
-  const [leaveTo, setLeaveTo] = useState<Tab | null>(null);
+  const [leaveTo, setLeaveTo] = useState<AdminTab | null>(null);
 
-  function guardedSetTab(next: Tab) {
+  function guardedSetTab(next: AdminTab) {
     if (tab === "config" && next !== "config" && configDirty) { setLeaveTo(next); return; }
     setConfigDirty(false);
     setTab(next);
@@ -119,7 +111,7 @@ export default function AdminConsole() {
 
   return (
     <div className="flex h-dvh overflow-hidden bg-cream">
-      <SideNav tab={tab} setTab={guardedSetTab} tabs={TABS} subtitle="Super Admin" />
+      <RoleNav role="super_admin" tab={tab} setTab={guardedSetTab} />
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
         <Header title="Super Admin" subtitle="Accounts, audit and configuration" />
         <StatusBanner />
@@ -198,7 +190,7 @@ export default function AdminConsole() {
           {tab === "config" && <ConfigTab onDirtyChange={setConfigDirty} />}
           {tab === "account" && <AccountView />}
         </main>
-        <BottomNav tab={tab} setTab={guardedSetTab} tabs={TABS} />
+
       </div>
 
       {showProvision && (
