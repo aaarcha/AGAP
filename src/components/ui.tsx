@@ -1,5 +1,4 @@
-import { useState, useEffect } from "react";
-import { ChevronDown, X } from "lucide-react";
+import { ChevronDown } from "lucide-react";
 
 export function PageHeader({ title, subtitle }: { title: string; subtitle?: string }) {
   return (
@@ -35,41 +34,33 @@ export function Callout({ children, title }: { children: React.ReactNode; title:
   );
 }
 
-export function Accordion({ title, children, expanded, onToggle }: {
+/** Uncontrolled accordion: a native <details>, so the browser owns open/closed
+ *  state, keyboard behaviour and the full content (no clamping, no max-height).
+ *  Closed by default; opening shows the content in full.
+ *  `nested` renders the lighter style used for one-question-per-row lists. */
+export function Accordion({ title, children, nested }: {
   title: string;
   children: React.ReactNode;
-  expanded?: boolean;
-  onToggle?: () => void;
+  nested?: boolean;
 }) {
-  const [isExpanded, setIsExpanded] = useState(false);
-
-  useEffect(() => {
-    if (expanded !== undefined) setIsExpanded(expanded);
-  }, [expanded]);
-
-  const handleToggle = () => {
-    setIsExpanded((prev: boolean) => !prev);
-    onToggle?.();
-  };
-
+  if (nested) {
+    return (
+      <details className="group rounded-lg border border-slate-100 bg-slate-50">
+        <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-3 px-3 py-2.5 text-sm font-semibold text-slate-700 [&::-webkit-details-marker]:hidden">
+          <span>{title}</span>
+          <ChevronDown size={16} className="shrink-0 text-slate-400 transition-transform group-open:rotate-180" />
+        </summary>
+        <div className="px-3 pb-3 text-sm text-slate-600">{children}</div>
+      </details>
+    );
+  }
   return (
-    <details className="mt-3" open={isExpanded}>
-      <summary
-        className="
-          cursor-pointer
-          flex items-center gap-2
-          text-sm font-medium text-slate-700
-          hover:text-brand-600
-          focus-visible:outline focus-visible:outline-2 focus-visible:outline-brand-600 focus-visible:ring-2
-        "
-        onClick={handleToggle}
-      >
-        {title}
-        <ChevronDown size={14} className="shrink-0 text-slate-400 transition-transform duration-200 [&.rotated]:transform-rotate-180" />
+    <details className="group rounded-xl border border-slate-200 bg-white">
+      <summary className="flex min-h-12 cursor-pointer list-none items-center justify-between gap-3 px-4 py-3 text-sm font-semibold text-slate-800 [&::-webkit-details-marker]:hidden">
+        <span>{title}</span>
+        <ChevronDown size={16} className="shrink-0 text-slate-400 transition-transform group-open:rotate-180" />
       </summary>
-      <div className="mt-2 text-sm text-slate-600 line-clamp-3">
-        {children}
-      </div>
+      <div className="px-4 pb-4 text-sm text-slate-600">{children}</div>
     </details>
   );
 }

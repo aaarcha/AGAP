@@ -38,6 +38,8 @@ interface Ctx {
   queue: QueuedReport[];
   alerts: AlertItem[];
   dismissAlert: (id: string) => void;
+  /** Raise a non-system toast (e.g. "password changed") from a UI action. */
+  notify: (a: Omit<AlertItem, "id">) => void;
   notifPermission: NotificationPermission | "unsupported";
   enableNotifications: () => Promise<void>;
   /** true while the signed-in account must set a new password (first sign-in / yearly rollover) */
@@ -251,7 +253,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     setToken(r.token);
     setUser(r.user);
     setMustChange(Boolean(r.mustChange));
-    setPasswordPolicy((r as any).passwordPolicy ?? POLICY_TEXT);
+    setPasswordPolicy(r.policy ?? POLICY_TEXT);
     if (!r.mustChange) await refresh();
     return Boolean(r.mustChange);
   }, [refresh, resetLocal]);
@@ -459,10 +461,12 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   const queue = useMemo(() => queueAll.filter((q) => q.userId === user?.id), [queueAll, user?.id]);
 
+  const notify = useCallback((a: Omit<AlertItem, "id">) => pushAlert(a, false), [pushAlert]);
+
   const value: Ctx = {
     user, ready, config, incidents, roster, sections, modes, drills, now, online, connected, live,
     queue, alerts, dismissAlert, notifPermission, enableNotifications, mustChange, passwordPolicy, login, changePassword, logout, refresh, submit, cancelQueued,
-    act, recordHeadcount, setHazard, setDrill, setRoute, markSeen, cancelReport,  deleteIncident, clearHistory, saveProfile, addTeacher, editTeacher, deleteTeacher, changeSavedRoom,
+    act, recordHeadcount, setHazard, setDrill, setRoute, markSeen, cancelReport,  deleteIncident, clearHistory, saveProfile, addTeacher, editTeacher, deleteTeacher, changeSavedRoom, notify,
   };
   return <AppCtx.Provider value={value}>{children}</AppCtx.Provider>;
 }

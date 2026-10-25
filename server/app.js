@@ -923,6 +923,19 @@ export function createApp(opts = {}) {
       acc.lockedUntil = 0;
       acc.lastLoginAt = t;
       const token = issueSession(acc, req);
+
+      // Enforce the CURRENT password policy on the password the user just typed.
+      // A legacy/weak password that still matches the stored hash is not allowed to
+      // continue — the user is sent to the forced-change screen. The plaintext is used
+      // once here and is never stored or written to the audit log.
+      const policyIssue = passwordProblem(password, { email: acc.email, name: acc.name });
+      if (policyIssue) {
+        acc.mustChange = true;
+        store.save();
+        audit("login_policy", { by: acc.email, target: acc.email, detail: "entered password does not meet current policy", req });
+        return send(res, 200, { token, user, mustChange: true, policy: POLICY_TEXT });
+      }
+
       store.save();
       audit("login_success", { by: acc.email, target: acc.email, req });
       return send(res, 200, { token, user, mustChange: Boolean(acc.mustChange) });

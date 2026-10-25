@@ -236,6 +236,7 @@ export interface LoginResult {
   token: string;
   user: User;
   mustChange: boolean;
+  policy?: string;
 }
 
 export interface AlertItem {

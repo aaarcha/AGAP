@@ -506,7 +506,7 @@ export function Command() {
 
 function BackBar({ title, onBack }: { title: string; onBack: () => void }) {
   return (
-    <div className="mx-auto flex w-full max-w-6xl items-center gap-2 px-3 pt-3">
+    <div data-testid="back-bar" className="mx-auto flex w-full max-w-6xl items-center gap-2 px-3 pt-3">
       <button onClick={onBack} className="min-h-12 rounded-xl bg-white px-3 text-sm font-bold text-brand-700 shadow-sm">← More</button>
       <p className="text-sm font-bold text-slate-600">{title}</p>
     </div>
@@ -526,9 +526,11 @@ function More() {
       <div className="lg:min-h-0 lg:flex-1">{node}</div>
     </div>
   );
+  // Only "roster" keeps the shell: AboutView and AccountView carry their own
+  // single back bar, so wrapping them here would render two.
   if (screen === "roster") return shell("Teacher roster", <RosterPanel />);
-  if (screen === "about") return shell("About ASPIRE", <AboutView />);
-  if (screen === "account") return shell("Account", <AccountView />);
+  if (screen === "about") return <AboutView onBack={() => setScreen("menu")} />;
+  if (screen === "account") return <AccountView onBack={() => setScreen("menu")} />;
   return (
     <div className="scroll-area mx-auto w-full max-w-md space-y-2 px-3 py-3 lg:h-full lg:overflow-y-auto">
       {items.map((it) => (

@@ -39,6 +39,12 @@ export function CampusPicker({
   onPick,
   onClose,
   onSaveDefault,
+  title,
+  showCommonAreas,
+  showUnverified,
+  showSavedRoom,
+  showDetected,
+  intro,
 }: {
   savedRoom: string;
   detected: DetectedPlace | null;
@@ -47,7 +53,19 @@ export function CampusPicker({
   onClose: () => void;
   /** Optional: also make the chosen classroom the teacher's default room. */
   onSaveDefault?: (roomId: string) => Promise<void> | void;
+  title?: string;
+  showCommonAreas?: boolean;
+  showUnverified?: boolean;
+  showSavedRoom?: boolean;
+  showDetected?: boolean;
+  intro?: string;
 }) {
+  const showCommon = showCommonAreas != null ? showCommonAreas : true;
+  const showUnv = showUnverified != null ? showUnverified : true;
+  const showSaved = showSavedRoom != null ? showSavedRoom : true;
+  const showDet = showDetected != null ? showDetected : true;
+  const titleText = title ?? "Change location";
+  const introText = intro ?? "Pick the place of this report. The alert is never held up by this sheet.";
   const initialBuilding = useMemo(() => {
     if (picked?.kind === "room") return roomById(picked.roomId)?.buildingId ?? CAMPUS_BUILDINGS[0].id;
     return CAMPUS_BUILDINGS[0].id;
@@ -79,15 +97,13 @@ export function CampusPicker({
   }
 
   return (
-    <Modal title="Change location" onClose={onClose}>
+    <Modal title={titleText} onClose={onClose}>
       <div className="space-y-3">
-        <p className="text-xs text-slate-500">
-          Pick the place of this report. The alert is never held up by this sheet.
-        </p>
+        <p className="text-xs text-slate-500">{introText}</p>
 
         <SchoolMap
           room={savedRoom}
-          showDetected
+          showDetected={showDet}
           detectedPosition={detected?.point ?? null}
           selectedPoint={selectedPoint}
           roomMarkers={markers}
@@ -149,29 +165,35 @@ export function CampusPicker({
           </div>
         </div>
 
-        <div>
-          <p className="mb-1.5 text-xs font-extrabold uppercase tracking-wide text-slate-500">Common areas</p>
-          <div className="flex flex-wrap gap-2">
-            {CAMPUS_COMMON_AREAS.map((a) => (
-              <button key={a.id}
-                onClick={() => onPick({ kind: "area", areaId: a.id, label: a.label })}
-                className={chip(picked?.kind === "area" && picked.areaId === a.id)}>
-                {a.label}
-              </button>
-            ))}
+        {showCommon && (
+          <div>
+            <p className="mb-1.5 text-xs font-extrabold uppercase tracking-wide text-slate-500">Common areas</p>
+            <div className="flex flex-wrap gap-2">
+              {CAMPUS_COMMON_AREAS.map((a) => (
+                <button key={a.id}
+                  onClick={() => onPick({ kind: "area", areaId: a.id, label: a.label })}
+                  className={chip(picked?.kind === "area" && picked.areaId === a.id)}>
+                  {a.label}
+                </button>
+              ))}
+            </div>
+            <p className="mt-1 text-xs text-slate-500">Common areas carry their own Location Risk.</p>
           </div>
-          <p className="mt-1 text-xs text-slate-500">Common areas carry their own Location Risk.</p>
-        </div>
+        )}
 
         <div className="space-y-2 border-t border-slate-100 pt-3">
-          <button className={`${chip(picked?.kind === "saved")} w-full text-left`}
-            onClick={() => onPick({ kind: "saved" })}>
-            <span className="inline-flex items-center gap-1.5"><MapPin size={14} /> My saved room — {savedRoom}</span>
-          </button>
-          <button className={`${chip(picked?.kind === "unverified")} w-full text-left`}
-            onClick={() => onPick({ kind: "unverified" })}>
-            Not listed / can’t verify
-          </button>
+          {showSaved && (
+            <button className={`${chip(picked?.kind === "saved")} w-full text-left`}
+              onClick={() => onPick({ kind: "saved" })}>
+              <span className="inline-flex items-center gap-1.5"><MapPin size={14} /> My saved room — {savedRoom}</span>
+            </button>
+          )}
+          {showUnv && (
+            <button className={`${chip(picked?.kind === "unverified")} w-full text-left`}
+              onClick={() => onPick({ kind: "unverified" })}>
+              Not listed / can’t verify
+            </button>
+          )}
         </div>
 
         {onSaveDefault && picked?.kind === "room" && (

@@ -1,11 +1,22 @@
 import type { ReactNode } from "react";
-import { Bell, Download, X, WifiOff } from "lucide-react";
+import { ArrowLeft, Bell, Download, X, WifiOff } from "lucide-react";
 import { HAZARD_KINDS } from "../../shared/domain.js";
 import { useApp } from "../lib/store";
 import { usePwaInstall } from "../lib/pwa";
 import type { NavTab } from "../lib/navigation";
 
 export type { NavTab };
+
+export function BackBarFor({ title, onBack }: { title: string; onBack: () => void }) {
+  return (
+    <div data-testid="back-bar" className="flex items-center gap-2 border-b border-slate-200 px-3 py-2">
+      <button type="button" onClick={onBack} className="min-h-12 flex items-center gap-1.5 rounded-xl bg-brand-100 px-3 text-sm font-bold text-brand-800">
+        <ArrowLeft size={16} /> Back
+      </button>
+      <h2 className="text-sm font-bold text-slate-700">{title}</h2>
+    </div>
+  );
+}
 
 export function Header({ title, subtitle }: { title: string; subtitle?: string }) {
   const { user, notifPermission, enableNotifications } = useApp();

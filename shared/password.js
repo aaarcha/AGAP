@@ -35,6 +35,44 @@ const emailLocalPart = (email) => {
 };
 
 /**
+ * True when the password is on the refused-common list. One definition,
+ * shared by the live checklist and the authoritative server check.
+ * @param {string} password
+ * @returns {boolean}
+ */
+export function isCommonPassword(password) {
+  return COMMON_PASSWORDS.has(String(password ?? "").toLowerCase());
+}
+
+/** Which account fact (if any) the password leaks: "email", "name", or null.
+ *  The single implementation of the rule; both validatePassword and the
+ *  exported helpers below are derived from it.
+ * @param {string} password
+ * @param {{ email?: string, name?: string }} account
+ * @returns {"email" | "name" | null}
+ */
+function accountInfoMatch(password, account) {
+  const s = String(password ?? "");
+  const localPart = emailLocalPart(account?.email).trim().toLowerCase();
+  if (localPart.length >= 3 && s.toLowerCase().includes(localPart)) return "email";
+  const name = String(account?.name ?? "").trim().toLowerCase();
+  if (name.length >= 3 && s.toLowerCase().includes(name)) return "name";
+  return null;
+}
+
+/**
+ * True when the password contains the account's email local-part or name
+ * (each only checked when it is at least 3 characters long). Used by both
+ * validatePassword and the live checklist, so the two can never drift.
+ * @param {string} password
+ * @param {{ email?: string, name?: string }} [account]
+ * @returns {boolean}
+ */
+export function containsAccountInfo(password, account = {}) {
+  return accountInfoMatch(password, account ?? {}) !== null;
+}
+
+/**
  * The static half of the policy (everything except "must differ from the
  * current password", which can only be checked against the stored hash).
  * @param {string} password
@@ -46,18 +84,17 @@ export function validatePassword(password, account = {}) {
   if (s.length < PASSWORD_MIN) return `Password must be at least ${PASSWORD_MIN} characters.`;
   if (s.length > PASSWORD_MAX) return `Password must be ${PASSWORD_MAX} characters or fewer.`;
   if (s.trim() !== s) return "Password must not start or end with a space.";
-  if (COMMON_PASSWORDS.has(s.toLowerCase())) return "That password is too common. Please choose a different one.";
+  if (isCommonPassword(s)) return "That password is too common. Please choose a different one.";
   if (!/[A-Z]/.test(s)) return "Password must include at least one uppercase letter.";
   if (!/[a-z]/.test(s)) return "Password must include at least one lowercase letter.";
   if (!/[0-9]/.test(s)) return "Password must include at least one digit.";
   if (!/[^A-Za-z0-9]/.test(s)) return "Password must include at least one special character.";
 
-  const localPart = emailLocalPart(account.email).trim().toLowerCase();
-  if (localPart.length >= 3 && s.toLowerCase().includes(localPart))
-    return "Your password must not contain your email address.";
-  const name = String(account.name ?? "").trim().toLowerCase();
-  if (name.length >= 3 && s.toLowerCase().includes(name))
-    return "Your password must not contain your account name.";
+  // Account-specific rules: the same helper the live checklist uses, so the
+  // two messages stay distinct without a second copy of the rule.
+  const info = accountInfoMatch(s, account ?? {});
+  if (info === "email") return "Your password must not contain your email address.";
+  if (info === "name") return "Your password must not contain your account name.";
   return null;
 }
 
