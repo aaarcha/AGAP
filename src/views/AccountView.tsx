@@ -1,14 +1,17 @@
-import { useState } from "react";
-import { ChevronRight, Info, KeyRound, LogOut, School } from "lucide-react";
+import { useEffect, useState } from "react";
+import { ChevronRight, Info, KeyRound, LogOut, Minus, Plus, School } from "lucide-react";
 import { useApp } from "../lib/store";
-import { Modal } from "../components/Modal";
+import { ConfirmModal, Modal } from "../components/Modal";
 import { validatePassword } from "../lib/password";
 import { BackBarFor } from "../components/Chrome";
 import { Card, SectionLabel } from "../components/ui";
 import { CampusPicker } from "../components/CampusPicker";
 import { ChangePasswordForm } from "../components/ChangePassword";
+import { Select } from "../components/Select";
 import AboutView from "./AboutView";
 import { SCHOOL } from "../../shared/domain.js";
+import { roomById } from "../../shared/campus.js";
+import { clockTime, startOfToday } from "../lib/format";
 
 const ROLE_LABEL: Record<string, string> = {
   teacher: "Teacher",
@@ -54,112 +57,275 @@ function AccountRow({
   );
 }
 
-/** Teachers pick their default classroom here (Account → My classroom). */
-function MyClassroomSheet({ onBack }: { onBack: () => void }) {
-  const { user, saveProfile, changeSavedRoom } = useApp();
-  const school = useApp().config?.school?.name ?? SCHOOL.name;
-  const [section, setSection] = useState(user!.section ?? "");
-  const [sectionErr, setSectionErr] = useState<string | null>(null);
-  const [saved, setSaved] = useState(false);
-  const [busy, setBusy] = useState(false);
+const GRADES = ["Kindergarten", "Grade 1", "Grade 2", "Grade 3", "Grade 4", "Grade 5", "Grade 6"];
+const GRADE_OPTIONS = GRADES.map((g) => ({ value: g, label: g }));
 
-  async function pickRoom(roomId: string) {
-    try {
-      await changeSavedRoom(roomId);
-    } catch {
-      /* network-only: the room chip still shows the picked room locally */
-    }
+/** Stored format "Grade 3 - Sec A" (Kindergarten: "Kinder - Sec A") → its parts.
+ *  Anything else returns null so the raw string is shown instead of guessing. */
+function parseSection(raw: string): { grade: string; sec: string } | null {
+  const m = /^(Kinder|Grade [1-6])\s*-\s*Sec\s+(.+)$/.exec(raw.trim());
+  if (!m) return null;
+  const grade = m[1] === "Kinder" ? "Kindergarten" : m[1];
+  if (!GRADES.includes(grade)) return null;
+  return { grade, sec: m[2].trim() };
+}
+
+/** Compose the stored string from the grade select and the section field. */
+function composeSection(grade: string, sec: string): string {
+  return `${grade === "Kindergarten" ? "Kinder" : grade} - Sec ${sec.trim()}`;
+}
+
+/** "Set today at 7:45 AM" when the registry was set today, else "Last set <date>". */
+function registryStamp(ts: number | null | undefined): string | null {
+  if (!ts) return null;
+  return ts >= startOfToday(Date.now())
+    ? `Set today at ${clockTime(ts)}`
+    : `Last set ${new Date(ts).toLocaleDateString("en-PH", { month: "short", day: "numeric", year: "numeric" })}`;
+}
+
+/** Account → My profile: ONE screen with four sections (Card + SectionLabel) —
+ *  name, grade/section, default room and today's registry — one Save button,
+ *  inline validation, a success toast and an unsaved-changes guard on back. */
+function ProfileEditor({ onBack }: { onBack: () => void }) {
+  const { user, saveProfile, changeSavedRoom, notify } = useApp();
+  const initial = parseSection(user!.section ?? "");
+  const [name, setName] = useState(user!.name);
+  const [grade, setGrade] = useState(initial?.grade ?? "");
+  const [sec, setSec] = useState(initial?.sec ?? user!.section ?? "");
+  const [registry, setRegistry] = useState(String(user!.registry ?? ""));
+  const [pendingRoomId, setPendingRoomId] = useState<string | null>(null);
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [errs, setErrs] = useState<Record<string, string>>({});
+  const [busy, setBusy] = useState(false);
+  const [confirmSection, setConfirmSection] = useState(false);
+  const [confirmDiscard, setConfirmDiscard] = useState(false);
+
+  // The saved room, or the staged pick resolved to its canonical legacy string.
+  const roomLabel = pendingRoomId
+    ? roomById(pendingRoomId)?.legacy ?? user!.room ?? ""
+    : user!.room ?? "";
+  const composed = grade ? composeSection(grade, sec) : "";
+  const sectionChanged = Boolean(grade) && composed !== (user!.section ?? "");
+  const dirty =
+    name !== user!.name ||
+    grade !== (initial?.grade ?? "") ||
+    sec !== (initial?.sec ?? user!.section ?? "") ||
+    registry !== String(user!.registry ?? "") ||
+    pendingRoomId !== null;
+
+  const clear = (key: string) => setErrs((e) => ({ ...e, [key]: "" }));
+
+  /** Whole numbers only, 0 to 200; the steppers clamp instead of rejecting. */
+  function stepRegistry(delta: number) {
+    const raw = Number(registry);
+    const n = Number.isFinite(raw) ? Math.trunc(raw) : 0;
+    setRegistry(String(Math.min(200, Math.max(0, n + delta))));
+    clear("registry");
   }
 
-  async function saveSection() {
-    if (!section.trim()) {
-      setSectionErr("Enter your grade or section.");
-      return;
-    }
-    setSectionErr(null);
+  function validate(): Record<string, string> {
+    const e: Record<string, string> = {};
+    if (!name.trim()) e.name = "Enter your name.";
+    if (!grade) e.grade = "Pick a grade.";
+    else if (!sec.trim()) e.sec = "Enter your section (for example, A).";
+    const n = Number(registry);
+    if (!/^\d+$/.test(registry.trim()) || !Number.isInteger(n) || n < 0 || n > 200)
+      e.registry = "Enter a whole number from 0 to 200.";
+    if (!roomLabel) e.room = "Pick a default room.";
+    return e;
+  }
+
+  function save() {
+    const found = validate();
+    setErrs(found);
+    if (Object.keys(found).length) return;
+    // A section change moves linked parent accounts — confirm before writing.
+    if (sectionChanged) { setConfirmSection(true); return; }
+    void doSave();
+  }
+
+  async function doSave() {
     setBusy(true);
     try {
-      await saveProfile({ name: user!.name, section: section.trim(), room: user!.room ?? "" });
-      setSaved(true);
-      setTimeout(() => setSaved(false), 1800);
-    } catch (e) {
-      setSectionErr(e instanceof Error ? e.message : "Could not save.");
-    } finally {
+      await saveProfile({ name: name.trim(), section: composed, room: roomLabel, registry: Number(registry) });
+      if (pendingRoomId) {
+        // The profile save carries the room label; this also moves the GPS anchor.
+        try { await changeSavedRoom(pendingRoomId); } catch { /* label already saved */ }
+      }
+      notify({ kind: "info", title: "Profile saved", body: "Your name, section, room and registry are up to date." });
+      onBack();
+    } catch (err) {
+      setErrs({ form: err instanceof Error ? err.message : "Could not save your profile." });
       setBusy(false);
     }
   }
 
-  const roomLabel = (() => {
-    const r = user!.room;
-    if (!r) return "No default room set.";
-    return r;
-  })();
+  function back() {
+    if (dirty) { setConfirmDiscard(true); return; }
+    onBack();
+  }
+
+  const err = (key: string) =>
+    errs[key] ? <p role="alert" className="mt-1 text-sm text-blush-700">{errs[key]}</p> : null;
+  const input =
+    "mt-1.5 min-h-12 w-full rounded-xl border border-slate-300 px-3 text-base font-normal outline-none focus:border-brand-500";
 
   return (
     <div className="mx-auto w-full max-w-3xl">
-      <BackBarFor title="My classroom" onBack={onBack} />
-      <div className="scroll-area min-h-0 flex-1 overflow-y-auto px-4 pb-6 space-y-4">
+      <BackBarFor title="My profile" onBack={back} />
+      <div className="scroll-area min-h-0 flex-1 overflow-y-auto px-4 pb-6 pt-4 space-y-4">
+        {/* a. Name */}
         <Card>
-          <SectionLabel>Section</SectionLabel>
+          <SectionLabel>Name</SectionLabel>
           <label className="mt-2 block text-xs font-semibold text-slate-600">
-            Grade / Section
+            Full name
             <input
-              value={section}
-              onChange={(e) => { setSection(e.target.value); setSectionErr(null); }}
-              placeholder="Grade 3 - Sec A"
-              className="mt-1.5 min-h-12 w-full rounded-xl border border-slate-300 px-3 text-base font-normal outline-none focus:border-brand-500"
+              value={name}
+              maxLength={80}
+              onChange={(e) => { setName(e.target.value); clear("name"); }}
+              placeholder="Ms. Ana Reyes"
+              className={input}
             />
           </label>
-          {sectionErr && (
-            <p role="alert" className="mt-1 text-sm text-blush-700">{sectionErr}</p>
-          )}
-          <p className="mt-2 text-xs text-slate-500">
-            Your section is shown on alerts and headcounts.
-          </p>
+          {err("name")}
         </Card>
 
+        {/* b. Grade and section — stored as "Grade 3 - Sec A" / "Kinder - Sec A". */}
         <Card>
-          <div className="flex items-center justify-between">
-            <SectionLabel>Default room</SectionLabel>
-            <span className="shrink-0 text-xs font-bold uppercase tracking-wide text-slate-500">Saved</span>
+          <SectionLabel>Grade and section</SectionLabel>
+          <div className="mt-2 space-y-3">
+            <Select
+              value={grade}
+              onChange={(v) => { setGrade(v); clear("grade"); }}
+              options={GRADE_OPTIONS}
+              placeholder="Pick a grade"
+              label="Grade"
+            />
+            <label className="block text-xs font-semibold text-slate-600">
+              Section
+              <input
+                value={sec}
+                maxLength={20}
+                onChange={(e) => { setSec(e.target.value); clear("sec"); }}
+                placeholder="Sec A"
+                className={input}
+              />
+            </label>
           </div>
-          <p className="mt-1 text-sm text-slate-700">{roomLabel}</p>
-          <CampusPicker
-            savedRoom={user!.room ?? ""}
-            detected={null}
-            picked={null}
-            onPick={(p) => { if (p.kind === "room") pickRoom(p.roomId); }}
-            onClose={onBack}
-            onSaveDefault={(roomId) => changeSavedRoom(roomId)}
-            title="Pick classroom"
-            showCommonAreas={false}
-            showUnverified={false}
-            showSavedRoom={false}
-            intro="Choose the classroom you teach. It is used as the default location for your reports."
-          />
+          {err("grade")}
+          {err("sec")}
+          {!initial && (
+            <p className="mt-2 text-xs text-slate-500">
+              Your current section ({user!.section || "not set"}) is not in the usual format — pick your grade and adjust the section.
+            </p>
+          )}
+          <p className="mt-2 text-xs text-slate-500">Your section is shown on alerts and headcounts.</p>
         </Card>
 
-        <div className="flex gap-2">
+        {/* c. Default room — Building → Floor → Room, saved via PUT /api/profile/room. */}
+        <Card>
+          <SectionLabel>Default room</SectionLabel>
+          <p className="mt-1 text-sm text-slate-700">{roomLabel || "No default room set."}</p>
           <button
             type="button"
-            onClick={saveSection}
-            disabled={busy}
-            className="min-h-12 flex-1 rounded-xl bg-brand-600 font-bold text-white disabled:opacity-60"
+            onClick={() => { setPickerOpen(true); clear("room"); }}
+            className="mt-2 min-h-12 w-full rounded-xl border border-slate-300 bg-white text-sm font-bold text-slate-700 hover:border-brand-300"
           >
-            {busy ? "Saving…" : "Save section"}
+            Change room
           </button>
-        </div>
-        {saved && (
-          <p role="status" className="text-sm text-emerald-700">
-            Classroom saved.
-          </p>
-        )}
+          {err("room")}
+          {pickerOpen && (
+            <CampusPicker
+              savedRoom={roomLabel}
+              detected={null}
+              picked={pendingRoomId ? { kind: "room", roomId: pendingRoomId, label: roomLabel } : null}
+              onPick={(p) => { if (p.kind === "room") { setPendingRoomId(p.roomId); setPickerOpen(false); } }}
+              onClose={() => setPickerOpen(false)}
+              title="Pick classroom"
+              showCommonAreas={false}
+              showUnverified={false}
+              showSavedRoom={false}
+              showDetected={false}
+              intro="Choose the classroom you teach. It is used as the default location for your reports."
+            />
+          )}
+        </Card>
+
+        {/* d. Today's registry — 0 to 200, whole numbers, with - / + steppers. */}
+        <Card>
+          <SectionLabel>Today's registry</SectionLabel>
+          <div className="mt-2 flex items-center gap-2">
+            <button
+              type="button"
+              aria-label="One fewer pupil"
+              onClick={() => stepRegistry(-1)}
+              className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl border border-slate-300 bg-white text-slate-700 hover:border-brand-300"
+            >
+              <Minus size={18} />
+            </button>
+            <input
+              value={registry}
+              onChange={(e) => { setRegistry(e.target.value.replace(/[^\d.]/g, "").slice(0, 6)); clear("registry"); }}
+              inputMode="numeric"
+              aria-label="Today's registry"
+              className="min-h-12 w-full rounded-xl border border-slate-300 px-3 text-center font-mono text-base outline-none focus:border-brand-500"
+            />
+            <button
+              type="button"
+              aria-label="One more pupil"
+              onClick={() => stepRegistry(1)}
+              className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl border border-slate-300 bg-white text-slate-700 hover:border-brand-300"
+            >
+              <Plus size={18} />
+            </button>
+          </div>
+          <p className="mt-2 text-xs text-slate-500">Used to check headcount.</p>
+          {registryStamp(user!.registryUpdatedAt) && (
+            <p className="mt-1 text-xs text-slate-500">{registryStamp(user!.registryUpdatedAt)}</p>
+          )}
+          {err("registry")}
+        </Card>
+
+        <button
+          type="button"
+          onClick={save}
+          disabled={busy}
+          className="min-h-12 w-full rounded-xl bg-brand-600 font-bold text-white disabled:opacity-60"
+        >
+          {busy ? "Saving…" : "Save"}
+        </button>
+        {errs.form && <p role="alert" className="text-sm text-blush-700">{errs.form}</p>}
       </div>
+
+      {confirmSection && (
+        <ConfirmModal
+          title="Change your section?"
+          message="Changing your section also moves linked parent accounts to the new section. Continue?"
+          confirmLabel="Yes, change section"
+          onConfirm={() => void doSave()}
+          onClose={() => setConfirmSection(false)}
+        />
+      )}
+      {confirmDiscard && (
+        <ConfirmModal
+          title="Discard your changes?"
+          message="Your edits to this profile have not been saved."
+          confirmLabel="Discard changes"
+          danger
+          onConfirm={onBack}
+          onClose={() => setConfirmDiscard(false)}
+        />
+      )}
     </div>
   );
 }
 
-export default function AccountView({ onBack }: { onBack?: () => void } = {}) {
+export default function AccountView({ onBack, openProfileSignal = 0, onProfileOpened }: {
+  onBack?: () => void;
+  /** Increments when another screen asks for the profile screen (headcount card link). */
+  openProfileSignal?: number;
+  onProfileOpened?: () => void;
+} = {}) {
   const { user, changePassword, logout, notify } = useApp();
   const school = useApp().config?.school?.name ?? SCHOOL.name;
 
@@ -170,7 +336,15 @@ export default function AccountView({ onBack }: { onBack?: () => void } = {}) {
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
 
-  const [screen, setScreen] = useState<"account" | "classroom" | "change" | "about" | null>(null);
+  const [screen, setScreen] = useState<"account" | "profile" | "change" | "about" | null>(
+    openProfileSignal > 0 ? "profile" : null,
+  );
+  // Consume the "open My profile" request once, so returning to Account later
+  // shows the menu again.
+  useEffect(() => {
+    if (openProfileSignal > 0) onProfileOpened?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [openProfileSignal]);
 
   const isTeacher = user!.role === "teacher";
 
@@ -205,7 +379,7 @@ export default function AccountView({ onBack }: { onBack?: () => void } = {}) {
 
   // One screen at a time: the sub-screens REPLACE the menu instead of stacking
   // on top of it (a screen could never show two back bars at once).
-  if (screen === "classroom") return <MyClassroomSheet onBack={() => setScreen(null)} />;
+  if (screen === "profile") return <ProfileEditor onBack={() => setScreen(null)} />;
   if (screen === "about") return <AboutView onBack={() => setScreen(null)} />;
 
   return (
@@ -226,9 +400,9 @@ export default function AccountView({ onBack }: { onBack?: () => void } = {}) {
         {isTeacher && (
           <AccountRow
             icon={School}
-            label="My classroom"
-            subtitle={[user!.section ?? "Section not set", user!.room].filter(Boolean).join(" · ")}
-            onClick={() => setScreen("classroom")}
+            label="My profile"
+            subtitle={[user!.name, user!.section ?? "Section not set", user!.room ?? "No room set"].join(" · ")}
+            onClick={() => setScreen("profile")}
           />
         )}
 

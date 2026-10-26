@@ -5,7 +5,7 @@ import {
 } from "../../shared/domain.js";
 import { useApp } from "../lib/store";
 import { ApiError } from "../lib/api";
-import { fmtMs, plainOverride } from "../lib/format";
+import { fmtMs, plainOverride, startOfToday } from "../lib/format";
 import type { Incident } from "../lib/types";
 import { Modal } from "./Modal";
 import { Select } from "./Select";
@@ -63,7 +63,7 @@ const ACC_STYLE: Record<string, string> = {
 };
 
 // Headcount verification applies only to group-scope reports (classroom / whole school).
-export function HeadcountPanel({ inc }: { inc: Incident }) {
+export function HeadcountPanel({ inc, onOpenProfile }: { inc: Incident; onOpenProfile?: () => void }) {
   const { user, roster, sections, recordHeadcount } = useApp();
   const open = inc.status !== "RESOLVED";
   const acc = inc.accountability;
@@ -79,6 +79,9 @@ export function HeadcountPanel({ inc }: { inc: Incident }) {
   const [busy, setBusy] = useState(false);
   const registry = isTeacher ? user!.registry : roster.find((r) => r.section === section)?.registry;
   const mine = inc.headcounts.find((h) => h.section === (section || user!.section));
+  // "Registry: N" + a link when today's registry was never set or was set on an earlier day.
+  const registryStale =
+    user!.registryUpdatedAt == null || user!.registryUpdatedAt < startOfToday(Date.now());
 
   if (acc.status === "not_required") return null;
   if (!canRecord && inc.headcounts.length === 0 && !open && user!.role !== "parent") return null;
@@ -101,6 +104,20 @@ export function HeadcountPanel({ inc }: { inc: Incident }) {
           {acc.status === "pending" ? "Not started" : acc.status === "partial" ? `${acc.reported}/${acc.total} sections reported` : acc.status === "verified" ? "All accounted for" : "MISMATCH"}
         </span>
       </div>
+      {isTeacher && (
+        <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+          <span className="font-bold text-slate-700">Registry: {registry ?? "—"}</span>
+          {registryStale && onOpenProfile && (
+            <button
+              type="button"
+              onClick={onOpenProfile}
+              className="font-bold text-brand-700 underline underline-offset-2"
+            >
+              Update today's registry
+            </button>
+          )}
+        </div>
+      )}
       {inc.headcounts.length > 0 && (
         <ul className="space-y-0.5 text-sm text-slate-700">
           {inc.headcounts.map((h) => (
@@ -119,7 +136,7 @@ export function HeadcountPanel({ inc }: { inc: Incident }) {
           )}
           <div className="flex items-end gap-2">
             <label className="flex-1 text-xs font-semibold text-slate-600">
-              Pupils present at the assembly area{registry !== undefined ? ` (registry ${registry})` : ""}
+              Pupils present at the assembly area{!isTeacher && registry !== undefined ? ` (registry ${registry})` : ""}
               <input value={present} onChange={(e) => setPresent(e.target.value.replace(/\D/g, "").slice(0, 3))} inputMode="numeric"
                 placeholder={mine ? String(mine.present) : "e.g. 28"}
                 className="mt-1 min-h-12 w-full rounded-xl border border-slate-300 px-3 font-mono text-base font-normal outline-none focus:border-brand-500" />

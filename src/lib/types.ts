@@ -10,6 +10,8 @@ export interface User {
   room?: string;
   gps?: string;
   registry?: number;
+  /** When the registry above was last set (teacher only; null when never set). */
+  registryUpdatedAt?: number | null;
 }
 
 export interface LogEntry {

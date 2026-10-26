@@ -43,7 +43,10 @@ export function normalize(d) {
   d.audit = Array.isArray(d.audit) ? d.audit : [];
   d.configs = Array.isArray(d.configs) ? d.configs : [];
   d.schoolYear = d.schoolYear && Number.isFinite(d.schoolYear.count) ? d.schoolYear : { count: 0, startedAt: null };
-  for (const r of d.roster) if (!Number.isInteger(r.registry)) r.registry = 30;
+  for (const r of d.roster) {
+    if (!Number.isInteger(r.registry)) r.registry = 30;
+    r.registryUpdatedAt ??= null; // when today's registry was last set (profile / roster edit)
+  }
   for (const i of d.incidents) {
     i.baseLocationRisk ??= i.locationRisk;
     i.baseTimeSensitivity ??= i.timeSensitivity ?? 3;

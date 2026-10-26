@@ -172,7 +172,7 @@ type Loc = Pick<
   "locationKind" | "areaId" | "roomId" | "locationSetBy"
 >;
 
-export default function ReportView() {
+export default function ReportView({ onOpenProfile }: { onOpenProfile?: () => void } = {}) {
   const {
     user,
     incidents,
@@ -640,7 +640,7 @@ export default function ReportView() {
               Count your pupils so the principal can account for everyone.
             </p>
           </div>
-          <HeadcountPanel inc={headcountTask} />
+          <HeadcountPanel inc={headcountTask} onOpenProfile={onOpenProfile} />
         </section>
       )}
 
@@ -853,7 +853,7 @@ export default function ReportView() {
 
             {last.status !== "RESOLVED" && (
               <div className="mt-3">
-                <HeadcountPanel inc={last} />
+                <HeadcountPanel inc={last} onOpenProfile={onOpenProfile} />
               </div>
             )}
             {last.canCancel && (

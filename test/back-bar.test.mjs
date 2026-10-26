@@ -131,8 +131,8 @@ test("teacher: every screen has at most one back bar", () => {
   clickRail("Account");
   assertAtMostOneBar("Account menu"); // 0: root tab, no onBack
 
-  clickButton("My classroom");
-  assert.equal(backBars().length, 1, "My classroom carries its own single back bar");
+  clickButton("My profile");
+  assert.equal(backBars().length, 1, "My profile carries its own single back bar");
   clickBack();
   assertAtMostOneBar("Account menu (after back)");
 

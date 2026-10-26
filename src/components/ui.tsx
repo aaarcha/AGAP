@@ -29,7 +29,9 @@ export function Callout({ children, title }: { children: React.ReactNode; title:
   return (
     <div className="rounded-xl border-l-4 border-brand-600 bg-brand-50 p-3 mb-4">
       <p className="font-semibold text-slate-800">{title}</p>
-      <p className="mt-1 text-sm text-slate-700">{children}</p>
+      {/* A div, not a <p>: callers pass <p> children (AboutContent) and a <p> may
+          never nest inside another <p> — the browser would close the tag early. */}
+      <div className="mt-1 text-sm text-slate-700">{children}</div>
     </div>
   );
 }

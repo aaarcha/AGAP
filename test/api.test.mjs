@@ -1214,3 +1214,139 @@ test("every subtype in CATEGORIES is reachable from the tiles", async () => {
   const medical = CATEGORIES.find((c) => c.id === "medical");
   assert.ok(medical?.subs.some((s) => s.id === "mass_collapse"), "medical.mass_collapse exists");
 });
+
+// ------------------------------------------- My profile (Account → My profile)
+test("the profile screen's API calls update name, section and registry, and stamp registryUpdatedAt", async () => {
+  const s = await boot();
+  const teacher = await s.login("teacher", "t1");
+
+  const before = (await s.call("GET", "/api/me", { token: teacher })).json.user;
+  assert.equal(before.registryUpdatedAt ?? null, null, "never set yet");
+
+  // Exactly what the new screen sends on Save.
+  const saved = await s.call("PUT", "/api/profile", {
+    token: teacher,
+    body: { name: "Ms. Ana Reyes", section: "Grade 3 - Sec B", room: "Bldg A | Flr 2 | Rm 204", registry: 28 },
+  });
+  assert.equal(saved.status, 200, JSON.stringify(saved.json));
+  assert.deepEqual(
+    [saved.json.user.name, saved.json.user.section, saved.json.user.registry],
+    ["Ms. Ana Reyes", "Grade 3 - Sec B", 28],
+  );
+  assert.ok(Number.isInteger(saved.json.user.registryUpdatedAt), "profile response carries registryUpdatedAt");
+
+  const me = (await s.call("GET", "/api/me", { token: teacher })).json.user;
+  assert.deepEqual([me.name, me.section, me.registry], ["Ms. Ana Reyes", "Grade 3 - Sec B", 28], "/api/me reflects the edit");
+  assert.equal(me.registryUpdatedAt, saved.json.user.registryUpdatedAt, "/api/me returns registryUpdatedAt");
+  await s.close();
+});
+
+test("profile validation: empty name, registry 201 and a non-integer registry are rejected", async () => {
+  const s = await boot();
+  const teacher = await s.login("teacher", "t1");
+  const base = { section: "Grade 3 - Sec A", room: "Bldg A | Flr 2 | Rm 204" };
+
+  assert.equal((await s.call("PUT", "/api/profile", { token: teacher, body: { ...base, name: "", registry: 30 } })).status, 400, "empty name");
+  assert.equal((await s.call("PUT", "/api/profile", { token: teacher, body: { ...base, name: "Ms. Reyes", registry: 201 } })).status, 400, "registry above 200");
+  assert.equal((await s.call("PUT", "/api/profile", { token: teacher, body: { ...base, name: "Ms. Reyes", registry: 12.5 } })).status, 400, "non-integer registry");
+  assert.equal((await s.call("PUT", "/api/profile", { token: teacher, body: { ...base, name: "Ms. Reyes", registry: 150 } })).status, 200, "the valid save still goes through");
+  await s.close();
+});
+
+test("a teacher's section change moves parent accounts, incidents and headcounts, and is audited", async () => {
+  const s = await boot();
+  const teacher = await s.login("teacher", "t1");
+  const principal = await s.login("principal");
+  const parent = await s.login("parent", "Grade 3 - Sec A");
+
+  const { incident } = (await s.call("POST", "/api/incidents", { token: teacher, body: report() })).json;
+  await hc(s.call, teacher, incident.id, { present: 28 }); // recorded under the old section
+  assert.equal((await s.call("GET", "/api/me", { token: parent })).json.user.section, "Grade 3 - Sec A");
+
+  const edit = await s.call("PUT", "/api/profile", {
+    token: teacher,
+    body: { name: "Ms. Reyes", section: "Grade 3 - Sec B", room: "Bldg A | Flr 2 | Rm 204" },
+  });
+  assert.equal(edit.status, 200);
+
+  assert.equal((await s.call("GET", "/api/me", { token: parent })).json.user.section, "Grade 3 - Sec B", "parent account moved with the section");
+  const st = (await s.call("GET", "/api/state", { token: principal })).json;
+  const moved = st.incidents.find((i) => i.id === incident.id);
+  assert.equal(moved.linkedSection, "Grade 3 - Sec B", "incident linkedSection moved");
+  assert.equal(moved.headcounts[0].section, "Grade 3 - Sec B", "headcount record moved");
+  assert.equal(moved.accountability.status, "verified", "the moved headcount still lines up");
+
+  const audit = (await s.call("GET", "/api/admin/audit", { token: await s.loginSuper() })).json.entries;
+  const entry = audit.find((e) => e.action === "section_changed");
+  assert.ok(entry, "section change is audited");
+  assert.match(entry.detail, /Grade 3 - Sec A → Grade 3 - Sec B/);
+  assert.ok(!/password|pwHash|pwSalt/i.test(entry.detail), "the audit entry names fields, never passwords");
+  await s.close();
+});
+
+test("the Principal's roster edit moves parent accounts, incidents and headcounts the same way", async () => {
+  const s = await boot();
+  const teacher = await s.login("teacher", "t1");
+  const principal = await s.login("principal");
+  const parent = await s.login("parent", "Grade 3 - Sec A");
+
+  const { incident } = (await s.call("POST", "/api/incidents", { token: teacher, body: report() })).json;
+  await hc(s.call, teacher, incident.id, { present: 28 });
+
+  const edit = await s.call("PUT", "/api/roster/t1", { token: principal, body: { section: "Grade 3 - Sec C" } });
+  assert.equal(edit.status, 200, JSON.stringify(edit.json));
+  assert.equal((await s.call("GET", "/api/me", { token: parent })).json.user.section, "Grade 3 - Sec C", "parent account moved");
+
+  const st = (await s.call("GET", "/api/state", { token: principal })).json;
+  const moved = st.incidents.find((i) => i.id === incident.id);
+  assert.equal(moved.linkedSection, "Grade 3 - Sec C", "incident linkedSection moved");
+  assert.equal(moved.headcounts[0].section, "Grade 3 - Sec C", "headcount record moved");
+
+  const audit = (await s.call("GET", "/api/admin/audit", { token: await s.loginSuper() })).json.entries;
+  assert.ok(audit.some((e) => e.action === "section_changed" && /Grade 3 - Sec A → Grade 3 - Sec C/.test(e.detail)), "roster edit is audited too");
+  await s.close();
+});
+
+test("the Principal's roster edit also stamps registryUpdatedAt", async () => {
+  const s = await boot();
+  const principal = await s.login("principal");
+  const teacher = await s.login("teacher", "t1");
+  assert.equal((await s.call("GET", "/api/me", { token: teacher })).json.user.registryUpdatedAt ?? null, null);
+
+  const edit = await s.call("PUT", "/api/roster/t1", { token: principal, body: { registry: 30 } });
+  assert.equal(edit.status, 200);
+  assert.ok(Number.isInteger(edit.json.teacher.registryUpdatedAt), "roster response carries registryUpdatedAt");
+  const row = (await s.call("GET", "/api/state", { token: principal })).json.roster.find((r) => r.id === "t1");
+  assert.equal(row.registryUpdatedAt, edit.json.teacher.registryUpdatedAt);
+  await s.close();
+});
+
+test("a new teacher whose registry is 28 and who reports 28 present gets no mismatch", async () => {
+  const s = await boot();
+  const principal = await s.login("principal");
+
+  const created = await s.call("POST", "/api/roster", {
+    token: principal,
+    body: { name: "Mr. Lopez", section: "Grade 1 - Sec A", room: "Bldg A | Flr 2 | Rm 205", registry: 30 },
+  });
+  assert.equal(created.status, 201, JSON.stringify(created.json));
+  const id = created.json.teacher.id;
+
+  // Today's registry is set to 28 through the roster edit (the same code path as the profile screen).
+  const edited = await s.call("PUT", `/api/roster/${id}`, { token: principal, body: { registry: 28 } });
+  assert.equal(edited.status, 200);
+  assert.ok(Number.isInteger(edited.json.teacher.registryUpdatedAt));
+
+  const first = await s.loginWith(created.json.account.email, created.json.tempPassword);
+  assert.equal(first.status, 200);
+  const token = first.json.token;
+  assert.equal((await s.call("POST", "/api/password", { token, body: { password: "Mrlopez-2026!" } })).status, 200);
+
+  const { incident } = (await s.call("POST", "/api/incidents", { token, body: report() })).json;
+  await hc(s.call, token, incident.id, { present: 28 });
+  const inc = (await s.call("GET", "/api/state", { token })).json.incidents.find((i) => i.id === incident.id);
+  assert.equal(inc.headcounts[0].expected, 28, "expected comes from the updated registry");
+  assert.notEqual(inc.accountability.status, "mismatch");
+  assert.equal(inc.accountability.status, "verified");
+  await s.close();
+});

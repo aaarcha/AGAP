@@ -58,6 +58,8 @@ function TeacherReports() {
 export default function App() {
   const { user, ready, mustChange } = useApp();
   const [teacherTab, setTeacherTab] = useState<TeacherTab>("report");
+  // Bumped by the headcount card's "Update today's registry" link; Account opens My profile once.
+  const [profileSignal, setProfileSignal] = useState(0);
   const [parentTab, setParentTab] = useState<ParentTab>("alerts");
   const [pTab, setPTab] = useState<PrincipalTab>("command");
   const [rTab, setRTab] = useState<ResponderTab>("queue");
@@ -95,9 +97,15 @@ export default function App() {
             <div className="w-full max-w-6xl lg:h-full lg:min-h-0">
               {user.role === "teacher" && (
                 <>
-                  {teacherTab === "report" && <ReportView />}
+                  {teacherTab === "report" && (
+                    <ReportView
+                      onOpenProfile={() => { setProfileSignal((n) => n + 1); setTeacherTab("account"); }}
+                    />
+                  )}
                   {teacherTab === "reports" && <TeacherReports />}
-                  {teacherTab === "account" && <AccountView />}
+                  {teacherTab === "account" && (
+                    <AccountView openProfileSignal={profileSignal} onProfileOpened={() => setProfileSignal(0)} />
+                  )}
                 </>
               )}
               {user.role === "parent" && (parentTab === "alerts" ? <ParentView /> : <AccountView />)}

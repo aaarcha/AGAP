@@ -210,7 +210,7 @@ export function createApp(opts = {}) {
     if (acc.role === "teacher") {
       const t = db.roster.find((r) => r.id === acc.teacherId);
       if (!t || t.status !== "active") return null;
-      return { id: t.id, role: "teacher", name: t.name, section: t.section, room: t.room, gps: t.gps, registry: t.registry, subtitle: `Teacher · ${t.section}` };
+      return { id: t.id, role: "teacher", name: t.name, section: t.section, room: t.room, gps: t.gps, registry: t.registry, registryUpdatedAt: t.registryUpdatedAt ?? null, subtitle: `Teacher · ${t.section}` };
     }
     if (acc.role === "parent" && acc.section)
       return { id: acc.id, role: "parent", name: acc.name, section: acc.section, subtitle: `Parent/PTA · ${acc.section}` };
@@ -773,13 +773,31 @@ export function createApp(opts = {}) {
     return { incident: inc, changed };
   }
 
-  function applyTeacherEdit(entry, values) {
+  // One edit path for BOTH the teacher's own profile save and the Principal's roster edit.
+  // `by`/`req` only feed the audit entry – never a password, hash or token.
+  function applyTeacherEdit(entry, values, { by = null, req = null } = {}) {
     const oldSection = entry.section;
+    const newSection = values.section;
+    const sectionChanged = newSection !== undefined && newSection !== oldSection;
     Object.assign(entry, values);
+    // Today's registry was (re)set: stamp it so the report page can offer a refresh.
+    if (values.registry !== undefined) entry.registryUpdatedAt = now();
     for (const inc of store.db.incidents) {
-      if (inc.reporterId !== entry.id) continue;
-      inc.reporterName = entry.name;
-      if (values.section && inc.linkedSection === oldSection) inc.linkedSection = values.section;
+      if (inc.reporterId === entry.id) inc.reporterName = entry.name;
+      if (sectionChanged && inc.linkedSection === oldSection) inc.linkedSection = newSection;
+      if (sectionChanged) for (const h of inc.headcounts || []) if (h.section === oldSection) h.section = newSection;
+    }
+    if (sectionChanged) {
+      // A section rename must not orphan the data hanging off the old string.
+      for (const acc of store.db.accounts) {
+        if (acc.role === "parent" && acc.section === oldSection) acc.section = newSection;
+      }
+      audit("section_changed", {
+        by,
+        target: entry.id,
+        detail: `section changed: ${oldSection} → ${newSection}`,
+        req,
+      });
     }
   }
 
@@ -1366,11 +1384,11 @@ export function createApp(opts = {}) {
       need(user, "teacher");
       const entry = store.db.roster.find((r) => r.id === user.id);
       if (!entry) throw new HttpError(401, "unauthorized", "Please sign in again.");
-      applyTeacherEdit(entry, parseTeacherFields(await readJson(req)));
+      applyTeacherEdit(entry, parseTeacherFields(await readJson(req)), { by: account.email, req });
       const acc = teacherAccount(entry.id);
       if (acc) { acc.name = entry.name; acc.section = entry.section; } // keep the account record in step with the roster
       commit({ type: "roster_updated", id: entry.id });
-      return send(res, 200, { user: userFromAccount(acc) || { id: entry.id, role: "teacher", name: entry.name, section: entry.section, room: entry.room, gps: entry.gps, registry: entry.registry, subtitle: `Teacher · ${entry.section}` } });
+      return send(res, 200, { user: userFromAccount(acc) || { id: entry.id, role: "teacher", name: entry.name, section: entry.section, room: entry.room, gps: entry.gps, registry: entry.registry, registryUpdatedAt: entry.registryUpdatedAt ?? null, subtitle: `Teacher · ${entry.section}` } });
     }
 
     if (p === "/api/profile/room" && m === "PUT") {
@@ -1428,7 +1446,7 @@ export function createApp(opts = {}) {
       const body = await readJson(req);
       const values = parseTeacherFields(body, { partial: true });
       if (body.status === "active" || body.status === "inactive") values.status = body.status;
-      applyTeacherEdit(entry, values);
+      applyTeacherEdit(entry, values, { by: account.email, req });
       const acc = teacherAccount(entry.id);
       if (acc) {
         acc.name = entry.name;

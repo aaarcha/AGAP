@@ -14,6 +14,13 @@ function TeacherForm({ initial, onClose }: { initial: RosterEntry | null; onClos
   const [status, setStatus] = useState<"active" | "inactive">(initial?.status ?? "active");
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
+  const [confirmSection, setConfirmSection] = useState(false);
+
+  // A section change moves linked parent accounts (server side) — ask first.
+  function submit() {
+    if (initial && section.trim() !== initial.section) { setConfirmSection(true); return; }
+    void save();
+  }
 
   async function save() {
     setBusy(true); setErr("");
@@ -28,6 +35,7 @@ function TeacherForm({ initial, onClose }: { initial: RosterEntry | null; onClos
     ["Today's registry (number of pupils)", registry, (v: string) => setRegistry(v.replace(/\D/g, "").slice(0, 3)), "30"],
   ];
   return (
+    <>
     <Modal title={initial ? "Edit Teacher" : "Add Teacher"} onClose={onClose}>
       <div className="space-y-3">
         {fields.map(([label, val, set, ph]) => (
@@ -41,9 +49,19 @@ function TeacherForm({ initial, onClose }: { initial: RosterEntry | null; onClos
             { value: "inactive", label: "Off duty (cannot sign in)" },
           ]} />
         {err && <p className="text-sm text-blush-700" role="alert">{err}</p>}
-        <button onClick={save} disabled={busy} className="w-full min-h-12 bg-brand-600 text-white rounded-xl font-bold disabled:opacity-60">{busy ? "Saving…" : "Save"}</button>
+        <button onClick={submit} disabled={busy} className="w-full min-h-12 bg-brand-600 text-white rounded-xl font-bold disabled:opacity-60">{busy ? "Saving…" : "Save"}</button>
       </div>
     </Modal>
+    {confirmSection && (
+      <ConfirmModal
+        title="Change the section?"
+        message="Changing your section also moves linked parent accounts to the new section. Continue?"
+        confirmLabel="Yes, change section"
+        onConfirm={() => void save()}
+        onClose={() => setConfirmSection(false)}
+      />
+    )}
+    </>
   );
 }
 
