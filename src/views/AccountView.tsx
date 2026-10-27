@@ -10,6 +10,7 @@ import { ChangePasswordForm } from "../components/ChangePassword";
 import { Select } from "../components/Select";
 import AboutView from "./AboutView";
 import { SCHOOL } from "../../shared/domain.js";
+import { SECTION_GRADES, gradeCode, parseSection, composeSection } from "../../shared/section.js";
 import { roomById } from "../../shared/campus.js";
 import { clockTime, startOfToday } from "../lib/format";
 
@@ -57,23 +58,7 @@ function AccountRow({
   );
 }
 
-const GRADES = ["Kindergarten", "Grade 1", "Grade 2", "Grade 3", "Grade 4", "Grade 5", "Grade 6"];
-const GRADE_OPTIONS = GRADES.map((g) => ({ value: g, label: g }));
-
-/** Stored format "Grade 3 - Sec A" (Kindergarten: "Kinder - Sec A") → its parts.
- *  Anything else returns null so the raw string is shown instead of guessing. */
-function parseSection(raw: string): { grade: string; sec: string } | null {
-  const m = /^(Kinder|Grade [1-6])\s*-\s*Sec\s+(.+)$/.exec(raw.trim());
-  if (!m) return null;
-  const grade = m[1] === "Kinder" ? "Kindergarten" : m[1];
-  if (!GRADES.includes(grade)) return null;
-  return { grade, sec: m[2].trim() };
-}
-
-/** Compose the stored string from the grade select and the section field. */
-function composeSection(grade: string, sec: string): string {
-  return `${grade === "Kindergarten" ? "Kinder" : grade} - Sec ${sec.trim()}`;
-}
+const GRADE_OPTIONS = SECTION_GRADES.map((label) => ({ value: gradeCode(label) ?? "", label }));
 
 /** "Set today at 7:45 AM" when the registry was set today, else "Last set <date>". */
 function registryStamp(ts: number | null | undefined): string | null {
@@ -88,10 +73,14 @@ function registryStamp(ts: number | null | undefined): string | null {
  *  inline validation, a success toast and an unsaved-changes guard on back. */
 function ProfileEditor({ onBack }: { onBack: () => void }) {
   const { user, saveProfile, changeSavedRoom, notify } = useApp();
-  const initial = parseSection(user!.section ?? "");
+  // Structured parse of the stored string; grade codes are "K" | "1".."6".
+  const rawSection = user!.section ?? "";
+  const parsed = parseSection(rawSection);
+  const initialGrade = parsed.grade;
+  const initialSec = parsed.sectionName || rawSection;
   const [name, setName] = useState(user!.name);
-  const [grade, setGrade] = useState(initial?.grade ?? "");
-  const [sec, setSec] = useState(initial?.sec ?? user!.section ?? "");
+  const [grade, setGrade] = useState(initialGrade);
+  const [sec, setSec] = useState(initialSec);
   const [registry, setRegistry] = useState(String(user!.registry ?? ""));
   const [pendingRoomId, setPendingRoomId] = useState<string | null>(null);
   const [pickerOpen, setPickerOpen] = useState(false);
@@ -108,8 +97,8 @@ function ProfileEditor({ onBack }: { onBack: () => void }) {
   const sectionChanged = Boolean(grade) && composed !== (user!.section ?? "");
   const dirty =
     name !== user!.name ||
-    grade !== (initial?.grade ?? "") ||
-    sec !== (initial?.sec ?? user!.section ?? "") ||
+    grade !== initialGrade ||
+    sec !== initialSec ||
     registry !== String(user!.registry ?? "") ||
     pendingRoomId !== null;
 
@@ -214,7 +203,7 @@ function ProfileEditor({ onBack }: { onBack: () => void }) {
           </div>
           {err("grade")}
           {err("sec")}
-          {!initial && (
+          {!parsed.grade && (
             <p className="mt-2 text-xs text-slate-500">
               Your current section ({user!.section || "not set"}) is not in the usual format — pick your grade and adjust the section.
             </p>

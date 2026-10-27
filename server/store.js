@@ -3,6 +3,7 @@
 // swap this module for Postgres – the rest of the server only uses these methods.
 import fs from "node:fs";
 import path from "node:path";
+import { parseSection } from "../shared/section.js";
 
 export const SEED_ROSTER = [
   { id: "t1", name: "Ms. Reyes", section: "Grade 3 - Sec A", room: "Bldg A | Flr 2 | Rm 204", gps: "14.312, 121.115", status: "active", registry: 28 },
@@ -19,14 +20,14 @@ function freshModes() {
 }
 
 function freshDb() {
-  return {
+  return normalize({
     version: 1, seq: 0, roster: structuredClone(SEED_ROSTER), incidents: [], clientIds: {}, modes: freshModes(), drills: [],
     // Auth state: accounts (scrypt hashes, never plaintext), server-side sessions (revocable), append-only audit log.
     accounts: [], sessions: [], audit: [], schoolYear: { count: 0, startedAt: null },
     // Admin configuration versions (see server/config.js). Append-only: the active
     // version is resolved from here and never rewritten in place.
     configs: [],
-  };
+  });
 }
 
 // Backfill fields added by newer versions so an old data file keeps working.
@@ -46,6 +47,15 @@ export function normalize(d) {
   for (const r of d.roster) {
     if (!Number.isInteger(r.registry)) r.registry = 30;
     r.registryUpdatedAt ??= null; // when today's registry was last set (profile / roster edit)
+    // Structured grade / section fields derived once from the stored string.
+    const parsed = parseSection(r.section);
+    r.grade = parsed.grade;
+    r.sectionName = parsed.sectionName;
+  }
+  for (const a of d.accounts) {
+    const parsed = parseSection(a.section);
+    a.grade = parsed.grade;
+    a.sectionName = parsed.sectionName;
   }
   for (const i of d.incidents) {
     i.baseLocationRisk ??= i.locationRisk;
@@ -128,7 +138,7 @@ export function createStore({ dataDir, onPersistError = console.error } = {}) {
       // Demo reset wipes incidents/modes but never auth state: accounts, sessions
       // (the Principal stays signed in), the audit trail or the configuration history.
       const { accounts, sessions, audit, schoolYear, configs } = db;
-      db = { ...freshDb(), roster, accounts, sessions, audit, schoolYear, configs, version: db.version };
+      db = normalize({ ...freshDb(), roster, accounts, sessions, audit, schoolYear, configs, version: db.version });
       save();
     },
     // Keep the incident list from growing forever: drop resolved tickets older than `keepDays` (default 90).

@@ -7,7 +7,9 @@ import type { Incident } from "../lib/types";
 import { BAND_STYLE, catTheme } from "../lib/theme";
 import { EscalationTable, IncidentCard } from "../components/Incident";
 import { MasterDetail } from "../components/MasterDetail";
-import { sortQueue } from "../lib/command";
+import { FilterBar } from "../components/FilterBar";
+import { filterQueue, incidentFilterBarProps } from "../lib/command";
+import { initialFilterState, useFilterState } from "../lib/filters";
 import HistorySection from "../components/History";
 import { RouteControl } from "../components/Rules";
 import AccountView from "./AccountView";
@@ -37,15 +39,19 @@ export function QueueRow({ inc, active }: { inc: Incident; active: boolean }) {
 }
 
 export function IncidentQueue({ incidents, title, empty }: { incidents: Incident[]; title: string; empty: string }) {
+  const open = useMemo(() => incidents.filter((i) => i.status !== "RESOLVED"), [incidents]);
+  // Category/tier/status chips, Escalated + Drill toggles and the sort order —
+  // the same FilterBar configuration the Principal's Command queue uses.
+  const [state, setState] = useFilterState("responder-queue", () => initialFilterState({ sort: "priority" }));
   // Real emergencies first, then critical overrides, then by urgency, then oldest first.
-  const active = useMemo(
-    () => sortQueue(incidents.filter((i) => i.status !== "RESOLVED")),
-    [incidents],
+  const active = useMemo(() => filterQueue(open, state), [open, state]);
+  const filterBar = (
+    <FilterBar {...incidentFilterBarProps({ open, state, setState, resultsLabel: "Incidents" })} />
   );
   return (
     <section className="lg:flex lg:h-full lg:min-h-0 lg:flex-col">
       <h2 className="mb-2 shrink-0 text-xs font-bold uppercase tracking-wide text-slate-500">{title}</h2>
-      {active.length === 0 ? (
+      {open.length === 0 ? (
         <div className="rounded-2xl border border-slate-200 bg-white px-4 py-10 text-center">
           <p className="text-3xl" aria-hidden>🟢</p>
           <p className="mt-1 text-sm text-slate-500">{empty}</p>
@@ -55,7 +61,8 @@ export function IncidentQueue({ incidents, title, empty }: { incidents: Incident
           <MasterDetail
             items={active}
             ariaLabel={`${title} — select a ticket`}
-            emptyList={empty}
+            listHeader={filterBar}
+            emptyList={active.length === 0 ? "No incidents match those filters." : empty}
             emptyDetail="No ticket selected."
             renderList={(inc, isActive) => <QueueRow inc={inc} active={isActive} />}
             renderDetail={(inc) => <IncidentCard inc={inc} showActions showLog />}

@@ -17,13 +17,17 @@ import {
   activeIncidents,
   commandCounts,
   countOnFloor,
+  filterQueue,
   floorHints,
+  incidentFilterBarProps,
+  INCIDENT_SPEC,
   pinsForCommonAreas,
   pinsForFloor,
-  sortQueue,
   useIncidentSelection,
   type CommandPlace,
 } from "../lib/command";
+import { FilterBar } from "../components/FilterBar";
+import { filterItems, initialFilterState, useFilterState } from "../lib/filters";
 import type { Incident } from "../lib/types";
 import type { PrincipalTab } from "../lib/navigation";
 
@@ -371,12 +375,18 @@ export function Command() {
   const { incidents, roster, now } = useApp();
   const wide = useMediaQuery("screen and (min-width: 1024px)");
 
-  // Every open ticket stays in the queue; counts and pins ignore drills.
-  const queue = useMemo(() => sortQueue(incidents.filter((i) => i.status !== "RESOLVED")), [incidents]);
+  // Queue filters (category, tier, status, escalated, drill) + sort, kept per
+  // screen for the session. Every open ticket stays in the queue; counts and
+  // pins on the stats strip ignore drills.
+  const [filterState, setFilterState] = useFilterState("principal-command", () => initialFilterState({ sort: "priority" }));
+  const open = useMemo(() => incidents.filter((i) => i.status !== "RESOLVED"), [incidents]);
+  const queue = useMemo(() => filterQueue(open, filterState), [open, filterState]);
+  const mapIncidents = useMemo(() => filterItems(incidents, filterState, INCIDENT_SPEC), [incidents, filterState]);
   const active = useMemo(() => activeIncidents(incidents), [incidents]);
   const critical = active.filter((i) => i.overrideReasons.length > 0).length;
   const today = incidents.filter((i) => !i.drill && i.createdAt >= startOfToday(now)).reduce((n, i) => n + i.confirmedBy, 0);
   const staff = roster.filter((r) => r.status === "active").length;
+  const emptyText = queue.length === 0 && open.length > 0 ? "No incidents match those filters." : EMPTY_QUEUE;
 
   const { select, selected, selectedId, onKeyDown } = useIncidentSelection(queue);
   const listRef = useRef<HTMLUListElement>(null);
@@ -418,11 +428,17 @@ export function Command() {
   );
 
   const stats = <StatsStrip active={active.length} critical={critical} today={today} staff={staff} />;
+  const filterBar = (
+    <FilterBar
+      {...incidentFilterBarProps({ open, state: filterState, setState: setFilterState, resultsLabel: "Incidents" })}
+    />
+  );
 
   if (!wide) {
     return (
       <div className="mx-auto flex h-full min-h-0 w-full min-w-0 flex-col gap-3 overflow-hidden px-3 py-3">
         {stats}
+        {filterBar}
         <Segmented
           label="Command view"
           value={phonePane}
@@ -439,13 +455,13 @@ export function Command() {
               onKeyDown={onKeyDown}
               listRef={listRef}
               title="Active incident command queue"
-              empty={EMPTY_QUEUE}
+              empty={emptyText}
             />
           </section>
         ) : (
           <section className="min-h-0 min-w-0 flex-1 overflow-y-auto">
             <MapPane
-              incidents={incidents}
+              incidents={mapIncidents}
               place={place}
               onPickPlace={setPlace}
               selectedId={selectedId}
@@ -462,6 +478,7 @@ export function Command() {
   return (
     <div className="mx-auto flex h-full min-h-0 w-full min-w-0 flex-col gap-3 overflow-hidden px-3 py-3">
       {stats}
+      {filterBar}
       <CommandPanes
         queue={
           <QueuePane
@@ -471,7 +488,7 @@ export function Command() {
             onKeyDown={onKeyDown}
             listRef={listRef}
             title="Active incident command queue"
-            empty={EMPTY_QUEUE}
+            empty={emptyText}
           />
         }
         detail={
@@ -487,7 +504,7 @@ export function Command() {
             ) : (
               <div className="scroll-area min-h-0 min-w-0 flex-1 overflow-y-auto p-3">
                 <MapPane
-                  incidents={incidents}
+                  incidents={mapIncidents}
                   place={place}
                   onPickPlace={setPlace}
                   selectedId={selectedId}

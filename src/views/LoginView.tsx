@@ -165,7 +165,7 @@ export default function LoginView() {
               disabled={busy}
               required
               placeholder="Enter your email"
-              className="w-full min-h-12 rounded-xl px-4 bg-white text-slate-900 text-sm outline-none focus:ring-2 focus:ring-accent"
+              className="w-full min-h-12 rounded-xl px-3 bg-white text-slate-900 text-sm outline-none focus:ring-2 focus:ring-accent"
             />
           </div>
 

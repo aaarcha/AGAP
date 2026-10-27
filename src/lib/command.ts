@@ -1,5 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { CAMPUS_BUILDINGS, CAMPUS_COMMON_AREAS } from "../../shared/campus.js";
+import { bandFor } from "../../shared/domain.js";
+import type { FilterBarProps } from "../components/FilterBar";
+import {
+  activeFilterCount, activeFilterEntries, clearGroupFilters, facetCounts, filterItems,
+  isGroupSelected, matchesQuery, selectedValues, setCategory, setQuery, setSort,
+  toggleGroupValue, type FilterSpec, type FilterState,
+} from "./filters";
 import type { Incident } from "./types";
 
 /**
@@ -154,6 +161,147 @@ export function floorHints(incidents: Incident[], place: CommandPlace): string[]
     hints.push(`${counts.common} in common areas`);
   }
   return hints;
+}
+
+/* ---------------------------------------------------- queue filters (shared) */
+
+export const INCIDENT_CATEGORIES = [
+  { value: "fire", label: "Fire" },
+  { value: "medical", label: "Medical" },
+  { value: "flood", label: "Flooding/Natural" },
+  { value: "security", label: "Security/Threat" },
+  { value: "other", label: "Other" },
+];
+
+export const INCIDENT_TIERS = [
+  { value: "CRITICAL", label: "CRITICAL" },
+  { value: "HIGH", label: "HIGH" },
+  { value: "MODERATE", label: "MODERATE" },
+];
+
+export const INCIDENT_STATUSES = [
+  { value: "SENT", label: "Sent" },
+  { value: "SEEN", label: "Seen" },
+  { value: "EN_ROUTE", label: "En Route" },
+  { value: "ON_SITE", label: "On Site" },
+];
+
+/** The tier shown on the queue-row badge — chips must match what the row shows. */
+export function incidentTier(inc: Pick<Incident, "score" | "status" | "overrideReasons">): string {
+  return bandFor(inc.score, inc.status, inc.overrideReasons);
+}
+
+/** What the queue screens filter on: search, category, tier, status, escalated, drill. */
+export const INCIDENT_SPEC: FilterSpec<Incident> = {
+  search: (i, q) => matchesQuery(q, i.subLabel, i.categoryLabel, i.room, i.linkedSection),
+  category: (i, c) => i.category === c,
+  groups: {
+    tier: (i, v) => incidentTier(i) === v,
+    status: (i, v) => i.status === v,
+    escalated: (i, v) => (v === "yes" ? i.escalationLevel > 0 : false),
+    drill: (i, v) => (v === "yes" ? Boolean(i.drill) : false),
+  },
+};
+
+/** Apply the queue filters plus the chosen sort (priority = the usual order). */
+export function filterQueue(incidents: Incident[], state: FilterState): Incident[] {
+  const filtered = filterItems(incidents, state, INCIDENT_SPEC);
+  if (state.sort === "newest") return [...filtered].sort((a, b) => b.createdAt - a.createdAt);
+  return sortQueue(filtered);
+}
+
+const GROUP_LABEL: Record<string, string> = { tier: "Tier", status: "Status", escalated: "Escalated", drill: "Drill" };
+
+/** The shared FilterBar props for the Principal Command queue and the
+ *  responder dispatch queue — same chips, counts and sort on both screens. */
+export function incidentFilterBarProps({
+  open,
+  state,
+  setState,
+  resultsLabel,
+}: {
+  open: Incident[];
+  state: FilterState;
+  setState: (next: FilterState | ((prev: FilterState) => FilterState)) => void;
+  resultsLabel: string;
+}): FilterBarProps {
+  const facet = (exclude: string, options: string[], valueOf: (i: Incident) => string | string[] | null | undefined) =>
+    facetCounts(open, state, INCIDENT_SPEC, { options, valueOf, exclude });
+  const countOf = (list: { value: string; count: number }[], value: string) => list.find((c) => c.value === value)?.count ?? 0;
+  const catCounts = facet("category", INCIDENT_CATEGORIES.map((c) => c.value), (i) => i.category);
+  const tierCounts = facet("tier", INCIDENT_TIERS.map((t) => t.value), incidentTier);
+  const statusCounts = facet("status", INCIDENT_STATUSES.map((s) => s.value), (i) => i.status);
+  const escCounts = facet("escalated", ["yes"], (i) => (i.escalationLevel > 0 ? "yes" : ""));
+  const drillCounts = facet("drill", ["yes"], (i) => (i.drill ? "yes" : ""));
+  const shown = filterItems(open, state, INCIDENT_SPEC);
+  const toggle = (group: string, value: string) => setState((s) => toggleGroupValue(s, group, value));
+  const valueLabel = (group: string, value: string) =>
+    group === "status" ? INCIDENT_STATUSES.find((s) => s.value === value)?.label ?? value : value === "yes" ? "Yes" : value;
+
+  return {
+    search: {
+      value: state.query,
+      onChange: (v) => setState((s) => setQuery(s, v)),
+      placeholder: "Search tickets",
+      ariaLabel: "Search incidents",
+    },
+    category: {
+      value: state.category,
+      ariaLabel: "Category",
+      onChange: (v) => setState((s) => setCategory(s, v)),
+      options: [
+        { value: "all", label: "All", count: open.length },
+        ...INCIDENT_CATEGORIES.map((c) => ({ ...c, count: countOf(catCounts, c.value) })),
+      ],
+    },
+    quickChips: [
+      ...INCIDENT_TIERS.map((t) => ({
+        label: t.label,
+        count: countOf(tierCounts, t.value),
+        active: isGroupSelected(state, "tier", t.value),
+        onToggle: () => toggle("tier", t.value),
+      })),
+      { label: "Escalated", count: countOf(escCounts, "yes"), active: isGroupSelected(state, "escalated", "yes"), onToggle: () => toggle("escalated", "yes") },
+      { label: "Drill", count: countOf(drillCounts, "yes"), active: isGroupSelected(state, "drill", "yes"), onToggle: () => toggle("drill", "yes") },
+    ],
+    filters: {
+      groups: [
+        { id: "tier", label: "Tier", options: INCIDENT_TIERS.map((t) => ({ ...t, count: countOf(tierCounts, t.value), disabled: countOf(tierCounts, t.value) === 0 && !isGroupSelected(state, "tier", t.value) })), selected: selectedValues(state, "tier"), onToggle: toggle },
+        { id: "status", label: "Status", options: INCIDENT_STATUSES.map((s) => ({ ...s, count: countOf(statusCounts, s.value), disabled: countOf(statusCounts, s.value) === 0 && !isGroupSelected(state, "status", s.value) })), selected: selectedValues(state, "status"), onToggle: toggle },
+        { id: "escalated", label: "Escalated", options: [{ value: "yes", label: "Escalated only", count: countOf(escCounts, "yes"), disabled: countOf(escCounts, "yes") === 0 && !isGroupSelected(state, "escalated", "yes") }], selected: selectedValues(state, "escalated"), onToggle: toggle },
+        { id: "drill", label: "Drill", options: [{ value: "yes", label: "Drill only", count: countOf(drillCounts, "yes"), disabled: countOf(drillCounts, "yes") === 0 && !isGroupSelected(state, "drill", "yes") }], selected: selectedValues(state, "drill"), onToggle: toggle },
+      ],
+      activeCount: activeFilterCount(state),
+      onReset: () => setState((s) => clearGroupFilters(s)),
+      shown: shown.length,
+      total: open.length,
+      title: "Filters",
+    },
+    sort: {
+      value: state.sort,
+      ariaLabel: "Sort queue",
+      onChange: (v) => setState((s) => setSort(s, v)),
+      options: [
+        { value: "priority", label: "Priority (highest first)" },
+        { value: "newest", label: "Newest first" },
+      ],
+    },
+    chipRows: [
+      {
+        ariaLabel: "Status",
+        options: INCIDENT_STATUSES.map((s) => ({ ...s, count: countOf(statusCounts, s.value) })),
+        selected: selectedValues(state, "status"),
+        onToggle: (v: string) => toggle("status", v),
+      },
+    ],
+    activeChips: activeFilterEntries(state).map((e) => ({
+      id: `${e.group}:${e.value}`,
+      label: `${GROUP_LABEL[e.group] ?? e.group}: ${valueLabel(e.group, e.value)}`,
+      onRemove: () => toggle(e.group, e.value),
+    })),
+    onClearAll: () => setState((s) => clearGroupFilters(s)),
+    results: { label: resultsLabel, shown: shown.length, total: open.length },
+  };
 }
 
 type QueueLike = {

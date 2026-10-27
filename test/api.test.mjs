@@ -1321,6 +1321,69 @@ test("the Principal's roster edit also stamps registryUpdatedAt", async () => {
   await s.close();
 });
 
+test("teacher records and parent accounts carry structured grade and sectionName", async () => {
+  const s = await boot();
+  const principal = await s.login("principal");
+  const superToken = await s.loginSuper();
+
+  const roster = (await s.call("GET", "/api/state", { token: principal })).json.roster;
+  assert.deepEqual([roster[0].grade, roster[0].sectionName], ["3", "A"], "roster row derived from its section string");
+  assert.deepEqual([roster[1].grade, roster[1].sectionName], ["4", "B"]);
+  assert.deepEqual([roster[2].grade, roster[2].sectionName], ["5", "A"]);
+
+  const { accounts } = (await s.call("GET", "/api/admin/accounts", { token: superToken })).json;
+  const parent = accounts.find((a) => a.role === "parent");
+  const teacher = accounts.find((a) => a.teacher && a.teacher.id === "t1");
+  assert.deepEqual([parent.grade, parent.sectionName], ["3", "A"], "parent account derived from its own section");
+  assert.deepEqual([teacher.grade, teacher.sectionName], ["3", "A"], "teacher account derived from the roster row");
+  assert.deepEqual([parent.section, teacher.section], ["Grade 3 - Sec A", "Grade 3 - Sec A"]);
+  await s.close();
+});
+
+test("roster creation and section edits keep the structured fields in step", async () => {
+  const s = await boot();
+  const principal = await s.login("principal");
+  const superToken = await s.loginSuper();
+  const parent = await s.login("parent", "Grade 3 - Sec A");
+
+  // A new roster row derives its parts from the composed string.
+  const created = await s.call("POST", "/api/roster", {
+    token: principal,
+    body: { name: "Mr. Santos", section: "Kinder - Sec M", room: "Bldg A | Flr 1 | Rm 101" },
+  });
+  assert.equal(created.status, 201, JSON.stringify(created.json));
+  assert.deepEqual([created.json.teacher.grade, created.json.teacher.sectionName], ["K", "M"]);
+  assert.deepEqual([created.json.account.grade, created.json.account.sectionName], ["K", "M"]);
+
+  // Moving an existing teacher rewrites the roster row AND the parent accounts that moved.
+  const edit = await s.call("PUT", "/api/roster/t1", { token: principal, body: { section: "Grade 5 - Sec A" } });
+  assert.equal(edit.status, 200, JSON.stringify(edit.json));
+  assert.deepEqual([edit.json.teacher.grade, edit.json.teacher.sectionName], ["5", "A"]);
+
+  const me = (await s.call("GET", "/api/me", { token: parent })).json.user;
+  assert.equal(me.section, "Grade 5 - Sec A", "the parent account moved");
+
+  const { accounts } = (await s.call("GET", "/api/admin/accounts", { token: superToken })).json;
+  const moved = accounts.find((a) => a.id === me.id);
+  assert.deepEqual([moved.section, moved.grade, moved.sectionName], ["Grade 5 - Sec A", "5", "A"], "parent grade/sectionName follow the move");
+  const t1 = accounts.find((a) => a.teacher && a.teacher.id === "t1");
+  assert.deepEqual([t1.section, t1.grade, t1.sectionName], ["Grade 5 - Sec A", "5", "A"], "teacher account follows the roster row");
+  await s.close();
+});
+
+test("provisioning a Parent/PTA account derives grade and sectionName from the composed section", async () => {
+  const s = await boot();
+  const superToken = await s.loginSuper();
+  const made = await s.call("POST", "/api/admin/accounts", {
+    token: superToken,
+    body: { email: "pta-derp@sinalhanes.deped.ph", name: "PTA Rep", role: "parent", section: "Kinder - Sec M" },
+  });
+  assert.equal(made.status, 201, JSON.stringify(made.json));
+  assert.equal(made.json.account.section, "Kinder - Sec M");
+  assert.deepEqual([made.json.account.grade, made.json.account.sectionName], ["K", "M"]);
+  await s.close();
+});
+
 test("a new teacher whose registry is 28 and who reports 28 present gets no mismatch", async () => {
   const s = await boot();
   const principal = await s.login("principal");

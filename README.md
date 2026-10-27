@@ -76,6 +76,17 @@ Every dropdown in the app is the shared `src/components/Select.tsx` — never a 
 and is keyboard accessible (arrows/Home/End, type-ahead, Enter, Esc closes only the menu).
 Use it for any new dropdown.
 
+## Dates
+Date fields use the shared `src/components/DatePicker.tsx` — never a native `<input type="date">`
+(its calendar is drawn by the OS and can't follow the design). Type `2026-10-27` or `10/27/2026`
+— Enter or blur commits and normalizes to `YYYY-MM-DD`, anything else falls back to the last valid
+day and emptying clears it — or open the calendar (popover at ≥ 640px, bottom sheet below), where
+the header walks day → month → year grids (and picks walk back out), so nobody arrow-clicks through
+a year, a month or a decade.
+Record lists (every role's History, the Super Admin audit log) share the period chips + From/To
+range in `src/components/DateRange.tsx`, backed by the pure helpers in `src/lib/filters.ts`
+(`DateRangeState`, `setPeriod`, `setDateBound`, `inDateRange`).
+
 ## Branding
 The product name is **ASPIRE**, set in one place: `src/lib/brand.ts`
 (keep `index.html` `<title>`, `public/manifest.webmanifest` `name`/`short_name`, and the icon in `public/icons/` in sync).

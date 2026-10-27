@@ -6,6 +6,10 @@ import { catTheme } from "../lib/theme";
 import { dateTime, duration, elapsed, fmtMs, plainOverride } from "../lib/format";
 import type { Incident } from "../lib/types";
 import { ConfirmModal, Modal } from "./Modal";
+import DateRangeBar from "./DateRange";
+import {
+  inDateRange, initialDateRange, useFilterState, type DateRangeState,
+} from "../lib/filters";
 
 const ACTION_LABEL: Record<string, string> = {
   reported: "Reported", headcount: "Headcount", override: "Override", hazard: "Hazard mode", route: "Route", drill_end: "Drill ended",
@@ -118,10 +122,16 @@ export default function HistorySection({ title = "Incident history" }: { title?:
   const [open, setOpen] = useState<string | null>(null);
   const [del, setDel] = useState<Incident | null>(null);
   const [clearAll, setClearAll] = useState(false);
+  // Period chips + custom From/To over the records, kept for the session.
+  const [range, setRange] = useFilterState<DateRangeState>("history-range", initialDateRange);
 
-  const closed = useMemo(
+  const records = useMemo(
     () => incidents.filter((i) => i.status === "RESOLVED").sort((a, b) => (b.resolvedAt ?? 0) - (a.resolvedAt ?? 0)),
     [incidents],
+  );
+  const closed = useMemo(
+    () => records.filter((i) => inDateRange(i.resolvedAt ?? i.createdAt, range, now)),
+    [records, range, now],
   );
   const selected = closed.find((i) => i.id === open) ?? null;
 
@@ -129,16 +139,26 @@ export default function HistorySection({ title = "Incident history" }: { title?:
     <section aria-label={title}>
       <div className="mb-2 flex items-center justify-between gap-2">
         <h2 className="flex items-center gap-1.5 text-xs font-bold uppercase tracking-wide text-slate-500">
-          <HistoryIcon size={14} /> {title} <span className="font-mono normal-case text-slate-400">({closed.length})</span>
+          <HistoryIcon size={14} /> {title} <span className="font-mono normal-case text-slate-400">
+            ({closed.length === records.length ? closed.length : `${closed.length} of ${records.length}`})
+          </span>
         </h2>
         {closed.length > 0 && (
           <button onClick={() => setClearAll(true)} className="min-h-12 rounded-lg bg-blush-100 px-3 text-xs font-bold text-blush-700">Clear history</button>
         )}
       </div>
 
+      {records.length > 0 && (
+        <div className="mb-2">
+          <DateRangeBar value={range} onChange={setRange} ariaLabel="History date range" />
+        </div>
+      )}
+
       {closed.length === 0 ? (
         <div className="rounded-2xl border border-slate-200 bg-white px-4 py-8 text-center">
-          <p className="text-sm text-slate-500">No closed incidents yet.</p>
+          <p className="text-sm text-slate-500">
+            {records.length === 0 ? "No closed incidents yet." : "No records in that date range."}
+          </p>
         </div>
       ) : (
         <ul className="divide-y divide-slate-100 overflow-hidden rounded-2xl border border-slate-200 bg-white">

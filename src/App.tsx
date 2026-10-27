@@ -12,6 +12,10 @@ import ResponderView from "./views/ResponderView";
 import HistorySection from "./components/History";
 import { IncidentCard } from "./components/Incident";
 import { MasterDetail } from "./components/MasterDetail";
+import { FilterBar } from "./components/FilterBar";
+import {
+  facetCounts, filterItems, initialFilterState, matchesQuery, setCategory, setQuery, useFilterState, type FilterSpec,
+} from "./lib/filters";
 import type { Incident } from "./lib/types";
 import PrincipalView from "./views/PrincipalView";
 import AdminConsole from "./views/AdminConsole";
@@ -32,17 +36,55 @@ function ReportRow({ inc, active }: { inc: Incident; active: boolean }) {
   );
 }
 
+const REPORT_STATUSES = ["SENT", "SEEN", "EN_ROUTE", "ON_SITE"] as const;
+
 function TeacherReports() {
   const { incidents, user } = useApp();
   const mine = incidents.filter((i) => i.reporterId === user!.id && i.status !== "RESOLVED");
+  // Status chips + counts persist per screen for the session.
+  const [state, setState] = useFilterState("teacher-reports", () => initialFilterState());
+  const spec: FilterSpec<Incident> = {
+    search: (i, q) => matchesQuery(q, i.subLabel, i.room, i.categoryLabel),
+    category: (i, c) => i.status === c,
+  };
+  const counts = facetCounts(mine, state, spec, {
+    options: [...REPORT_STATUSES],
+    valueOf: (i) => i.status,
+    exclude: "category",
+  });
+  const shown = filterItems(mine, state, spec);
   return (
     <div className="mx-auto flex w-full max-w-5xl flex-col gap-3 px-3 py-3 lg:h-full lg:min-h-0">
       <h2 className="shrink-0 text-xs font-bold uppercase tracking-wide text-slate-500">My reports</h2>
+      <div className="shrink-0">
+        <FilterBar
+          search={{
+            value: state.query,
+            onChange: (v) => setState((s) => setQuery(s, v)),
+            placeholder: "Search reports",
+            ariaLabel: "Search my reports",
+          }}
+          category={{
+            value: state.category,
+            ariaLabel: "Status",
+            onChange: (v) => setState((s) => setCategory(s, v)),
+            options: [
+              { value: "all", label: "All", count: mine.length },
+              ...REPORT_STATUSES.map((s) => ({
+                value: s,
+                label: STATUS_LABEL[s],
+                count: counts.find((c) => c.value === s)?.count ?? 0,
+              })),
+            ],
+          }}
+          results={{ label: "Reports", shown: shown.length, total: mine.length }}
+        />
+      </div>
       <div className="lg:min-h-0 lg:flex-1">
         <MasterDetail
-          items={mine}
+          items={shown}
           ariaLabel="My reports — select a report"
-          emptyList="No active reports."
+          emptyList={mine.length === 0 ? "No active reports." : "No reports match those filters."}
           emptyDetail="No active reports. Your sent reports appear here with their live status."
           renderList={(inc, active) => <ReportRow inc={inc} active={active} />}
           renderDetail={(inc) => <IncidentCard inc={inc} />}

@@ -12,6 +12,17 @@ import { RoleNav } from "../components/RoleNav";
 import { ADMIN_TABS, type AdminTab } from "../lib/navigation";
 import { MasterDetail } from "../components/MasterDetail";
 import { Select } from "../components/Select";
+import { FilterBar } from "../components/FilterBar";
+import { DatePicker } from "../components/DatePicker";
+import DateRangeBar from "../components/DateRange";
+import {
+  activeFilterCount, activeFilterEntries, clearGroupFilters, facetCounts, filterItems,
+  inDateRange, initialDateRange, initialFilterState, isGroupSelected, matchesQuery,
+  selectedValues, setCategory, setQuery, setSort, sortItems, toggleGroupValue,
+  useFilterState, type DateRangeState, type FilterSpec,
+} from "../lib/filters";
+import { SECTION_GRADES, gradeCode, gradeLabel, composeSection, parseSection } from "../../shared/section.js";
+import { SCHOOL } from "../../shared/domain.js";
 import AccountView from "./AccountView";
 
 const card = "rounded-2xl border border-slate-200 bg-white p-4";
@@ -26,6 +37,8 @@ export default function AdminConsole() {
   const [tab, setTab] = useState<AdminTab>("accounts");
   const [accounts, setAccounts] = useState<AccountRecord[]>([]);
   const [auditEntries, setAuditEntries] = useState<AuditEntry[]>([]);
+  // Period chips + custom From/To over the audit records, kept for the session.
+  const [auditRange, setAuditRange] = useFilterState<DateRangeState>("admin-audit-range", initialDateRange);
   const [schoolYear, setSchoolYear] = useState<SchoolYear | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -53,6 +66,12 @@ export default function AdminConsole() {
     void loadData();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab]);
+
+  // Audit records inside the chosen period — the DateRangeBar above the table.
+  const auditShown = useMemo(
+    () => auditEntries.filter((entry) => inDateRange(entry.at, auditRange, Date.now())),
+    [auditEntries, auditRange],
+  );
 
   async function loadData() {
     if (tab === "account") { setLoading(false); return; }
@@ -140,6 +159,10 @@ export default function AdminConsole() {
           {tab === "audit" && !loading && (
             <div className="scroll-area space-y-3 lg:h-full lg:overflow-y-auto">
               <h2 className={h2}><ClipboardList size={14} /> Audit log (read-only)</h2>
+              <DateRangeBar value={auditRange} onChange={setAuditRange} ariaLabel="Audit date range" />
+              <p className="-mt-1 text-xs font-bold text-slate-600" aria-live="polite">
+                Entries {auditShown.length} of {auditEntries.length}
+              </p>
               <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white">
                 <div className="overflow-x-auto">
                   <table className="w-full text-sm">
@@ -149,7 +172,7 @@ export default function AdminConsole() {
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100">
-                      {auditEntries.map((entry, i) => (
+                      {auditShown.map((entry, i) => (
                         <tr key={i} className="hover:bg-slate-50">
                           <td className="whitespace-nowrap px-3 py-2 text-slate-500">{dateTime(entry.at)}</td>
                           <td className="px-3 py-2">
@@ -166,6 +189,9 @@ export default function AdminConsole() {
                 </div>
               </div>
               {auditEntries.length === 0 && <p className="py-8 text-center text-slate-500">No audit entries yet.</p>}
+              {auditEntries.length > 0 && auditShown.length === 0 && (
+                <p className="py-8 text-center text-slate-500">No entries in that date range.</p>
+              )}
             </div>
           )}
 
@@ -252,14 +278,54 @@ function AccountActions({ acc, onUnlock, onActivate, onReset, onDeactivate }: {
   );
 }
 
-const ROLE_FILTERS: { id: string; label: string }[] = [
-  { id: "all", label: "All roles" },
-  { id: "teacher", label: "Teachers" },
-  { id: "principal", label: "Principals" },
-  { id: "responder", label: "Responders" },
-  { id: "parent", label: "Parents / PTA" },
-  { id: "super_admin", label: "Super admins" },
+const ROLE_CHIPS: { value: string; label: string }[] = [
+  { value: "teacher", label: "Teacher" },
+  { value: "parent", label: "Parent" },
+  { value: "principal", label: "Principal" },
+  { value: "responder", label: "Responder" },
+  { value: "super_admin", label: "Admin" },
 ];
+
+const STATUS_CHIPS: { value: string; label: string }[] = [
+  { value: "active", label: "Active" },
+  { value: "locked", label: "Locked" },
+  { value: "mustchange", label: "Must change" },
+  { value: "inactive", label: "Deactivated" },
+];
+
+const GRADE_CHIPS: { value: string; label: string }[] = SECTION_GRADES.map((label) => ({
+  value: gradeCode(label) ?? "",
+  label,
+}));
+
+const ORG_OPTIONS = [SCHOOL.name, "Barangay + CDRRMO"];
+
+/** Organization: responders belong to the Barangay/CDRRMO, everyone else to the school. */
+const orgOf = (a: AccountRecord) => (a.role === "responder" ? "Barangay + CDRRMO" : SCHOOL.name);
+
+/** Structured grade with a parse fallback for older payloads. */
+const gradeOf = (a: AccountRecord) => a.grade || parseSection(a.section ?? "").grade || "";
+
+/** Status buckets an account belongs to (they overlap: active AND must change). */
+const statusOf = (a: AccountRecord): string[] => {
+  const out: string[] = [];
+  if (a.status === "active") out.push("active");
+  if (a.locked) out.push("locked");
+  if (a.mustChange) out.push("mustchange");
+  if (a.status !== "active") out.push("inactive");
+  return out;
+};
+
+const ACCOUNT_SPEC: FilterSpec<AccountRecord> = {
+  search: (a, q) => matchesQuery(q, a.name, a.email, a.section),
+  category: (a, c) => a.role === c,
+  groups: {
+    grade: (a, v) => gradeOf(a) === v,
+    section: (a, v) => (a.section ?? "") === v,
+    status: (a, v) => statusOf(a).includes(v),
+    org: (a, v) => orgOf(a) === v,
+  },
+};
 
 function AccountDetail({ acc, onUnlock, onActivate, onReset, onDeactivate }: {
   acc: AccountRecord;
@@ -298,49 +364,111 @@ function AccountsPane({ accounts, onUnlock, onActivate, onReset, onDeactivate }:
   onUnlock: (a: AccountRecord) => void; onActivate: (a: AccountRecord) => void;
   onReset: (a: AccountRecord) => void; onDeactivate: (a: AccountRecord) => void;
 }) {
-  const [query, setQuery] = useState("");
-  const [role, setRole] = useState("all");
+  // One state for search, the role row, the sheet groups and the sort menu —
+  // kept per screen for the session.
+  const [state, setState] = useFilterState("admin-accounts", () => initialFilterState({ sort: "name" }));
 
-  const filtered = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    return accounts.filter((a) =>
-      (role === "all" || a.role === role) &&
-      (!q ||
-        a.name.toLowerCase().includes(q) ||
-        a.email.toLowerCase().includes(q) ||
-        (a.section ?? "").toLowerCase().includes(q))
-    );
-  }, [accounts, query, role]);
+  // Sections are known from every account, so an empty section stays selectable.
+  const sectionOptions = [...new Set(accounts.map((a) => a.section).filter((s): s is string => Boolean(s)))].sort();
+
+  const facet = (exclude: string, options: string[], valueOf: (a: AccountRecord) => string | string[] | null | undefined) =>
+    facetCounts(accounts, state, ACCOUNT_SPEC, { options, valueOf, exclude });
+  const roleCounts = facet("category", ROLE_CHIPS.map((r) => r.value), (a) => a.role);
+  const gradeCounts = facet("grade", GRADE_CHIPS.map((g) => g.value), gradeOf);
+  const statusCounts = facet("status", STATUS_CHIPS.map((s) => s.value), statusOf);
+  const sectionCounts = facet("section", sectionOptions, (a) => a.section);
+  const orgCounts = facet("org", ORG_OPTIONS, orgOf);
+  const countOf = (list: { value: string; count: number }[], value: string) => list.find((c) => c.value === value)?.count ?? 0;
+
+  const shown = sortItems(filterItems(accounts, state, ACCOUNT_SPEC), state.sort, {
+    name: (a, b) => a.name.localeCompare(b.name),
+    lastLogin: (a, b) => (b.lastLoginAt ?? 0) - (a.lastLoginAt ?? 0),
+  });
+
+  const toggle = (group: string, value: string) => setState((s) => toggleGroupValue(s, group, value));
+  const groupLabel: Record<string, string> = { grade: "Grade", section: "Section", status: "Status", org: "Organization" };
+  const valueLabel = (group: string, value: string) =>
+    group === "grade"
+      ? gradeLabel(value)
+      : group === "status"
+        ? STATUS_CHIPS.find((s) => s.value === value)?.label ?? value
+        : value;
+  const chip = (group: string, value: string, label: string, count?: number) => ({
+    value,
+    label,
+    count,
+    disabled: count === 0 && !isGroupSelected(state, group, value),
+  });
 
   const listHeader = (
-    <div className="flex flex-col gap-2">
-      <div className="relative">
-        <Search size={16} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
-        <input
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          placeholder="Search name, email or section"
-          aria-label="Search accounts"
-          className="min-h-12 w-full rounded-xl border border-slate-300 bg-white pl-10 pr-12 text-sm outline-none focus:border-brand-500"
-        />
-        {query && (
-          <button type="button" onClick={() => setQuery("")} aria-label="Clear search"
-            className="absolute inset-y-0 right-0 flex w-12 items-center justify-center text-slate-400">
-            <X size={16} />
-          </button>
-        )}
-      </div>
-      <Select value={role} onChange={setRole} ariaLabel="Filter accounts by role"
-        options={ROLE_FILTERS.map((r) => ({ value: r.id, label: r.label }))} />
-    </div>
+    <FilterBar
+      search={{
+        value: state.query,
+        onChange: (v) => setState((s) => setQuery(s, v)),
+        placeholder: "Search name, email or section",
+        ariaLabel: "Search accounts",
+      }}
+      category={{
+        value: state.category,
+        ariaLabel: "Role",
+        onChange: (v) => setState((s) => setCategory(s, v)),
+        options: [
+          { value: "all", label: "All", count: accounts.length },
+          ...ROLE_CHIPS.map((r) => ({ ...r, count: countOf(roleCounts, r.value) })),
+        ],
+      }}
+      quickChips={[
+        { label: "Locked", count: countOf(statusCounts, "locked"), active: isGroupSelected(state, "status", "locked"), onToggle: () => toggle("status", "locked") },
+        { label: "Must change password", count: countOf(statusCounts, "mustchange"), active: isGroupSelected(state, "status", "mustchange"), onToggle: () => toggle("status", "mustchange") },
+      ]}
+      filters={{
+        groups: [
+          { id: "grade", label: "Grade", options: GRADE_CHIPS.map((g) => chip("grade", g.value, g.label, countOf(gradeCounts, g.value))), selected: selectedValues(state, "grade"), onToggle: toggle },
+          { id: "section", label: "Section", options: sectionOptions.map((s) => chip("section", s, s, countOf(sectionCounts, s))), selected: selectedValues(state, "section"), onToggle: toggle },
+          { id: "status", label: "Status", options: STATUS_CHIPS.map((s) => chip("status", s.value, s.label, countOf(statusCounts, s.value))), selected: selectedValues(state, "status"), onToggle: toggle },
+          { id: "org", label: "Organization", options: ORG_OPTIONS.map((o) => chip("org", o, o, countOf(orgCounts, o))), selected: selectedValues(state, "org"), onToggle: toggle },
+        ],
+        activeCount: activeFilterCount(state),
+        onReset: () => setState((s) => clearGroupFilters(s)),
+        shown: shown.length,
+        total: accounts.length,
+        title: "Filters",
+      }}
+      sort={{
+        value: state.sort,
+        ariaLabel: "Sort accounts",
+        onChange: (v) => setState((s) => setSort(s, v)),
+        options: [
+          { value: "name", label: "Name (A–Z)" },
+          { value: "lastLogin", label: "Last sign-in (newest)" },
+        ],
+      }}
+      chipRows={
+        state.category === "teacher" || state.category === "parent"
+          ? [{
+              ariaLabel: "Grade",
+              options: GRADE_CHIPS.map((g) => ({ ...g, count: countOf(gradeCounts, g.value) })),
+              selected: selectedValues(state, "grade"),
+              onToggle: (v: string) => toggle("grade", v),
+            }]
+          : []
+      }
+      activeChips={activeFilterEntries(state).map((e) => ({
+        id: `${e.group}:${e.value}`,
+        label: `${groupLabel[e.group] ?? e.group}: ${valueLabel(e.group, e.value)}`,
+        onRemove: () => toggle(e.group, e.value),
+      }))}
+      onClearAll={() => setState((s) => clearGroupFilters(s))}
+      results={{ label: "Accounts", shown: shown.length, total: accounts.length }}
+    />
   );
 
   return (
     <MasterDetail
-      items={filtered}
+      items={shown}
       ariaLabel="Accounts — select an account"
       listHeader={listHeader}
-      emptyList={accounts.length === 0 ? "No accounts yet." : "No accounts match that search."}
+      emptyList={accounts.length === 0 ? "No accounts yet." : "No accounts match those filters."}
       emptyDetail="Select an account to see its profile and actions."
       renderList={(acc, active) => <AccountRow acc={acc} active={active} />}
       renderDetail={(acc) => (
@@ -720,9 +848,9 @@ function ConfigTab({ onDirtyChange }: { onDirtyChange: (dirty: boolean) => void 
                   onChange={(e) => set({ cr: e.target.value })} className={input} aria-label="Consistency ratio" />
               </ConfigField>
               <ConfigField label="Expert panel validation date" error={errors.panelValidationDate}>
-                <input type="date" value={draft.panelValidationDate}
-                  onChange={(e) => set({ panelValidationDate: e.target.value })} className={input}
-                  aria-label="Expert panel validation date" />
+                <DatePicker ariaLabel="Expert panel validation date" value={draft.panelValidationDate}
+                  onChange={(v) => set({ panelValidationDate: v })} clearable className="block w-full"
+                />
               </ConfigField>
             </div>
           </section>
@@ -916,7 +1044,8 @@ function ProvisionModal({ onClose, onCreated }: { onClose: () => void; onCreated
   const [email, setEmail] = useState("");
   const [name, setName] = useState("");
   const [role, setRole] = useState<"teacher" | "principal" | "responder" | "parent">("teacher");
-  const [section, setSection] = useState("");
+  const [grade, setGrade] = useState("");
+  const [sectionName, setSectionName] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -927,7 +1056,7 @@ function ProvisionModal({ onClose, onCreated }: { onClose: () => void; onCreated
     setError("");
     try {
       const r = await api<{ account: AccountRecord; tempPassword: string | null }>("POST", "/api/admin/accounts", {
-        email, name, role, section: role === "parent" ? section : undefined, password: password || undefined,
+        email, name, role, section: role === "parent" ? composeSection(grade, sectionName) : undefined, password: password || undefined,
       });
       onCreated(r.tempPassword ? { id: r.account.id, email, name, role, tempPassword: r.tempPassword } : null);
     } catch (e) {
@@ -954,9 +1083,14 @@ function ProvisionModal({ onClose, onCreated }: { onClose: () => void; onCreated
             { value: "parent", label: "Parent / PTA" },
           ]} />
         {role === "parent" && (
-          <label className="block text-sm font-medium text-slate-700">Section
-            <input value={section} onChange={(e) => setSection(e.target.value)} className={`${input} mt-1`} placeholder="Grade 3 - Sec A" />
-          </label>
+          <div className="space-y-3">
+            <Select label="Grade" labelClassName="text-sm font-medium text-slate-700" value={grade}
+              onChange={(v) => setGrade(v)} placeholder="Pick a grade"
+              options={SECTION_GRADES.map((label) => ({ value: gradeCode(label) ?? "", label }))} />
+            <label className="block text-sm font-medium text-slate-700">Section
+              <input value={sectionName} maxLength={20} onChange={(e) => setSectionName(e.target.value)} className={`${input} mt-1`} placeholder="Sec A" />
+            </label>
+          </div>
         )}
         <div>
           <label className="block text-sm font-medium text-slate-700">
@@ -972,7 +1106,7 @@ function ProvisionModal({ onClose, onCreated }: { onClose: () => void; onCreated
           </div>
         </div>
         {error && <p className="text-sm text-blush-700">{error}</p>}
-        <button onClick={() => void submit()} disabled={busy || !email || !name} className={`${btnPrimary} w-full justify-center`}>
+        <button onClick={() => void submit()} disabled={busy || !email || !name || (role === "parent" && (!grade || !sectionName.trim()))} className={`${btnPrimary} w-full justify-center`}>
           {busy ? "Creating…" : "Create account"}
         </button>
       </div>

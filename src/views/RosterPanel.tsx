@@ -4,11 +4,22 @@ import { useApp } from "../lib/store";
 import type { RosterEntry } from "../lib/types";
 import { ConfirmModal, Modal } from "../components/Modal";
 import { Select } from "../components/Select";
+import { FilterBar } from "../components/FilterBar";
+import {
+  facetCounts, filterItems, initialFilterState, matchesQuery, setCategory, setQuery, useFilterState, type FilterSpec,
+} from "../lib/filters";
+import { SECTION_GRADES, gradeCode, parseSection, composeSection } from "../../shared/section.js";
+
+const GRADE_OPTIONS = SECTION_GRADES.map((label) => ({ value: gradeCode(label) ?? "", label }));
+const GRADE_CODES = GRADE_OPTIONS.map((g) => g.value);
 
 function TeacherForm({ initial, onClose }: { initial: RosterEntry | null; onClose: () => void }) {
   const { addTeacher, editTeacher } = useApp();
+  const rawSection = initial?.section ?? "";
+  const parsed = parseSection(rawSection);
   const [name, setName] = useState(initial?.name ?? "");
-  const [section, setSection] = useState(initial?.section ?? "");
+  const [grade, setGrade] = useState(parsed.grade);
+  const [sec, setSec] = useState(parsed.sectionName || rawSection);
   const [room, setRoom] = useState(initial?.room ?? "");
   const [registry, setRegistry] = useState(String(initial?.registry ?? 30));
   const [status, setStatus] = useState<"active" | "inactive">(initial?.status ?? "active");
@@ -16,22 +27,27 @@ function TeacherForm({ initial, onClose }: { initial: RosterEntry | null; onClos
   const [busy, setBusy] = useState(false);
   const [confirmSection, setConfirmSection] = useState(false);
 
+  /** Stored string "Grade 3 - Sec A" from the grade select + section field. */
+  const composed = grade ? composeSection(grade, sec) : sec.trim();
+
   // A section change moves linked parent accounts (server side) — ask first.
   function submit() {
-    if (initial && section.trim() !== initial.section) { setConfirmSection(true); return; }
+    if (!grade) { setErr("Pick a grade."); return; }
+    if (!sec.trim()) { setErr("Enter your section (for example, A)."); return; }
+    if (initial && composed !== initial.section) { setConfirmSection(true); return; }
     void save();
   }
 
   async function save() {
     setBusy(true); setErr("");
     try {
-      if (initial) await editTeacher(initial.id, { name, section, room, status, registry: Number(registry) });
-      else await addTeacher({ name, section, room, status, registry: Number(registry) });
+      if (initial) await editTeacher(initial.id, { name, section: composed, room, status, registry: Number(registry) });
+      else await addTeacher({ name, section: composed, room, status, registry: Number(registry) });
       onClose();
     } catch (e) { setErr(e instanceof Error ? e.message : "Could not save."); setBusy(false); }
   }
   const fields: [string, string, (v: string) => void, string][] = [
-    ["Name", name, setName, "Ms. Reyes"], ["Grade / Section", section, setSection, "Grade 3 - Sec A"], ["Default Room", room, setRoom, "Bldg A | Flr 2 | Rm 204"],
+    ["Name", name, setName, "Ms. Reyes"], ["Default Room", room, setRoom, "Bldg A | Flr 2 | Rm 204"],
     ["Today's registry (number of pupils)", registry, (v: string) => setRegistry(v.replace(/\D/g, "").slice(0, 3)), "30"],
   ];
   return (
@@ -43,6 +59,12 @@ function TeacherForm({ initial, onClose }: { initial: RosterEntry | null; onClos
             <input value={val} onChange={(e) => set(e.target.value)} placeholder={ph} className="mt-1 min-h-12 w-full rounded-xl border border-slate-300 px-3 text-base font-normal outline-none focus:border-brand-500" />
           </label>
         ))}
+        <Select label="Grade" value={grade} onChange={(v) => { setGrade(v); setErr(""); }}
+          options={GRADE_OPTIONS} placeholder="Pick a grade" />
+        <label className="block text-xs font-semibold text-slate-600">Section
+          <input value={sec} maxLength={20} onChange={(e) => { setSec(e.target.value); setErr(""); }} placeholder="Sec A"
+            className="mt-1 min-h-12 w-full rounded-xl border border-slate-300 px-3 text-base font-normal outline-none focus:border-brand-500" />
+        </label>
         <Select label="Status" value={status} onChange={(v) => setStatus(v as "active" | "inactive")}
           options={[
             { value: "active", label: "On duty (can sign in and report)" },
@@ -69,6 +91,18 @@ export default function RosterPanel() {
   const { roster, deleteTeacher } = useApp();
   const [editing, setEditing] = useState<RosterEntry | "new" | null>(null);
   const [deleting, setDeleting] = useState<RosterEntry | null>(null);
+  // Grade chips + counts persist per screen for the session (as does the view).
+  const [state, setState] = useFilterState("principal-roster", () => initialFilterState());
+  const [view, setView] = useFilterState("principal-roster:view", "grid" as "list" | "grid");
+
+  const gradeOf = (t: RosterEntry) => t.grade || parseSection(t.section).grade || "";
+  const spec: FilterSpec<RosterEntry> = {
+    search: (t, q) => matchesQuery(q, t.name, t.section, t.room),
+    category: (t, c) => gradeOf(t) === c,
+  };
+  const counts = facetCounts(roster, state, spec, { options: GRADE_CODES, valueOf: gradeOf, exclude: "category" });
+  const countOf = (value: string) => counts.find((c) => c.value === value)?.count ?? 0;
+  const shown = filterItems(roster, state, spec);
 
   return (
     <div className="scroll-area mx-auto w-full max-w-6xl px-3 py-3 lg:h-full lg:overflow-y-auto">
@@ -77,8 +111,29 @@ export default function RosterPanel() {
         <button onClick={() => setEditing("new")} className="flex min-h-12 items-center gap-1 rounded-xl bg-brand-600 px-3 text-sm font-bold text-white"><Plus size={16} /> Add teacher</button>
       </div>
       <p className="mb-3 text-xs text-slate-500">Each section here is also a Parent/PTA feed.</p>
-      <div className="grid gap-2 md:grid-cols-2 lg:grid-cols-3">
-        {roster.map((t) => (
+      <div className="mb-3">
+        <FilterBar
+          search={{
+            value: state.query,
+            onChange: (v) => setState((s) => setQuery(s, v)),
+            placeholder: "Search name, section or room",
+            ariaLabel: "Search teachers",
+          }}
+          category={{
+            value: state.category,
+            ariaLabel: "Grade",
+            onChange: (v) => setState((s) => setCategory(s, v)),
+            options: [
+              { value: "all", label: "All", count: roster.length },
+              ...GRADE_OPTIONS.map((g) => ({ ...g, count: countOf(g.value) })),
+            ],
+          }}
+          results={{ label: "Teachers", shown: shown.length, total: roster.length }}
+          view={{ mode: view, onToggle: (m) => setView(m) }}
+        />
+      </div>
+      <div className={`gap-2 ${view === "grid" ? "grid md:grid-cols-2 lg:grid-cols-3" : "grid grid-cols-1"}`}>
+        {shown.map((t) => (
           <div key={t.id} className="bg-white border border-slate-200 rounded-2xl p-3">
             <div className="flex items-start justify-between gap-2">
               <div className="min-w-0">
@@ -98,6 +153,7 @@ export default function RosterPanel() {
           </div>
         ))}
       </div>
+      {shown.length === 0 && roster.length > 0 && <p className="text-center text-sm text-slate-500 py-8">No teachers match those filters.</p>}
       {roster.length === 0 && <p className="text-center text-sm text-slate-500 py-8">No teachers yet. Add one to get started.</p>}
       {editing && <TeacherForm initial={editing === "new" ? null : editing} onClose={() => setEditing(null)} />}
       {deleting && (

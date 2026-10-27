@@ -342,7 +342,7 @@ export function Select({
         placeholder="Search…"
         aria-label="Search options"
         aria-controls={listId}
-        className="min-h-10 w-full rounded-lg border border-slate-300 pl-9 pr-3 text-sm outline-none focus:border-brand-500"
+        className="min-h-12 w-full rounded-lg border border-slate-300 pl-9 pr-3 text-sm outline-none focus:border-brand-500"
       />
     </div>
   );

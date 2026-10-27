@@ -107,6 +107,10 @@ export interface RosterEntry {
   id: string;
   name: string;
   section: string;
+  /** Structured grade derived from section: "K" or "1".."6" ("" when unparseable). */
+  grade?: string;
+  /** Section name part of section, e.g. "A" ("" when unparseable). */
+  sectionName?: string;
   room: string;
   gps: string;
   status: "active" | "inactive";
@@ -200,6 +204,10 @@ export interface AccountRecord {
   role: Role;
   name: string;
   section: string | null;
+  /** Structured grade derived from section: "K" or "1".."6" ("" when unparseable). */
+  grade?: string;
+  /** Section name part of section, e.g. "A" ("" when unparseable). */
+  sectionName?: string;
   status: "active" | "inactive";
   mustChange: boolean;
   temp: boolean;

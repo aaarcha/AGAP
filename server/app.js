@@ -12,6 +12,7 @@ import * as C from "../shared/campus.js";
 import { createStore } from "./store.js";
 import { createConfigService, ConfigError } from "./config.js";
 import { validatePassword, POLICY_TEXT, PASSWORD_MIN, tempPasswordFromBytes } from "../shared/password.js";
+import { parseSection } from "../shared/section.js";
 
 class HttpError extends Error {
   constructor(status, code, message, details = null) {
@@ -219,8 +220,11 @@ export function createApp(opts = {}) {
 
   function newAccount({ email, role, name, password, mustChange = false, temp = false, id = null, teacherId = null, section = null }) {
     const { salt, hash } = hashPassword(password);
+    const structured = parseSection(section);
     const acc = {
       id: id || store.nextId("acc"), email, role, name, teacherId, section,
+      // Structured grade (K|1..6) + section name derived from the stored string.
+      grade: structured.grade, sectionName: structured.sectionName,
       pwSalt: salt, pwHash: hash, status: "active", mustChange, temp,
       failed: 0, lockedUntil: 0, createdAt: now(), lastLoginAt: null,
     };
@@ -230,9 +234,12 @@ export function createApp(opts = {}) {
 
   function publicAccount(a, t = now()) {
     const roster = a.teacherId ? store.db.roster.find((r) => r.id === a.teacherId) : null;
+    const section = a.role === "parent" ? a.section : roster ? roster.section : a.section || null;
+    const structured = parseSection(section);
     return {
       id: a.id, email: a.email, role: a.role, name: a.name,
-      section: a.role === "parent" ? a.section : roster ? roster.section : a.section || null,
+      section,
+      grade: structured.grade, sectionName: structured.sectionName,
       status: a.status, mustChange: Boolean(a.mustChange), temp: Boolean(a.temp),
       locked: a.lockedUntil > t, lockedUntil: a.lockedUntil, failed: a.failed,
       lastLoginAt: a.lastLoginAt, createdAt: a.createdAt,
@@ -788,9 +795,17 @@ export function createApp(opts = {}) {
       if (sectionChanged) for (const h of inc.headcounts || []) if (h.section === oldSection) h.section = newSection;
     }
     if (sectionChanged) {
+      // Keep the structured fields in step with the stored string.
+      const structured = parseSection(newSection);
+      entry.grade = structured.grade;
+      entry.sectionName = structured.sectionName;
       // A section rename must not orphan the data hanging off the old string.
       for (const acc of store.db.accounts) {
-        if (acc.role === "parent" && acc.section === oldSection) acc.section = newSection;
+        if (acc.role === "parent" && acc.section === oldSection) {
+          acc.section = newSection;
+          acc.grade = structured.grade;
+          acc.sectionName = structured.sectionName;
+        }
       }
       audit("section_changed", {
         by,
@@ -807,7 +822,13 @@ export function createApp(opts = {}) {
     const section = clean(body.section, 60);
     const room = clean(body.room, 80);
     if (!partial || body.name !== undefined) { if (!name) throw bad("Name is required."); out.name = name; }
-    if (!partial || body.section !== undefined) { if (!section) throw bad("Grade / section is required."); out.section = section; }
+    if (!partial || body.section !== undefined) {
+      if (!section) throw bad("Grade / section is required.");
+      out.section = section;
+      const structured = parseSection(section);
+      out.grade = structured.grade;
+      out.sectionName = structured.sectionName;
+    }
     if (!partial || body.room !== undefined) { if (!room) throw bad("Default room is required."); out.room = room; }
     if (body.registry !== undefined && body.registry !== null && body.registry !== "") {
       const n = Number(body.registry);
@@ -1386,7 +1407,7 @@ export function createApp(opts = {}) {
       if (!entry) throw new HttpError(401, "unauthorized", "Please sign in again.");
       applyTeacherEdit(entry, parseTeacherFields(await readJson(req)), { by: account.email, req });
       const acc = teacherAccount(entry.id);
-      if (acc) { acc.name = entry.name; acc.section = entry.section; } // keep the account record in step with the roster
+      if (acc) { acc.name = entry.name; acc.section = entry.section; acc.grade = entry.grade; acc.sectionName = entry.sectionName; } // keep the account record in step with the roster
       commit({ type: "roster_updated", id: entry.id });
       return send(res, 200, { user: userFromAccount(acc) || { id: entry.id, role: "teacher", name: entry.name, section: entry.section, room: entry.room, gps: entry.gps, registry: entry.registry, registryUpdatedAt: entry.registryUpdatedAt ?? null, subtitle: `Teacher · ${entry.section}` } });
     }
@@ -1451,6 +1472,8 @@ export function createApp(opts = {}) {
       if (acc) {
         acc.name = entry.name;
         acc.section = entry.section;
+        acc.grade = entry.grade;
+        acc.sectionName = entry.sectionName;
         if (values.status && acc.status !== (values.status === "active" ? "active" : "inactive")) {
           acc.status = values.status === "active" ? "active" : "inactive";
           if (acc.status === "inactive") { revokeSessions(acc.id); audit("account_deactivated", { by: user.email, target: acc.email, detail: "roster status set to off duty", req }); }
