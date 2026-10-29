@@ -31,6 +31,8 @@ interface Ctx {
   sections: string[];
   modes: Modes;
   drills: DrillSummary[];
+  /** Tickets this user hid from their own lists (POST /api/me/hidden, reversible). */
+  hidden: Incident[];
   now: number;
   online: boolean;
   connected: boolean;
@@ -60,12 +62,17 @@ interface Ctx {
   setRoute: (status: string, note?: string) => Promise<void>;
   markSeen: (id: string) => void;
   cancelReport: (id: string) => Promise<void>;
-  deleteIncident: (id: string) => Promise<void>;
-  clearHistory: () => Promise<number>;
+  /** Archive a closed ticket for the whole organisation (Principal only). */
+  archiveIncident: (id: string, reason?: string) => Promise<void>;
+  /** Archive every currently closed ticket at once (Principal only). */
+  archiveResolved: (reason?: string) => Promise<number>;
+  /** Hide/unhide a closed ticket from THIS user's lists only. */
+  hideIncident: (id: string, hidden: boolean) => Promise<void>;
   saveProfile: (v: TeacherValues) => Promise<void>;
   addTeacher: (v: TeacherValues) => Promise<void>;
   editTeacher: (id: string, v: TeacherValues) => Promise<void>;
-  deleteTeacher: (id: string) => Promise<void>;
+  /** Archive a teacher (removes them from live rosters; reversible from the Admin console). */
+  archiveTeacher: (id: string, reason?: string) => Promise<void>;
 }
 
 const AppCtx = createContext<Ctx | null>(null);
@@ -93,6 +100,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [sections, setSections] = useState<string[]>([]);
   const [modes, setModes] = useState<Modes>(DEFAULT_MODES);
   const [drills, setDrills] = useState<DrillSummary[]>([]);
+  const [hidden, setHidden] = useState<Incident[]>([]);
   const [now, setNow] = useState(Date.now());
   const [online, setOnline] = useState(typeof navigator === "undefined" ? true : navigator.onLine);
   const [live, setLive] = useState(false);
@@ -205,6 +213,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     setSections(s.sections);
     setModes(s.modes ?? DEFAULT_MODES);
     setDrills(s.drills ?? []);
+    setHidden(s.hidden ?? []);
     setNow(s.serverTime);
     try { localStorage.setItem(CACHE_KEY, JSON.stringify(s)); } catch { /* storage full */ }
   }
@@ -214,7 +223,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     prev.current = null;
     prevModes.current = null;
     seenSent.current.clear();
-    setIncidents([]); setRoster([]); setSections([]); setLive(false);
+    setIncidents([]); setRoster([]); setSections([]); setHidden([]); setLive(false);
     localStorage.removeItem(CACHE_KEY);
   }, []);
 
@@ -430,18 +439,29 @@ export function AppProvider({ children }: { children: ReactNode }) {
     await refresh();
   }, [pushAlert, refresh]);
 
-  const deleteIncident = useCallback(async (id: string) => {
-    try { await api("DELETE", `/api/incidents/${id}`); }
-    catch (e) { pushAlert({ kind: "error", title: "Could not delete", body: e instanceof Error ? e.message : "Unknown error" }); }
+  const archiveIncident = useCallback(async (id: string, reason?: string) => {
+    try {
+      await api("POST", `/api/incidents/${id}/archive`, reason ? { reason } : {});
+      pushAlert({ kind: "info", title: "Ticket archived", body: "It leaves the live lists but stays readable under History > View archive." });
+    } catch (e) { pushAlert({ kind: "error", title: "Could not archive", body: e instanceof Error ? e.message : "Unknown error" }); }
     await refresh();
   }, [pushAlert, refresh]);
 
-  const clearHistory = useCallback(async () => {
+  const archiveResolved = useCallback(async (reason?: string) => {
     let count = 0;
-    try { count = (await api<{ count: number }>("DELETE", "/api/history")).count; }
-    catch (e) { pushAlert({ kind: "error", title: "Could not clear history", body: e instanceof Error ? e.message : "Unknown error" }); }
+    try {
+      const r = await api<{ count: number }>("POST", "/api/incidents/archive-resolved", reason ? { reason } : {});
+      count = r.count;
+      pushAlert({ kind: "info", title: `${count} ticket${count === 1 ? "" : "s"} archived`, body: "They stay readable under History > View archive." });
+    } catch (e) { pushAlert({ kind: "error", title: "Could not archive", body: e instanceof Error ? e.message : "Unknown error" }); }
     await refresh();
     return count;
+  }, [pushAlert, refresh]);
+
+  const hideIncident = useCallback(async (id: string, hiddenNext: boolean) => {
+    try { await api("POST", "/api/me/hidden", { incidentId: id, hidden: hiddenNext }); }
+    catch (e) { pushAlert({ kind: "error", title: hiddenNext ? "Could not hide" : "Could not unhide", body: e instanceof Error ? e.message : "Unknown error" }); }
+    await refresh();
   }, [pushAlert, refresh]);
 
   const saveProfile = useCallback(async (v: TeacherValues) => {
@@ -452,7 +472,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const addTeacher = useCallback(async (v: TeacherValues) => { await api("POST", "/api/roster", v); await refresh(); }, [refresh]);
   const changeSavedRoom = useCallback(async (roomId: string) => { await api("PUT", "/api/profile/room", { roomId }); await refresh(); }, [refresh]);
   const editTeacher = useCallback(async (id: string, v: TeacherValues) => { await api("PUT", `/api/roster/${id}`, v); await refresh(); }, [refresh]);
-  const deleteTeacher = useCallback(async (id: string) => { await api("DELETE", `/api/roster/${id}`); await refresh(); }, [refresh]);
+  const archiveTeacher = useCallback(async (id: string, reason?: string) => {
+    await api("POST", `/api/roster/${id}/archive`, reason ? { reason } : {});
+    await refresh();
+  }, [refresh]);
 
   const enableNotifications = useCallback(async () => {
     if (!notificationsSupported()) return;
@@ -466,7 +489,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const value: Ctx = {
     user, ready, config, incidents, roster, sections, modes, drills, now, online, connected, live,
     queue, alerts, dismissAlert, notifPermission, enableNotifications, mustChange, passwordPolicy, login, changePassword, logout, refresh, submit, cancelQueued,
-    act, recordHeadcount, setHazard, setDrill, setRoute, markSeen, cancelReport,  deleteIncident, clearHistory, saveProfile, addTeacher, editTeacher, deleteTeacher, changeSavedRoom, notify,
+    act, recordHeadcount, setHazard, setDrill, setRoute, markSeen, cancelReport, archiveIncident, archiveResolved, hideIncident, hidden,
+    saveProfile, addTeacher, editTeacher, archiveTeacher, changeSavedRoom, notify,
   };
   return <AppCtx.Provider value={value}>{children}</AppCtx.Provider>;
 }

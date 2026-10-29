@@ -1,15 +1,16 @@
 import { BackBarFor } from "../components/Chrome";
 import { AboutContent } from "../components/AboutContent";
 import { Modal } from "../components/Modal";
+import { PageFlow } from "../components/PageShell";
 
 export default function AboutView({ onBack }: { onBack: () => void }) {
   return (
-    <div className="mx-auto w-full max-w-3xl">
+    <PageFlow width="max-w-3xl" className="px-0 py-0">
       <BackBarFor title="About ASPIRE" onBack={onBack} />
-      <div className="scroll-area min-h-0 flex-1 overflow-y-auto px-4 pb-6">
+      <div className="px-4 pb-6">
         <AboutContent />
       </div>
-    </div>
+    </PageFlow>
   );
 }
 

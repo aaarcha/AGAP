@@ -68,7 +68,8 @@ if (activeRoster.length > 0) {
 
 targets.push(
   { role: "principal", email: normEmail("principal@sinalhanes.deped.ph"), name: "Dr. Dev Principal", password: PASSWORD.principal },
-  { role: "responder", email: normEmail("responder@sinalhanes.deped.ph"), name: "Brgy. Dev Responder", password: PASSWORD.responder },
+  { role: "responder", org: "barangay", email: normEmail("barangay@sinalhanes.deped.ph"), name: "Barangay Dev Responder", password: PASSWORD.responder },
+  { role: "responder", org: "cdrrmo", email: normEmail("cdrrmo@sinalhanes.deped.ph"), name: "CDRRMO Dev Responder", password: PASSWORD.responder },
   { role: "parent", email: normEmail(`parent-${slugify(parentSection)}@sinalhanes.deped.ph`), name: "Dev Parent", section: parentSection, password: PASSWORD.parent },
   { role: "super_admin", email: normEmail("superadmin@sinalhanes.deped.ph"), name: "Dev Super Admin", id: "super-admin-dev", password: PASSWORD.super_admin },
 );
@@ -94,6 +95,8 @@ for (const t of targets) {
       role: t.role,
       name: t.name,
       teacherId: t.teacherId ?? null,
+      // A responder belongs to exactly one organization; no other role has one.
+      org: t.role === "responder" ? (t.org ?? null) : null,
       section: t.section ?? null,
       status: "active",
       mustChange: true,

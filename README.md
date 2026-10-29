@@ -11,7 +11,7 @@ Principal, Parent/PTA and Barangay/CDRRMO devices within about a second.
 | Teacher | 3-tap report (sent immediately; "Cancel this alert" on the last-report panel undoes a mistake), headcount prompt for group-scope alerts, edit own profile/room, personal history and account |
 | Principal | Command queue, can also report, Safety (hazard/drill/headcount), official History (permanent delete), teacher roster, About and Account |
 | Parent/PTA | Sees only alerts for their child's section (plus whole-school alerts); "All clear" when closed; advisory in English/Filipino; one Contact School button |
-| Brgy. Sinalhan / CDRRMO | Priority dispatch queue: Acknowledge → On-Site → Resolve / False alarm; History |
+| Barangay Sinalhan · CDRRMO | One account per organization (never shared): priority dispatch queue — Acknowledge → On-Site → Resolve / False alarm. Both orgs respond to the same ticket independently, each with its own ETA and transport; History |
 
 ## Run locally
 ```bash
@@ -56,16 +56,21 @@ live updates over Server-Sent Events with polling fallback, browser notification
 **Not included:** true push notifications when the app is fully closed (needs Web Push/VAPID keys + a push service) — a good next step.
 
 ## Things to verify before real use
-* Hotlines in `shared/domain.js` (`ESCALATION_MATRIX`) marked `verified:false` were carried over from the Replit prototype and are **unconfirmed**. Only 911 and 143 are known-good. Replace with the numbers confirmed by Barangay Sinalhan / CDRRMO.
-* Weights, CR and score bands are illustrative until the Expert Panel session. They are read-only in the Super Admin console → Configuration.
+* Agency contacts live in **one** file, `shared/agencies.js` (name, focus, how it differs from CDRRMO, contacts, source and lastVerified per agency). `VERIFIED_DATE` is `null`, so the responder Escalation page is captioned "Numbers from the Santa Rosa City Directory" and each card reads "Not yet verified" — set it once the Expert Panel confirms the directory. Numbers appear **only** on that page (plus the school's own number on Parent → Contact School and About).
+* Weights, CR and score bands are illustrative until the Expert Panel session. They are read-only in the Super Admin console → System Settings.
 * The demo reset endpoint is disabled unless `ALLOW_DEMO_RESET=1`, and demo accounts/incidents are only seeded when their flags are set.
 * Time Sensitivity is fixed at 3 (as in the prototype).
 
-## History and deleting records
-Every resolved, false-alarm or cancelled incident moves to **History** for all four roles, with full details (urgency reasons in plain words, timeline, who acknowledged/closed). Scoring math is not shown to teachers or parents.
-* **Principal** = the official record. Delete (one, or "Clear history") is **permanent for everyone**.
-* **Teacher / Parent / Responder** deletes only remove it from **their own** history; the Principal's record stays.
-* Only closed incidents can be deleted. Parent accounts are per section, so clearing history hides it for that section's parent account.
+## History, archive, hide and purge
+Every resolved, false-alarm or cancelled incident moves to **History** for teachers, principals, parents and responders (the responder rail reads **Queue · Escalation · History · Account** — their queue stays open tickets only, closed work lives on History), with full details (urgency reasons in plain words, timeline, who acknowledged/closed). Scoring math is not shown to teachers or parents. **Nothing is ever deleted through the UI or the API — no route accepts HTTP `DELETE`.**
+* **HIDE** (Teacher for their own reports, Parent for closed alerts) — a per-user "remove from my list": reversible from the **Hidden** chip, the record itself is unchanged and stays visible to everyone else. Responders have **no hide and no delete**; they can only filter closed tickets out of their queue.
+* **ARCHIVE** (Principal) — organization-wide: one ticket, or **Archive all resolved** (with an optional reason). A sweep runs on server start and then hourly (`ASPIRE_ARCHIVE_AFTER_DAYS`, placeholder) and writes one audit entry per run. Archived tickets leave `/api/state` for **every** role and live behind `GET /api/incidents/archive` (paginated, limit 50): Principal/Admin see all, a Responder every archived ticket, a Teacher only their own reports, a Parent gets 403. Restore puts a ticket back. Archived records have a **dedicated page** — Principal: **History → View archive**, Responder: **History → View archive**, Super Admin: **Users → Records & Archives → Open archive**, Teacher: **My Reports → Archived** — all read-only; a Parent never sees archived tickets.
+* **Accounts** — Admin can archive/restore an account (archived = sessions revoked, sign-in blocked with the generic "Invalid email or password.", hidden from rosters; restore forces a password change). The Principal can archive a teacher from the roster, which archives that account. Self-archive and archiving the last active Super Admin are refused.
+* **PURGE** (Admin, typed confirmation) — erases/anonymises personal data once the record is archived **and** past retention, keeping ids, roles and statistics. Eligibility counters live in the **Records & Archives** card on the Users tab; the periods themselves (placeholders, set by the school's data protection contact via the `ASPIRE_RETENTION_*` env vars, see `server/retention.js`) live under **About ASPIRE → Retention and purge rules**. Data requests (restrict / erase) are processed from the account detail and need a reference and a reason.
+
+## Super Admin console
+The rail reads **Users · Audit · Year · System Settings · Profile**. The default landing (Users) is a dashboard — Total users, Active responders, Recent security events (last 24 h) — followed by the interactive user roster and the read-only **Records & Archives** counters. The retention policy table is deliberately *not* on the landing: it sits in **About ASPIRE → Retention and purge rules** (expandable), which every role can read.
+* `/api/admin/reset` stays POST-only behind `ALLOW_DEMO_RESET`, is refused whenever `NODE_ENV=production`, and is never surfaced in the UI.
 * Reporters can cancel their own alert until a responder is on site, unless other people also reported it.
 
 ## Dropdowns

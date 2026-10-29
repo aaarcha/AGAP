@@ -1,6 +1,9 @@
+import { useEffect, useState } from "react";
 import { version } from "../../package.json";
 import { SCHOOL } from "../../shared/domain.js";
 import { useApp } from "../lib/store";
+import { api } from "../lib/api";
+import type { RetentionInfo } from "../lib/types";
 import { PageHeader, Card, SectionLabel, Callout, Accordion } from "../components/ui";
 import { Modal } from "../components/Modal";
 
@@ -9,13 +12,13 @@ const ROLE_LABEL: Record<string, string> = {
   principal: "Principal",
   parent: "Parent / PTA",
   responder: "Responder",
-  super_admin: "Super Admin",
+  super_admin: "System Administrator",
 };
 
 const COMMON_HELP = [
   {
     q: "Can't log in?",
-    a: "Check your email and password. After several wrong attempts the account is locked for a short time; ask your School Administrator to unlock it.",
+    a: "Check your email and password. After several wrong attempts the account is locked for a short time; ask your System Administrator to unlock it.",
   },
   {
     q: "Forgot your password?",
@@ -100,12 +103,16 @@ const ROLE_HELP: Record<string, { title: string; items: { q: string; a: string }
     title: "Administrator guide",
     items: [
       {
-        q: "Accounts, school year and audit log",
-        a: "Create and manage accounts, start a new school year (resets credentials), and review the audit log.",
+        q: "Users, school year and audit log",
+        a: "Create and manage users, start a new school year (resets credentials), and review the audit log.",
       },
       {
-        q: "Configuration",
-        a: "Configuration changes affect only new reports and are recorded.",
+        q: "System Settings",
+        a: "System Settings changes affect only new reports and are recorded.",
+      },
+      {
+        q: "Archived records",
+        a: "Open Users > Records & Archives > Open archive to read archived tickets in the Tickets and Accounts tabs; the retention and purge rules live under Retention and purge rules in this page.",
       },
     ],
   },
@@ -121,11 +128,93 @@ function DataAccordion() {
         <li><b>Audit log</b> — sign-ins and actions: to keep the record accountable.</li>
       </ul>
       <p className="mt-2 text-xs leading-relaxed text-slate-500">
-        Collected only for school DRRM use under RA 10173 (Data Privacy Act). Retained according to the school's data retention
-        schedule; ask the school office to correct, restrict, or delete your data. Reports made offline stay on this device until
-        they can be sent.
+        Collected only for school DRRM use under RA 10173 (Data Privacy Act). Records are archived instead of deleted,
+        and archived records stay readable on their own page: the System Administrator opens
+        Users &gt; Records &amp; Archives &gt; Open archive, the Principal opens History &gt; View archive,
+        and teachers open My Reports &gt; Archived. Personal data is erased only by the System Administrator after the
+        retention period or on a valid request. Ask the school office to correct, restrict, or delete your data.
+        Reports made offline stay on this device until they can be sent.
       </p>
     </Accordion>
+  );
+}
+
+/** Data governance: the retention & purge rules, expandable (they used to sit on the Admin landing). */
+function RetentionRules() {
+  const { user } = useApp();
+  const isAdmin = user?.role === "super_admin";
+  const [info, setInfo] = useState<RetentionInfo | null>(null);
+
+  // The concrete periods come from an Admin-only endpoint; everyone else reads
+  // the rules as text.
+  useEffect(() => {
+    if (!isAdmin) return;
+    let live = true;
+    void api<RetentionInfo>("GET", "/api/admin/retention")
+      .then((r) => { if (live && r && r.periods) setInfo(r); })
+      .catch(() => { /* offline or signed out: the rules still read fine */ });
+    return () => { live = false; };
+  }, [isAdmin]);
+
+  return (
+    <Card>
+      <SectionLabel>Data governance</SectionLabel>
+      <p className="mt-2 text-sm leading-relaxed text-slate-600">
+        Nothing is deleted from the app. Records are hidden (your own list), archived (the official record) or,
+        after the retention period, purged by the System Administrator.
+      </p>
+      <div className="mt-3">
+        <Accordion title="Retention and purge rules">
+          <ul className="space-y-2">
+            <li>
+              <b>Hide</b> — teachers and parents can remove a closed record from their own list only. It is
+              reversible from the Hidden chip and nobody else's view changes.
+            </li>
+            <li>
+              <b>Archive</b> — the Principal archives closed tickets one at a time or all at once, and a
+              retention sweep archives them automatically once they pass the archive period. Archived records
+              leave every live list but stay readable on their own page: the System Administrator opens
+              Users &gt; Records &amp; Archives &gt; Open archive, the Principal opens History &gt; View archive,
+              and teachers open My Reports &gt; Archived.
+            </li>
+            <li>
+              <b>Purge</b> — the System Administrator erases personal data, and only once the record is archived
+              and past its retention period, or through a valid data request. Statistics are kept, a typed
+              confirmation is required, and the action is audit-logged.
+            </li>
+            <li>
+              <b>Placeholder periods</b> — the numbers below are placeholders, to be set by the school's data
+              protection contact. They are not a legal claim.
+            </li>
+          </ul>
+          {info ? (
+            <div className="mt-3 rounded-xl bg-slate-50 p-3">
+              <p className="text-xs font-bold uppercase tracking-wide text-slate-500">Placeholder periods</p>
+              <ul className="mt-1 grid gap-1 text-sm sm:grid-cols-2">
+                {([
+                  ["Close → archive", `${info.periods.archiveAfterDays} days`],
+                  ["Ticket retention (after archive)", `${info.periods.incidents} days`],
+                  ["Account retention (after archive)", `${info.periods.accounts} days`],
+                  ["Drill records", `${info.periods.drills} days`],
+                ] as [string, string][]).map(([k, v]) => (
+                  <li key={k} className="flex justify-between gap-3">
+                    <span className="text-slate-500">{k}</span>
+                    <span className="font-mono font-bold text-slate-700">{v}</span>
+                  </li>
+                ))}
+              </ul>
+              {info.skipped.map((s) => (
+                <p key={s.type} className="mt-2 text-xs text-slate-500">
+                  Skipped — {s.type} logs ({s.days} days configured): {s.note}
+                </p>
+              ))}
+            </div>
+          ) : isAdmin ? (
+            <p className="mt-3 text-xs text-slate-400">Loading the current periods…</p>
+          ) : null}
+        </Accordion>
+      </div>
+    </Card>
   );
 }
 
@@ -193,6 +282,8 @@ export function AboutContent() {
       <Card>
         <DataAccordion />
       </Card>
+
+      <RetentionRules />
 
       <Card>
         <HelpSection />

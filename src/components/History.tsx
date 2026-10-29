@@ -1,9 +1,9 @@
 import { useMemo, useState } from "react";
-import { History as HistoryIcon, Trash2 } from "lucide-react";
+import { Archive, Eye, EyeOff, History as HistoryIcon } from "lucide-react";
 import { OUTCOME_LABEL, TRANSPORT_MODES, agencyFor } from "../../shared/domain.js";
 import { useApp } from "../lib/store";
 import { catTheme } from "../lib/theme";
-import { dateTime, duration, elapsed, fmtMs, plainOverride } from "../lib/format";
+import { dateTime, duration, elapsed, escalationLabel, fmtMs, plainOverride } from "../lib/format";
 import type { Incident } from "../lib/types";
 import { ConfirmModal, Modal } from "./Modal";
 import DateRangeBar from "./DateRange";
@@ -25,23 +25,56 @@ const OUTCOME_STYLE: Record<string, string> = {
 };
 const outcomeOf = (i: Incident) => (i.outcome ?? "resolved") as keyof typeof OUTCOME_LABEL;
 
-function useDeleteCopy() {
-  const { user } = useApp();
-  const permanent = user?.role === "principal";
+/** Archive confirmation with an optional reason (Principal only — records are never deleted). */
+function ArchiveDialog({ title, message, confirmLabel, onConfirm, onClose }: {
+  title: string; message: string; confirmLabel: string; onConfirm: (reason?: string) => void; onClose: () => void;
+}) {
+  const [reason, setReason] = useState("");
+  return (
+    <ConfirmModal
+      title={title}
+      message={message}
+      confirmLabel={confirmLabel}
+      onClose={onClose}
+      onConfirm={() => onConfirm(reason.trim() || undefined)}
+    >
+      <label className="mt-3 block text-xs font-semibold text-slate-600">
+        Reason (optional)
+        <textarea
+          value={reason}
+          onChange={(e) => setReason(e.target.value)}
+          rows={2}
+          maxLength={200}
+          placeholder="Why is this record being archived?"
+          className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 text-sm font-normal outline-none focus:border-brand-500"
+        />
+      </label>
+    </ConfirmModal>
+  );
+}
+
+/** What this role may do with a closed record: archive (Principal), hide (own), or nothing. */
+function useHistoryActions() {
+  const { user, archiveIncident, archiveResolved, hideIncident, hidden } = useApp();
+  const role = user?.role;
   return {
-    permanent,
-    one: permanent
-      ? "This permanently deletes the record for everyone (Principal, responders, teacher and parents). It cannot be undone."
-      : "This removes it from your history only. The Principal's official record is not affected.",
-    all: permanent
-      ? "This permanently deletes every closed incident for everyone. Active incidents are not touched. It cannot be undone."
-      : "This clears every closed incident from your history only. The Principal's official record is not affected.",
+    user,
+    hidden: hidden ?? [],
+    isPrincipal: role === "principal",
+    // The archive is read-only for the roles that may open it.
+    canViewArchive: role === "principal" || role === "responder",
+    // Responders have no hide and no delete — only Teachers (own reports) and Parents may hide.
+    canHide: role === "teacher" || role === "parent",
+    canHideThis: (inc: Incident) =>
+      (role === "teacher" && inc.reporterId === user?.id) || role === "parent",
+    archiveIncident,
+    archiveResolved,
+    hideIncident,
   };
 }
 
-export function IncidentDetails({ inc, onClose }: { inc: Incident; onClose: () => void }) {
-  const { deleteIncident } = useApp();
-  const copy = useDeleteCopy();
+export function IncidentDetails({ inc, onClose, hiddenView = false }: { inc: Incident; onClose: () => void; hiddenView?: boolean }) {
+  const { isPrincipal, canHideThis, archiveIncident, hideIncident } = useHistoryActions();
   const [confirm, setConfirm] = useState(false);
   const ct = catTheme(inc.category);
   const outcome = outcomeOf(inc);
@@ -61,12 +94,13 @@ export function IncidentDetails({ inc, onClose }: { inc: Incident; onClose: () =
     ["Closed by", inc.resolvedBy ?? undefined],
     ["Recommended agency", agencyFor(inc.category)],
     ["Critical override", inc.overrideReasons.length ? inc.overrideReasons.map((r) => plainOverride(r)).join(" · ") : undefined],
-    ["Escalation", inc.escalationLevel > 0 ? "Escalated — no acknowledgement in time" : undefined],
+    ["Escalation", inc.escalationLevel > 0 ? escalationLabel(inc) : undefined],
     ["Headcount", inc.headcounts.length ? inc.headcounts.map((h) => `${h.section} ${h.present}/${h.expected}`).join(" · ") : undefined],
     ["Responder ETA", inc.eta ? (inc.eta.blocked ? "Route blocked" : `${inc.eta.minutes} min by ${TRANSPORT_MODES.find((m: { id: string }) => m.id === inc.eta!.mode)?.label ?? inc.eta.mode} (${inc.eta.distanceKm} km)`) : undefined],
     ["Report → on site", inc.metrics?.toOnSiteMs ? fmtMs(inc.metrics.toOnSiteMs) : undefined],
     ["Time to acknowledge", inc.metrics?.toAckMs ? fmtMs(inc.metrics.toAckMs) : undefined],
     ["Taps to report", inc.drill && inc.metrics ? String(inc.metrics.interactions) : undefined],
+    ["Archived", inc.archivedAt ? dateTime(inc.archivedAt) : undefined],
   ];
 
   return (
@@ -103,25 +137,48 @@ export function IncidentDetails({ inc, onClose }: { inc: Incident; onClose: () =
         </div>
       )}
 
-      <button onClick={() => setConfirm(true)} className="mt-5 flex min-h-12 w-full items-center justify-center gap-2 rounded-xl bg-blush-100 text-sm font-bold text-blush-700">
-        <Trash2 size={16} /> {copy.permanent ? "Delete this record permanently" : "Remove from my history"}
-      </button>
+      {hiddenView ? (
+        <button onClick={() => { void hideIncident(inc.id, false); onClose(); }}
+          className="mt-5 flex min-h-12 w-full items-center justify-center gap-2 rounded-xl bg-slate-100 text-sm font-bold text-slate-700">
+          <Eye size={16} /> Unhide — show it in my list again
+        </button>
+      ) : (
+        <>
+          {isPrincipal && !inc.archivedAt && (
+            <button onClick={() => setConfirm(true)}
+              className="mt-5 flex min-h-12 w-full items-center justify-center gap-2 rounded-xl bg-slate-100 text-sm font-bold text-slate-700">
+              <Archive size={16} /> Archive this record
+            </button>
+          )}
+          {!isPrincipal && canHideThis(inc) && (
+            <button onClick={() => { void hideIncident(inc.id, true); onClose(); }}
+              className="mt-5 flex min-h-12 w-full items-center justify-center gap-2 rounded-xl bg-slate-100 text-sm font-bold text-slate-700">
+              <EyeOff size={16} /> Remove from my list
+            </button>
+          )}
+        </>
+      )}
 
       {confirm && (
-        <ConfirmModal title={copy.permanent ? "Delete permanently?" : "Remove from your history?"} message={copy.one}
-          confirmLabel={copy.permanent ? "Delete" : "Remove"} danger onClose={() => setConfirm(false)}
-          onConfirm={() => { void deleteIncident(inc.id); onClose(); }} />
+        <ArchiveDialog
+          title="Archive this record?"
+          message="The ticket leaves the live lists but stays readable under History > View archive and keeps its audit trail. Active tickets cannot be archived."
+          confirmLabel="Archive"
+          onClose={() => setConfirm(false)}
+          onConfirm={(reason) => { void archiveIncident(inc.id, reason); onClose(); }}
+        />
       )}
     </Modal>
   );
 }
 
-export default function HistorySection({ title = "Incident history" }: { title?: string }) {
-  const { incidents, now, deleteIncident, clearHistory } = useApp();
-  const copy = useDeleteCopy();
+export default function HistorySection({ title = "Incident history", onOpenArchive }: { title?: string; onOpenArchive?: () => void }) {
+  const { incidents, now } = useApp();
+  const { hidden, isPrincipal, canViewArchive, canHide, canHideThis, archiveIncident, archiveResolved, hideIncident } = useHistoryActions();
   const [open, setOpen] = useState<string | null>(null);
-  const [del, setDel] = useState<Incident | null>(null);
-  const [clearAll, setClearAll] = useState(false);
+  const [archiveOne, setArchiveOne] = useState<Incident | null>(null);
+  const [archiveAll, setArchiveAll] = useState(false);
+  const [showHidden, setShowHidden] = useState(false);
   // Period chips + custom From/To over the records, kept for the session.
   const [range, setRange] = useFilterState<DateRangeState>("history-range", initialDateRange);
 
@@ -129,11 +186,16 @@ export default function HistorySection({ title = "Incident history" }: { title?:
     () => incidents.filter((i) => i.status === "RESOLVED").sort((a, b) => (b.resolvedAt ?? 0) - (a.resolvedAt ?? 0)),
     [incidents],
   );
+  const hiddenRecords = useMemo(
+    () => hidden.filter((i) => i.status === "RESOLVED").sort((a, b) => (b.resolvedAt ?? 0) - (a.resolvedAt ?? 0)),
+    [hidden],
+  );
   const closed = useMemo(
     () => records.filter((i) => inDateRange(i.resolvedAt ?? i.createdAt, range, now)),
     [records, range, now],
   );
-  const selected = closed.find((i) => i.id === open) ?? null;
+  const list = showHidden ? hiddenRecords : closed;
+  const selected = list.find((i) => i.id === open) ?? null;
 
   return (
     <section aria-label={title}>
@@ -143,27 +205,45 @@ export default function HistorySection({ title = "Incident history" }: { title?:
             ({closed.length === records.length ? closed.length : `${closed.length} of ${records.length}`})
           </span>
         </h2>
-        {closed.length > 0 && (
-          <button onClick={() => setClearAll(true)} className="min-h-12 rounded-lg bg-blush-100 px-3 text-xs font-bold text-blush-700">Clear history</button>
-        )}
+        <div className="flex items-center gap-2">
+          {canHide && hiddenRecords.length > 0 && (
+            <button onClick={() => setShowHidden((v) => !v)} aria-pressed={showHidden}
+              className={`min-h-12 rounded-lg px-3 text-xs font-bold ${showHidden ? "bg-brand-600 text-white" : "bg-slate-100 text-slate-700"}`}>
+              Hidden ({hiddenRecords.length})
+            </button>
+          )}
+          {canViewArchive && onOpenArchive && (
+            <button onClick={onOpenArchive} className="min-h-12 rounded-lg bg-brand-600 px-3 text-xs font-bold text-white">
+              View archive
+            </button>
+          )}
+          {isPrincipal && closed.length > 0 && (
+            <button onClick={() => setArchiveAll(true)} className="min-h-12 rounded-lg bg-slate-100 px-3 text-xs font-bold text-slate-700">
+              Archive all resolved
+            </button>
+          )}
+        </div>
       </div>
 
-      {records.length > 0 && (
+      {records.length > 0 && !showHidden && (
         <div className="mb-2">
           <DateRangeBar value={range} onChange={setRange} ariaLabel="History date range" />
         </div>
       )}
 
-      {closed.length === 0 ? (
+      {list.length === 0 ? (
         <div className="rounded-2xl border border-slate-200 bg-white px-4 py-8 text-center">
           <p className="text-sm text-slate-500">
-            {records.length === 0 ? "No closed incidents yet." : "No records in that date range."}
+            {showHidden
+              ? "Nothing hidden."
+              : records.length === 0 ? "No closed incidents yet." : "No records in that date range."}
           </p>
         </div>
       ) : (
         <ul className="divide-y divide-slate-100 overflow-hidden rounded-2xl border border-slate-200 bg-white">
-          {closed.map((i) => {
+          {list.map((i) => {
             const outcome = outcomeOf(i);
+            const hideable = !showHidden && !isPrincipal && canHide && canHideThis(i);
             return (
               <li key={i.id} className="flex items-stretch">
                 <button onClick={() => setOpen(i.id)} className="flex min-h-16 min-w-0 flex-1 items-center gap-3 px-3 py-3 text-left hover:bg-slate-50"
@@ -176,23 +256,46 @@ export default function HistorySection({ title = "Incident history" }: { title?:
                   </span>
                   <span className={`shrink-0 rounded-full px-2 py-0.5 text-[11px] font-bold ${OUTCOME_STYLE[outcome]}`}>{OUTCOME_LABEL[outcome]}</span>
                 </button>
-                <button onClick={() => setDel(i)} aria-label={`Delete ${i.subLabel} from history`}
-                  className="flex w-12 items-center justify-center text-slate-400 hover:bg-blush-100 hover:text-blush-700">
-                  <Trash2 size={18} />
-                </button>
+                {showHidden ? (
+                  <button onClick={() => void hideIncident(i.id, false)} aria-label={`Unhide ${i.subLabel}`}
+                    className="flex w-12 items-center justify-center text-slate-400 hover:bg-slate-100 hover:text-slate-700">
+                    <Eye size={18} />
+                  </button>
+                ) : isPrincipal ? (
+                  <button onClick={() => setArchiveOne(i)} aria-label={`Archive ${i.subLabel}`}
+                    className="flex w-12 items-center justify-center text-slate-400 hover:bg-slate-100 hover:text-slate-700">
+                    <Archive size={18} />
+                  </button>
+                ) : hideable ? (
+                  <button onClick={() => void hideIncident(i.id, true)} aria-label={`Hide ${i.subLabel} from my list`}
+                    className="flex w-12 items-center justify-center text-slate-400 hover:bg-slate-100 hover:text-slate-700">
+                    <EyeOff size={18} />
+                  </button>
+                ) : null}
               </li>
             );
           })}
         </ul>
       )}
 
-      {selected && <IncidentDetails inc={selected} onClose={() => setOpen(null)} />}
-      {del && (
-        <ConfirmModal title={copy.permanent ? "Delete permanently?" : "Remove from your history?"} message={`${del.subLabel} · ${del.room}. ${copy.one}`}
-          confirmLabel={copy.permanent ? "Delete" : "Remove"} danger onClose={() => setDel(null)} onConfirm={() => void deleteIncident(del.id)} />
+      {selected && <IncidentDetails inc={selected} hiddenView={showHidden} onClose={() => setOpen(null)} />}
+      {archiveOne && (
+        <ArchiveDialog
+          title="Archive this record?"
+          message={`${archiveOne.subLabel} · ${archiveOne.room}. The record leaves the live lists but stays readable under History > View archive. Active tickets cannot be archived.`}
+          confirmLabel="Archive"
+          onClose={() => setArchiveOne(null)}
+          onConfirm={(reason) => void archiveIncident(archiveOne.id, reason)}
+        />
       )}
-      {clearAll && (
-        <ConfirmModal title="Clear all history?" message={copy.all} confirmLabel="Clear history" danger onClose={() => setClearAll(false)} onConfirm={() => void clearHistory()} />
+      {archiveAll && (
+        <ArchiveDialog
+          title="Archive all resolved?"
+          message="Every currently closed ticket (resolved, cancelled or drill) is archived at once. Active tickets are not touched and nothing is deleted."
+          confirmLabel="Archive all resolved"
+          onClose={() => setArchiveAll(false)}
+          onConfirm={(reason) => void archiveResolved(reason)}
+        />
       )}
     </section>
   );

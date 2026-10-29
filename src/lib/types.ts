@@ -1,11 +1,16 @@
 export type Role = "teacher" | "principal" | "parent" | "responder" | "super_admin";
 export type Status = "SENT" | "SEEN" | "EN_ROUTE" | "ON_SITE" | "RESOLVED";
 
+/** A responder answers for exactly one organization — there are no shared accounts. */
+export type ResponderOrg = "barangay" | "cdrrmo";
+
 export interface User {
   id: string;
   role: Role;
   name: string;
   subtitle: string;
+  /** Responders only: the organization they dispatch for. */
+  org?: ResponderOrg | null;
   section?: string;
   room?: string;
   gps?: string;
@@ -20,6 +25,26 @@ export interface LogEntry {
   role: string;
   action: string;
   note?: string;
+  /** Set when a responder org acted, so the timeline names the organization. */
+  org?: ResponderOrg | null;
+}
+
+/** One organization's response to a ticket (both orgs respond independently). */
+export interface OrgResponse {
+  org: ResponderOrg;
+  orgLabel: string;
+  status: "en_route" | "on_site" | "resolved";
+  ackAt: number;
+  onSiteAt: number | null;
+  resolvedAt: number | null;
+  byName?: string;
+  mode: string | null;
+  distanceKm: number | null;
+  routeStatus: string | null;
+  blocked: boolean;
+  minutes: number | null;
+  startedAt: number | null;
+  arriveBy: number | null;
 }
 
 // How the final location of a ticket was established.
@@ -41,6 +66,10 @@ export interface Incident {
   populationId?: string;
   outcome: "resolved" | "false_alarm" | "cancelled" | "drill" | null;
   resolvedAt: number | null;
+  /** Step timestamps, locked by the server once recorded — never rewritten. */
+  seenAt?: number | null;
+  enRouteAt?: number | null;
+  onSiteAt?: number | null;
   // Not sent to parents:
   severity?: number;
   vulnerability?: number;
@@ -49,7 +78,12 @@ export interface Incident {
   reporterName?: string;
   reporterId?: string;
   acknowledgedBy?: string | null;
+  /** Which org first acknowledged (the headline status names it). */
+  acknowledgedByOrg?: ResponderOrg | null;
+  /** Every org's own response — ETA per org; null until that org acts. */
+  responses?: Record<ResponderOrg, OrgResponse | null>;
   resolvedBy?: string | null;
+  resolvedByOrg?: ResponderOrg | null;
   log?: LogEntry[];
   canCancel?: boolean;
   // Priority rules
@@ -69,6 +103,16 @@ export interface Incident {
   locationSetBy?: LocationSetBy;
   /** Human-readable final location + how it was set. */
   locationNote?: string;
+  /** Set when the ticket was archived (manually by the Principal, or by the sweep). */
+  archivedAt?: number | null;
+  archivedBy?: string | null;
+  archiveReason?: string | null;
+  /** true when the retention sweep archived it rather than a person. */
+  archivedAuto?: boolean;
+  /** Set when the Admin purge anonymised the record. Never reversible. */
+  anonymizedAt?: number | null;
+  /** Role label shown instead of the reporter's name in the archive. */
+  reporterRole?: string | null;
 }
 
 export interface Eta {
@@ -126,6 +170,8 @@ export interface ServerState {
   sections: string[];
   modes: Modes;
   drills: DrillSummary[];
+  /** Tickets this user removed from their own lists (reversible — POST /api/me/hidden). */
+  hidden?: Incident[];
 }
 
 // ---- admin configuration (Super Admin only) -----------------------------------
@@ -143,7 +189,9 @@ export interface ConfigVersion {
   active: boolean;
   weights: ConfigWeights;
   consistency: { cr: number; lambdaMax: number; ci: number; ri: number; n: number };
+  /** Who validated these values and when — a record only; it never changes scoring. */
   panelValidationDate: string | null;
+  panelReference: string | null;
   hazardAdjustment: number;
   escalation: { barangayMinutes: number; cdrrmoMinutes: number };
   responderSpeeds: { walking: number; motorcycle: number; vehicle: number };
@@ -155,6 +203,7 @@ export interface ConfigPayload {
   weights: ConfigWeights;
   consistency: { cr: number; lambdaMax?: number; ci?: number; ri?: number; n?: number };
   panelValidationDate: string;
+  panelReference: string;
   hazardAdjustment: number;
   escalation: { barangayMinutes: number; cdrrmoMinutes: number };
   responderSpeeds: { walking: number; motorcycle: number; vehicle: number };
@@ -203,29 +252,69 @@ export interface AccountRecord {
   email: string;
   role: Role;
   name: string;
+  /** Responders: the organization the account answers for. */
+  org?: ResponderOrg | null;
+  orgLabel?: string;
   section: string | null;
   /** Structured grade derived from section: "K" or "1".."6" ("" when unparseable). */
   grade?: string;
   /** Section name part of section, e.g. "A" ("" when unparseable). */
   sectionName?: string;
-  status: "active" | "inactive";
+  status: "active" | "inactive" | "archived" | "purged";
   mustChange: boolean;
   temp: boolean;
+  /** Set when the account was archived (blocks sign-in, revokes sessions). */
+  archivedAt?: number | null;
+  archiveReason?: string | null;
+  /** true when a retention sweep archived it rather than a person. */
+  archivedAuto?: boolean;
+  /** Set when the Admin purge erased personal data. */
+  purgedAt?: number | null;
   locked: boolean;
   lockedUntil: number;
   failed: number;
   lastLoginAt: number | null;
   createdAt: number;
   teacher?: TeacherRecord | null;
+  /** archived AND past the (placeholder) retention period — the Admin purge gate. */
+  purgeEligible?: boolean;
+}
+
+/** Read-only eligibility card behind GET /api/admin/retention. */
+export interface RetentionInfo {
+  placeholder: boolean;
+  label: string;
+  periods: {
+    archiveAfterDays: number;
+    incidents: number;
+    accounts: number;
+    drills: number;
+    notifications: number;
+  };
+  counts: {
+    archivedIncidents: number;
+    anonymizedIncidents: number;
+    eligibleIncidents: number;
+    archivedAccounts: number;
+    eligibleAccounts: number;
+    expiredDrills: number;
+  };
+  /** Types with no persistent store are reported, never given a period. */
+  skipped: { type: string; days: number; note: string }[];
 }
 
 export interface AuditEntry {
   at: number;
   action: string;
+  /** Actor id (never a name, password or token). */
   by: string | null;
   target: string | null;
   detail: string;
   ip: string;
+  /** Actor role and organisation, for the archive/purge/data-request actions. */
+  role?: string | null;
+  org?: string | null;
+  reason?: string | null;
 }
 
 export interface SchoolYear {

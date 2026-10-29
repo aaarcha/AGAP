@@ -1,21 +1,26 @@
 import { useEffect, useState, useMemo } from "react";
 import { useMediaQuery } from "../lib/hooks";
 
-import { CheckCircle2, ChevronDown, Clock, Eye, Navigation, PhoneCall, Siren } from "lucide-react";
-import { ESCALATION_MATRIX, STATUS_LABEL, agencyFor, bandFor } from "../../shared/domain.js";
+import { Check, CheckCircle2, ChevronDown, Clock, Eye, Navigation, Siren } from "lucide-react";
+import { STATUS_LABEL, STATUS_ORDER, agencyFor, bandFor, orgLabel } from "../../shared/domain.js";
 import { useApp } from "../lib/store";
 import { BAND_STYLE, catTheme } from "../lib/theme";
-import { clockTime, elapsed, locationSetByLabel, plainOverride } from "../lib/format";
-import type { Incident, Status } from "../lib/types";
+import { clockTime, elapsed, escalationLabel, locationSetByLabel, plainOverride } from "../lib/format";
+import type { Incident, OrgResponse, Status } from "../lib/types";
 import { ConfirmModal } from "./Modal";
-import { AckModal, EtaLine, HeadcountPanel, RuleBadges } from "./Rules";
+import { AckModal, EtaLine, HeadcountPanel, ResponseLines, RuleBadges } from "./Rules";
 
-export function WaitingLine({ inc }: { inc: Pick<Incident, "status" | "outcome"> }) {
+/** "CDRRMO" when an org has acted — the shared status names who is coming. */
+const actingOrg = (inc: Pick<Incident, "acknowledgedByOrg" | "acknowledgedBy">) =>
+  orgLabel(inc.acknowledgedByOrg) || inc.acknowledgedBy || "Responder";
+
+export function WaitingLine({ inc }: { inc: Pick<Incident, "status" | "outcome" | "acknowledgedByOrg" | "acknowledgedBy"> }) {
+  const org = actingOrg(inc);
   const map: Record<Status, { text: string; color: string; Icon: React.ElementType }> = {
     SENT: { text: "Waiting for responders…", color: "#A8304A", Icon: Clock },
     SEEN: { text: "Seen — awaiting dispatch", color: "#425B9A", Icon: Eye },
-    EN_ROUTE: { text: "Responder acknowledged — en route", color: "#B45309", Icon: Navigation },
-    ON_SITE: { text: "Responder is on site", color: "#0F766E", Icon: Siren },
+    EN_ROUTE: { text: `Acknowledged by ${org} — en route`, color: "#B45309", Icon: Navigation },
+    ON_SITE: { text: `${org} is on site`, color: "#0F766E", Icon: Siren },
     RESOLVED: { text: inc.outcome === "false_alarm" ? "Cancelled — false alarm" : inc.outcome === "cancelled" ? "Cancelled by the reporter" : "Resolved", color: "#15803D", Icon: CheckCircle2 },
   };
   const m = map[inc.status];
@@ -23,6 +28,75 @@ export function WaitingLine({ inc }: { inc: Pick<Incident, "status" | "outcome">
     <p className="flex items-center gap-1.5 text-sm font-semibold" style={{ color: m.color }}>
       <m.Icon size={15} className="shrink-0" /> {m.text}
     </p>
+  );
+}
+
+/** When a step happened: the ticket's locked stamp, or the first org to reach it. */
+function stepTimestamp(inc: Incident, status: Status): number | null {
+  const responses = Object.values(inc.responses ?? {}).filter((r): r is OrgResponse => Boolean(r));
+  const earliest = (pick: (r: OrgResponse) => number | null) => {
+    const ats = responses.map(pick).filter((v): v is number => typeof v === "number");
+    return ats.length ? Math.min(...ats) : null;
+  };
+  switch (status) {
+    case "SENT": return inc.createdAt;
+    case "SEEN": return inc.seenAt ?? null;
+    case "EN_ROUTE": return inc.enRouteAt ?? earliest((r) => r.ackAt);
+    case "ON_SITE": return inc.onSiteAt ?? earliest((r) => r.onSiteAt);
+    case "RESOLVED": return inc.resolvedAt ?? earliest((r) => r.resolvedAt);
+  }
+}
+
+/**
+ * Ticket progress, one step at a time:
+ *   completed — solid green check and a solid green connector,
+ *   current   — a glowing node with its own label and "Current" badge,
+ *   upcoming  — muted nodes behind dashed grey connectors.
+ */
+export function StatusStepper({ inc }: { inc: Incident }) {
+  const steps = STATUS_ORDER as Status[];
+  const current = Math.max(0, steps.indexOf(inc.status));
+  return (
+    <ol aria-label="Ticket status" className="flex items-start pt-1">
+      {steps.map((status, i) => {
+        const state = i < current ? "done" : i === current ? "active" : "upcoming";
+        const at = stepTimestamp(inc, status);
+        return (
+          <li key={status} data-step={status} data-state={state}
+            aria-current={state === "active" ? "step" : undefined}
+            className="flex min-w-0 flex-1 flex-col items-center">
+            <div className="flex w-full items-center" aria-hidden>
+              <span className={`h-0.5 flex-1 ${i === 0 ? "bg-transparent" : i <= current ? "bg-emerald-500" : "border-t-2 border-dashed border-slate-300"}`} />
+              {state === "done" ? (
+                <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-emerald-600 text-white shadow-sm">
+                  <Check size={14} strokeWidth={3} />
+                </span>
+              ) : state === "active" ? (
+                <span
+                  className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-brand-600 ring-4 ring-brand-100"
+                  style={{ boxShadow: "0 0 0 3px rgba(66,91,154,0.18), 0 0 12px rgba(66,91,154,0.45)" }}>
+                  <span className="h-2.5 w-2.5 rounded-full bg-white" />
+                </span>
+              ) : (
+                <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full border-2 border-dashed border-slate-300 bg-white">
+                  <span className="h-1.5 w-1.5 rounded-full bg-slate-300" />
+                </span>
+              )}
+              <span className={`h-0.5 flex-1 ${i === steps.length - 1 ? "bg-transparent" : i < current ? "bg-emerald-500" : "border-t-2 border-dashed border-slate-300"}`} />
+            </div>
+            <span className={`mt-1 w-full truncate text-center text-[10px] uppercase tracking-wide ${
+              state === "done" ? "font-bold text-emerald-700" : state === "active" ? "font-extrabold text-brand-800" : "font-medium text-slate-400"
+            }`}>{STATUS_LABEL[status]}</span>
+            {state === "active" && (
+              <span data-current-badge className="mt-0.5 rounded-full bg-brand-600 px-1.5 py-0.5 text-[9px] font-extrabold uppercase tracking-wider text-white">Current</span>
+            )}
+            {at != null && state !== "upcoming" && (
+              <span className="text-[9px] font-mono text-slate-400">{clockTime(at)}</span>
+            )}
+          </li>
+        );
+      })}
+    </ol>
   );
 }
 
@@ -43,10 +117,26 @@ export function IncidentCard({ inc, showActions, showLog, defaultExpanded = fals
   const [busy, setBusy] = useState(false);
   const [ackOpen, setAckOpen] = useState(false);
 
-  const isMobileAck = useMediaQuery("screen and (max-width: 479px)");
+  // The main action is derived from the ticket's live status on every render, so
+  // a status pushed in from the server can never leave a stale label behind:
+  // SENT/SEEN → Acknowledge & En Route, EN_ROUTE → Mark as On Site,
+  // ON_SITE → Mark as Resolved, RESOLVED → no button (a disabled badge instead).
+  const nextStep: "ack" | "onsite" | "resolve" | null = closed
+    ? null
+    : inc.status === "SENT" || inc.status === "SEEN" ? "ack"
+      : inc.status === "EN_ROUTE" ? "onsite"
+        : inc.status === "ON_SITE" ? "resolve"
+          : null;
 
   // First time a principal/responder sees a "Sent" ticket, tell the server it was seen.
   useEffect(() => { if (showActions && inc.status === "SENT") markSeen(inc.id); }, [showActions, inc.id, inc.status, markSeen]);
+
+  // A step that stops being current must not leave its dialog open (e.g. another
+  // responder moves the ticket on while the acknowledge sheet is showing).
+  useEffect(() => {
+    if (nextStep !== "ack") setAckOpen(false);
+    if (nextStep !== "resolve") setConfirm(null);
+  }, [nextStep]);
 
   async function run(action: "ack" | "onsite" | "resolve", outcome?: "resolved" | "false_alarm") {
     setBusy(true);
@@ -63,7 +153,7 @@ export function IncidentCard({ inc, showActions, showLog, defaultExpanded = fals
     ["Location", inc.room],
     ["Location set by", locationSetByLabel(inc)],
     ["Hazard mode", inc.hazardApplied ? "On — flooding/typhoon conditions" : "Off"],
-    ["Escalation", inc.escalationLevel > 0 ? "Escalated — no acknowledgement in time" : "Not escalated"],
+    ["Escalation", escalationLabel(inc)],
     ["Critical override", inc.overrideReasons.length ? inc.overrideReasons.map(plainOverride).join(" · ") : "None"],
   ];
 
@@ -90,29 +180,41 @@ export function IncidentCard({ inc, showActions, showLog, defaultExpanded = fals
         <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Location set by {locationSetByLabel(inc)}</p>
         <p className="text-xs font-semibold" style={{ color: ct.color }}>Recommended: {agencyFor(inc.category)}</p>
         <RuleBadges inc={inc} />
+        <StatusStepper inc={inc} />
         <WaitingLine inc={inc} />
         {showActions && <HeadcountPanel inc={inc} />}
 
-        {showActions && !closed && (
-          <div className="grid grid-cols-2 gap-2 pt-1">
-            {(inc.status === "SENT" || inc.status === "SEEN") && (
+        {showActions && nextStep && (
+          <div className="space-y-2 pt-1">
+            {nextStep === "ack" && (
               <MobileAckButton disabled={busy} onClick={() => setAckOpen(true)} gradient={ct.gradient} />
             )}
-            {inc.status !== "ON_SITE" && (
+            {nextStep === "onsite" && (
               <button disabled={busy} onClick={() => void run("onsite")}
                 className="flex min-h-10 w-full items-center justify-center gap-2 rounded-xl bg-teal-700 text-sm font-bold text-white disabled:opacity-60">
-                <Siren size={15} /> On-Site
+                <Siren size={15} /> Mark as On Site
               </button>
             )}
-            <button disabled={busy} onClick={() => setConfirm("resolved")}
-              className="flex min-h-10 w-full items-center justify-center gap-2 rounded-xl bg-white text-sm font-bold disabled:opacity-60"
-              style={{ border: `2px solid ${ct.border}`, color: ct.color }}>
-              <CheckCircle2 size={15} /> Resolve
-            </button>
-            <button disabled={busy} onClick={() => setConfirm("false_alarm")} className="flex min-h-10 w-full items-center justify-center gap-2 rounded-xl border border-slate-300 bg-white text-sm font-bold text-slate-600 disabled:opacity-60">
-              Cancel — false alarm
-            </button>
+            {nextStep === "resolve" && (
+              <>
+                <button disabled={busy} onClick={() => setConfirm("resolved")}
+                  className="flex min-h-10 w-full items-center justify-center gap-2 rounded-xl bg-white text-sm font-bold disabled:opacity-60"
+                  style={{ border: `2px solid ${ct.border}`, color: ct.color }}>
+                  <CheckCircle2 size={15} /> Mark as Resolved
+                </button>
+                <button disabled={busy} onClick={() => setConfirm("false_alarm")} className="flex min-h-10 w-full items-center justify-center gap-2 rounded-xl border border-slate-300 bg-white text-sm font-bold text-slate-600 disabled:opacity-60">
+                  Cancel — false alarm
+                </button>
+              </>
+            )}
           </div>
+        )}
+
+        {showActions && closed && (
+          <p role="status" data-resolved-badge
+            className="flex min-h-10 w-full items-center justify-center gap-2 rounded-xl border border-emerald-200 bg-emerald-50 text-sm font-bold text-emerald-700">
+            <CheckCircle2 size={15} /> Incident resolved
+          </p>
         )}
 
         <button onClick={() => setExpanded((v) => !v)} aria-expanded={expanded}
@@ -132,6 +234,8 @@ export function IncidentCard({ inc, showActions, showLog, defaultExpanded = fals
               ))}
             </dl>
             <EtaLine inc={inc} />
+            <ResponseLines inc={inc} />
+            {/* Read-only here for every role: only responders change the route. */}
             <p className="text-xs text-slate-500">Approach route: <b className="capitalize">{modes.route.status}</b></p>
             {showLog && inc.log && inc.log.length > 0 && (
               <ol className="space-y-1.5 border-l-2 border-slate-200 pl-3 text-xs text-slate-600">
@@ -151,18 +255,6 @@ export function IncidentCard({ inc, showActions, showLog, defaultExpanded = fals
       </div>
 
       {ackOpen && <AckModal inc={inc} onClose={() => setAckOpen(false)} onConfirm={ack} />}
-      {confirm && (
-        <ConfirmModal
-          title={confirm === "resolved" ? "Mark as resolved?" : "Cancel as false alarm?"}
-          message={confirm === "resolved"
-            ? "This closes the ticket for everyone and shows “All clear” to the affected parents."
-            : "Use this only if there was no real emergency. The ticket closes and parents see it was cancelled."}
-          confirmLabel={confirm === "resolved" ? "Mark Resolved" : "Cancel Alert"}
-          danger={confirm === "false_alarm"}
-          onClose={() => setConfirm(null)}
-          onConfirm={() => void run("resolve", confirm)}
-        />
-      )}      {ackOpen && <AckModal inc={inc} onClose={() => setAckOpen(false)} onConfirm={ack} />}
       {confirm && (
         <ConfirmModal
           title={confirm === "resolved" ? "Mark as resolved?" : "Cancel as false alarm?"}
@@ -199,44 +291,5 @@ function MobileAckButton({ disabled, onClick, gradient }: {
         <><Navigation size={15} /> Acknowledge &amp; En Route</>
       )}
     </button>
-  );
-}
-
-// Responder reference — hotlines are dialled by hand, never auto-called.
-export function EscalationTable() {
-  return (
-    <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white">
-      <div className="bg-slate-800 px-3 py-2.5">
-        <h2 className="text-xs font-extrabold uppercase tracking-wider text-white">Incident-to-agency escalation</h2>
-        <p className="mt-0.5 text-xs text-slate-300">For manual use by school DRRM officers / Barangay Sinalhan staff.</p>
-      </div>
-      {ESCALATION_MATRIX.map((row) => {
-        const ct = catTheme(row.category);
-        return (
-          <div key={row.category} className="border-b border-slate-100 last:border-0">
-            <div className="flex items-center gap-2 px-3 py-1.5" style={{ background: ct.bg, borderLeft: `4px solid ${ct.pill}` }}>
-              <span aria-hidden>{ct.emoji}</span>
-              <span className="text-xs font-extrabold uppercase tracking-wide" style={{ color: ct.color }}>{row.label}</span>
-            </div>
-            <div className="px-3 py-2" style={{ borderLeft: `4px solid ${ct.border}` }}>
-              <p className="text-sm font-bold text-slate-700">{row.agency}</p>
-              <div className="my-1.5 flex flex-wrap gap-1.5">
-                {row.hotlines.map((h) => (
-                  <a key={h.number} href={`tel:${h.number.replace(/[^0-9+]/g, "")}`}
-                    className="flex min-h-12 items-center gap-1 rounded-full px-3 text-sm font-bold text-white" style={{ background: ct.pill }}>
-                    <PhoneCall size={13} /> {h.number}{h.note ? ` (${h.note})` : ""}{!h.verified && <span title="Not yet verified" className="text-yellow-200">⚠</span>}
-                  </a>
-                ))}
-              </div>
-              <p className="text-xs italic text-slate-500">{row.action}</p>
-            </div>
-          </div>
-        );
-      })}
-      <div className="space-y-1 border-t border-slate-200 bg-slate-50 px-3 py-2">
-        <p className="text-xs text-slate-500">This system does not connect directly to these agencies — contacting them is a manual step.</p>
-        <p className="text-xs text-amber-700">⚠ Numbers with a warning sign are unverified. Confirm them with Barangay Sinalhan / CDRRMO before relying on them.</p>
-      </div>
-    </section>
   );
 }

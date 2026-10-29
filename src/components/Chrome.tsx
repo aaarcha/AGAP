@@ -7,11 +7,11 @@ import type { NavTab } from "../lib/navigation";
 
 export type { NavTab };
 
-export function BackBarFor({ title, onBack }: { title: string; onBack: () => void }) {
+export function BackBarFor({ title, onBack, backLabel = "Back" }: { title: string; onBack: () => void; backLabel?: string }) {
   return (
     <div data-testid="back-bar" className="flex items-center gap-2 border-b border-slate-200 px-3 py-2">
       <button type="button" onClick={onBack} className="min-h-12 flex items-center gap-1.5 rounded-xl bg-brand-100 px-3 text-sm font-bold text-brand-800">
-        <ArrowLeft size={16} /> Back
+        <ArrowLeft size={16} /> {backLabel}
       </button>
       <h2 className="text-sm font-bold text-slate-700">{title}</h2>
     </div>

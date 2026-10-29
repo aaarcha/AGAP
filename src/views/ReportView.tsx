@@ -543,11 +543,13 @@ export default function ReportView({ onOpenProfile }: { onOpenProfile?: () => vo
 
   const ct = sel ? catTheme(sel.catId) : catTheme("other");
 
+  // FLOW page: no fixed height and no overflow — <main> carries the scroll.
   const main =
-    "mx-auto w-full px-3 py-3 pb-16 transition-all duration-200 md:pb-3 lg:h-full lg:overflow-hidden";
+    "mx-auto w-full max-w-6xl px-3 py-3 pb-24 transition-all duration-200 md:pb-10";
 
   return (
     <div
+      data-page="flow"
       className={main}
       onClickCapture={() => {
         taps.current += 1;
@@ -555,7 +557,7 @@ export default function ReportView({ onOpenProfile }: { onOpenProfile?: () => vo
     >
       <div className="grid w-full gap-3 md:grid-cols-[minmax(0,1fr)_20rem] md:items-start lg:grid-cols-[minmax(0,1fr)_22rem]">
         {/* Left column: the tap-through steps */}
-        <div className="scroll-area min-w-0 space-y-3 lg:max-h-[calc(100dvh-10rem)] lg:pr-1">
+        <div className="min-w-0 space-y-3 md:pr-1">
           {/* Location card — phones keep it in the flow; wide screens use the sticky rail */}
           <div className="md:hidden">
             <LocationCard
@@ -887,7 +889,7 @@ export default function ReportView({ onOpenProfile }: { onOpenProfile?: () => vo
         </div>
 
         {/* Right rail (>= 768): sticky location, who is affected, send */}
-        <aside className="scroll-area hidden space-y-3 md:sticky md:top-3 md:block md:max-h-[calc(100dvh-6rem)]">
+        <aside className="hidden space-y-3 md:sticky md:top-3 md:block">
           <LocationCard
             headline={location.headline}
             caption={location.caption}

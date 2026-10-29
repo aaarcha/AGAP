@@ -6,10 +6,11 @@ import { LANGS, buildAdvisory } from "../../shared/advisories.js";
 import { useApp } from "../lib/store";
 import { useLang } from "../lib/lang";
 import { BAND_STYLE, catTheme } from "../lib/theme";
-import { clockTime, elapsed, plainOverride } from "../lib/format";
+import { clockTime, elapsed, escalationLabel, plainOverride } from "../lib/format";
 import type { Incident } from "../lib/types";
-import { WaitingLine } from "../components/Incident";
+import { StatusStepper, WaitingLine } from "../components/Incident";
 import { EtaLine, HeadcountPanel, RuleBadges } from "../components/Rules";
+import { PageFlow } from "../components/PageShell";
 
 function LangToggle() {
   const [lang, setLang] = useLang();
@@ -107,7 +108,7 @@ function ParentCard({ inc }: { inc: Incident }) {
     ["Who is affected", `${inc.populationLabel ?? "—"}${inc.linkedSection === "ALL" ? " · whole school" : inc.linkedSection ? ` · ${inc.linkedSection}` : ""}`],
     ["Location", inc.room],
     ["Hazard mode", inc.hazardApplied ? "On — flooding/typhoon conditions" : "Off"],
-    ["Escalation", inc.escalationLevel > 0 ? "Escalated — no acknowledgement in time" : "Not escalated"],
+    ["Escalation", escalationLabel(inc)],
     ["Critical override", inc.overrideReasons.length ? inc.overrideReasons.map((r) => plainOverride(r)).join(" · ") : "None"],
   ];
 
@@ -130,6 +131,7 @@ function ParentCard({ inc }: { inc: Incident }) {
           </p>
         </div>
         <RuleBadges inc={inc} />
+        <StatusStepper inc={inc} />
         <WaitingLine inc={inc} />
         <HeadcountPanel inc={inc} />
         <Advisory inc={inc} />
@@ -158,17 +160,21 @@ function ParentCard({ inc }: { inc: Incident }) {
 }
 
 export default function ParentView() {
-  const { user, incidents, now, config } = useApp();
+  const { user, incidents, now, config, hidden, hideIncident } = useApp();
   const [lang] = useLang();
+  // Closed alerts stay listed with a per-item Hide; hidden ones come back under the chip.
+  const [showHidden, setShowHidden] = useState(false);
   const phone = config?.school?.phone ?? "";
   const wide = useMediaQuery("screen and (min-width: 768px)");
   const open = incidents
     .filter((i) => i.status !== "RESOLVED")
     .sort((a, b) => Number(b.overrideReasons.length > 0) - Number(a.overrideReasons.length > 0) || b.score - a.score);
-  const lastClosed = incidents.filter((i) => i.status === "RESOLVED").sort((a, b) => (b.resolvedAt ?? 0) - (a.resolvedAt ?? 0))[0];
+  const closed = incidents.filter((i) => i.status === "RESOLVED").sort((a, b) => (b.resolvedAt ?? 0) - (a.resolvedAt ?? 0));
+  const hiddenClosed = (hidden ?? []).filter((i) => i.status === "RESOLVED");
+  const lastClosed = closed[0];
 
   return (
-    <div className={`scroll-area mx-auto w-full ${wide ? "max-w-4xl" : "max-w-md"} space-y-3 px-3 py-3 lg:h-full lg:overflow-y-auto`}>
+    <PageFlow width={wide ? "max-w-4xl" : "max-w-md"} className="space-y-3">
       <div className="flex items-center justify-between gap-2">
         <p className="text-xs font-bold uppercase tracking-wide text-slate-500">{lang === "fil" ? "Wika ng abiso" : "Advisory language"}</p>
         <LangToggle />
@@ -195,12 +201,46 @@ export default function ParentView() {
         </div>
       ))}
 
+      {(closed.length > 0 || hiddenClosed.length > 0) && (
+        <section aria-label="Closed alerts">
+          <div className="flex items-center justify-between gap-2">
+            <h2 className="text-xs font-bold uppercase tracking-wide text-slate-500">Closed alerts ({closed.length})</h2>
+            {hiddenClosed.length > 0 && (
+              <button onClick={() => setShowHidden((v) => !v)} aria-pressed={showHidden}
+                className={`min-h-12 rounded-lg px-3 text-xs font-bold ${showHidden ? "bg-brand-600 text-white" : "bg-slate-100 text-slate-700"}`}>
+                Hidden ({hiddenClosed.length})
+              </button>
+            )}
+          </div>
+          <ul className="mt-2 divide-y divide-slate-100 overflow-hidden rounded-2xl border border-slate-200 bg-white">
+            {(showHidden ? hiddenClosed : closed).map((i) => (
+              <li key={i.id} className="flex items-center gap-3 px-3 py-3">
+                <span className="text-xl" aria-hidden>{catTheme(i.category).emoji}</span>
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate text-sm font-bold text-slate-800">{i.subLabel}</span>
+                  <span className="block truncate text-xs text-slate-500">
+                    {i.room}{i.resolvedAt ? ` · ${elapsed(i.resolvedAt, now)}` : ""}
+                  </span>
+                </span>
+                <button onClick={() => void hideIncident(i.id, !showHidden)}
+                  className="flex min-h-12 shrink-0 items-center rounded-xl bg-slate-100 px-3 text-xs font-bold text-slate-700">
+                  {showHidden ? "Unhide" : "Hide"}
+                </button>
+              </li>
+            ))}
+          </ul>
+          {showHidden && hiddenClosed.length === 0 && (
+            <p className="mt-2 text-xs text-slate-500">Nothing hidden.</p>
+          )}
+        </section>
+      )}
+
       {phone && (
         <a href={`tel:${phone.replace(/[^0-9+]/g, "")}`}
           className={`inline-flex min-h-12 items-center gap-2 rounded-2xl bg-brand-600 text-base font-bold text-white active:scale-[0.99] ${wide ? "px-4" : "w-full justify-center"}`}>
           <PhoneCall size={18} /> {lang === "fil" ? "Tawagan ang Paaralan" : "Contact School"}
         </a>
       )}
-    </div>
+    </PageFlow>
   );
 }

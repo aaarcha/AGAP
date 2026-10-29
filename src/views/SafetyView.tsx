@@ -5,6 +5,7 @@ import { useApp } from "../lib/store";
 import { dateTime, fmtMs } from "../lib/format";
 import { InfoButton } from "../components/Modal";
 import { Select } from "../components/Select";
+import { PageFlow } from "../components/PageShell";
 import type { DrillSummary } from "../lib/types";
 
 const card = "rounded-2xl border border-slate-200 bg-white p-4";
@@ -141,9 +142,9 @@ function HeadcountStatus() {
 
 export default function SafetyView() {
   return (
-    <div className="scroll-area mx-auto grid w-full max-w-6xl items-start gap-3 px-3 py-3 lg:h-full lg:grid-cols-2 lg:overflow-y-auto">
+    <PageFlow className="grid items-start gap-3 lg:grid-cols-2">
       <div className="space-y-3"><HazardCard /><HeadcountStatus /></div>
       <DrillCard />
-    </div>
+    </PageFlow>
   );
 }

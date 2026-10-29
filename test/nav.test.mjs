@@ -69,8 +69,8 @@ const ROLES = {
   teacher: { tab: "report", labels: ["Report", "My Reports", "Account"] },
   parent: { tab: "alerts", labels: ["Alerts", "Account"] },
   principal: { tab: "command", labels: ["Command", "Report", "Safety", "History", "More"] },
-  responder: { tab: "queue", labels: ["Queue", "History", "Escalation", "Account"] },
-  super_admin: { tab: "accounts", labels: ["Accounts", "Audit", "Year", "Configuration", "Account"] },
+  responder: { tab: "queue", labels: ["Queue", "Escalation", "History", "Account"] },
+  super_admin: { tab: "accounts", labels: ["Users", "Audit", "Year", "System Settings", "Profile"] },
 };
 
 const renderedLabels = () =>

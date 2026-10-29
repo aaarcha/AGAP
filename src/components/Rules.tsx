@@ -1,12 +1,12 @@
 import { useState } from "react";
 import { Clock, Users } from "lucide-react";
 import {
-  ESCALATION_TIERS, ROUTE_STATUSES, TRANSPORT_MODES, computeEta,
+  ESCALATION_TIERS, ORG_SUGGESTED_MODES, ROUTE_STATUSES, TRANSPORT_MODES, computeEta, orgLabel,
 } from "../../shared/domain.js";
 import { useApp } from "../lib/store";
 import { ApiError } from "../lib/api";
-import { fmtMs, plainOverride, startOfToday } from "../lib/format";
-import type { Incident } from "../lib/types";
+import { clockTime, fmtMs, plainOverride, startOfToday } from "../lib/format";
+import type { Incident, OrgResponse } from "../lib/types";
 import { Modal } from "./Modal";
 import { Select } from "./Select";
 
@@ -52,6 +52,41 @@ export function EtaLine({ inc }: { inc: Incident }) {
     return <p className="text-xs font-semibold text-accent-700">Responder on site {fmtMs(ms)} after the report</p>;
   }
   return null;
+}
+
+/** Per-org response lines for Details: who is coming, how, and their own ETA. */
+export function ResponseLines({ inc }: { inc: Incident }) {
+  const { now } = useApp();
+  const rows = Object.values(inc.responses ?? {}).filter((r): r is OrgResponse => Boolean(r));
+  if (!rows.length) return null;
+  return (
+    <div data-response-lines className="space-y-1 rounded-xl bg-slate-50 p-2">
+      <p className="text-[11px] font-bold uppercase tracking-wide text-slate-500">Responding organizations</p>
+      {rows.map((r) => {
+        const label = r.orgLabel || orgLabel(r.org) || r.org;
+        const mode = TRANSPORT_MODES.find((m: { id: string; label: string }) => m.id === r.mode)?.label ?? "";
+        let detail: string;
+        if (r.status === "on_site") detail = `On site${r.onSiteAt ? ` · ${clockTime(r.onSiteAt)}` : ""}`;
+        else if (r.status === "resolved") detail = `Resolved${r.resolvedAt ? ` · ${clockTime(r.resolvedAt)}` : ""}`;
+        else if (r.blocked) detail = "En route — route blocked, no ETA";
+        else {
+          const left = r.minutes == null ? null : Math.max(0, Math.ceil(((r.arriveBy ?? now) - now) / 60000));
+          detail = [
+            "En route",
+            left == null ? null : left <= 0 ? "arriving now" : `ETA ~${left} min`,
+            mode || null,
+            r.distanceKm != null ? `${r.distanceKm} km` : null,
+          ].filter(Boolean).join(" · ");
+        }
+        return (
+          <p key={r.org} data-response-org={r.org} className="flex flex-wrap items-baseline gap-x-2 text-xs text-slate-600">
+            <span className="font-bold text-slate-800">{label}</span>
+            <span>{detail}</span>
+          </p>
+        );
+      })}
+    </div>
+  );
 }
 
 const ACC_STYLE: Record<string, string> = {
@@ -155,8 +190,14 @@ export function HeadcountPanel({ inc, onOpenProfile }: { inc: Incident; onOpenPr
 }
 
 export function AckModal({ inc, onClose, onConfirm }: { inc: Incident; onClose: () => void; onConfirm: (v: { mode?: string; distanceKm?: number }) => void }) {
-  const { modes } = useApp();
-  const [mode, setMode] = useState("walking");
+  const { modes, user } = useApp();
+  // Each org has its usual transport; all three stay selectable.
+  const suggested: string[] = user?.role === "responder" ? (ORG_SUGGESTED_MODES[user.org ?? "barangay"] ?? []) : [];
+  const modesOrdered = [
+    ...suggested.map((id) => TRANSPORT_MODES.find((m: { id: string }) => m.id === id)).filter(Boolean),
+    ...TRANSPORT_MODES.filter((m: { id: string }) => !suggested.includes(m.id)),
+  ] as { id: string; label: string; kmh: number }[];
+  const [mode, setMode] = useState(suggested[0] ?? "walking");
   const [km, setKm] = useState("");
   const dist = Number(km);
   const eta = km && dist > 0 ? computeEta({ mode, distanceKm: dist, route: modes.route.status }) : null;
@@ -166,13 +207,19 @@ export function AckModal({ inc, onClose, onConfirm }: { inc: Incident; onClose: 
       <p className="mb-3 text-sm text-slate-600">{inc.subLabel} · {inc.room}</p>
       <fieldset className="space-y-1.5">
         <legend className="mb-1 text-xs font-bold uppercase tracking-wide text-slate-500">How is the responder travelling?</legend>
-        {TRANSPORT_MODES.map((m: { id: string; label: string; kmh: number }) => (
-          <label key={m.id} className={`flex min-h-12 cursor-pointer items-center gap-3 rounded-xl border px-3 ${mode === m.id ? "border-brand-600 bg-brand-50" : "border-slate-200 bg-white"}`}>
-            <input type="radio" name="mode" checked={mode === m.id} onChange={() => setMode(m.id)} />
-            <span className="flex-1 text-sm font-semibold text-slate-800">{m.label}</span>
-            <span className="font-mono text-xs text-slate-400">~{m.kmh} km/h</span>
-          </label>
-        ))}
+        {modesOrdered.map((m) => {
+          const isSuggested = suggested.includes(m.id);
+          return (
+            <label key={m.id} className={`flex min-h-12 cursor-pointer items-center gap-3 rounded-xl border px-3 ${mode === m.id ? "border-brand-600 bg-brand-50" : "border-slate-200 bg-white"}`}>
+              <input type="radio" name="mode" checked={mode === m.id} onChange={() => setMode(m.id)} value={m.id} />
+              <span className="min-w-0 flex-1 text-sm font-semibold text-slate-800">
+                {m.label}
+                {isSuggested && <span className="font-normal text-brand-700"> (suggested)</span>}
+              </span>
+              <span className="font-mono text-xs text-slate-400">~{m.kmh} km/h</span>
+            </label>
+          );
+        })}
       </fieldset>
       <label className="mt-3 block text-xs font-semibold text-slate-600">Approximate distance to the school (km)
         <input value={km} onChange={(e) => setKm(e.target.value.replace(/[^0-9.]/g, "").slice(0, 5))} inputMode="decimal" placeholder="e.g. 1.5"

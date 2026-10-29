@@ -40,6 +40,7 @@ const base: Ctx = {
   sections: ["Grade 3 - Sec A"],
   modes: DEFAULT_MODES,
   drills: [],
+  hidden: [],
   now: Date.now(),
   online: true,
   connected: true,
@@ -66,12 +67,13 @@ const base: Ctx = {
   setRoute: async () => {},
   markSeen: () => {},
   cancelReport: async () => {},
-  deleteIncident: async () => {},
-  clearHistory: async () => 0,
+  archiveIncident: async () => {},
+  archiveResolved: async () => 0,
+  hideIncident: async () => {},
   saveProfile: async () => {},
   addTeacher: async () => {},
   editTeacher: async () => {},
-  deleteTeacher: async () => {},
+  archiveTeacher: async () => {},
 };
 
 let ctx: Ctx = { ...base };

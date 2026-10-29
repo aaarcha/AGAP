@@ -60,7 +60,8 @@ async function boot(opts = {}) {
 const EMAILS = {
   teacher: "t1@sinalhanes.deped.ph",
   principal: "principal@sinalhanes.deped.ph",
-  responder: "responder@sinalhanes.deped.ph",
+  responder: "barangay@sinalhanes.deped.ph",
+  cdrrmo: "cdrrmo@sinalhanes.deped.ph",
   parent: "parent-grade-3-sec-a@sinalhanes.deped.ph",
 };
 
@@ -353,6 +354,83 @@ test("versions are append-only, new weights only affect new tickets, and restore
   assert.equal(third.configId, v3.id);
   assert.equal(third.score, computeScore(4, 4, 2, 3));
   await s.close();
+});
+
+test("the panel reference is a record only: trimmed, capped at 120 and free of control characters", async () => {
+  const s = await boot();
+  const admin = await s.loginSuper();
+  const save = (config) => s.call("PUT", "/api/admin/config", { token: admin, body: { config, password: ADMIN_PASSWORD } });
+
+  const tooLong = await save(validConfig({ panelReference: "x".repeat(121) }));
+  assert.equal(tooLong.status, 400);
+  assert.match(tooLong.json.fields.panelReference, /120/);
+
+  // Exactly 120 is allowed — the cap is inclusive.
+  const atCap = await save(validConfig({ panelReference: "x".repeat(120) }));
+  assert.equal(atCap.status, 200, JSON.stringify(atCap.json));
+  assert.equal(atCap.json.active.panelReference.length, 120);
+
+  for (const bad of ["AHP\nExpert Panel", "AHP\tPanel", "AHP\u0000Panel"]) {
+    const res = await save(validConfig({ panelReference: bad }));
+    assert.equal(res.status, 400, `control characters are refused: ${JSON.stringify(bad)}`);
+    assert.match(res.json.fields.panelReference, /control characters/i);
+  }
+
+  const trimmed = await save(validConfig({ panelReference: "  AHP Expert Panel, SY 2026-2027  " }));
+  assert.equal(trimmed.status, 200);
+  assert.equal(trimmed.json.active.panelReference, "AHP Expert Panel, SY 2026-2027", "stored trimmed");
+  assert.equal(trimmed.json.active.panelValidationDate, "2026-10-01", "the date is kept beside it");
+
+  // It is part of the version record and comes back in the history list.
+  const list = (await s.call("GET", "/api/admin/config", { token: admin })).json.versions;
+  assert.equal(list.find((v) => v.active).panelReference, "AHP Expert Panel, SY 2026-2027");
+  assert.equal(list.find((v) => v.version === 1).panelReference, null, "the seeded version has none");
+
+  // The audit entry names the panel that validated the values.
+  const audit = (await s.call("GET", "/api/admin/audit?limit=200", { token: admin })).json.entries;
+  const entry = audit.find((e) => e.action === "config_saved" && /AHP Expert Panel, SY 2026-2027/.test(e.detail));
+  assert.ok(entry, "config_saved names the panel reference");
+  assert.match(entry.detail, /2026-10-01/, "and the validation date");
+
+  // The reference is optional: blank clears it and the values still save.
+  const none = await save(validConfig({ panelReference: "   " }));
+  assert.equal(none.status, 200);
+  assert.equal(none.json.active.panelReference, null);
+  assert.equal(none.json.active.panelValidationDate, "2026-10-01");
+  await s.close();
+});
+
+test("versions stored before the panel reference existed load with null, and restore handles them", async () => {
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "aspire-panel-ref-"));
+  const first = await boot({ dataDir });
+  const adminToken = await first.loginSuper();
+  // A version with a date but no reference — the shape older records have.
+  const saved = await first.call("PUT", "/api/admin/config", {
+    token: adminToken, body: { config: validConfig({ panelReference: "AHP Expert Panel" }), password: ADMIN_PASSWORD },
+  });
+  assert.equal(saved.status, 200);
+  await first.close();
+
+  const file = path.join(dataDir, "aspire-db.json");
+  const db = JSON.parse(fs.readFileSync(file, "utf8"));
+  for (const c of db.configs) delete c.panelReference; // as written before the field existed
+  fs.writeFileSync(file, JSON.stringify(db));
+
+  const s = await boot({ dataDir });
+  const admin = await s.loginSuper();
+  const got = (await s.call("GET", "/api/admin/config", { token: admin })).json;
+  assert.deepEqual(got.versions.map((v) => v.panelReference), [null, null], "legacy versions carry null, never undefined");
+  assert.equal(got.versions.find((v) => v.active).panelValidationDate, "2026-10-01", "their dates still load");
+
+  // Restoring a legacy version copies its values into a new version with null.
+  const v1 = got.versions.find((v) => v.version === 1);
+  const restored = await s.call("POST", `/api/admin/config/${v1.id}/restore`, {
+    token: admin, body: { password: ADMIN_PASSWORD, confirmOpenTickets: true },
+  });
+  assert.equal(restored.status, 200, JSON.stringify(restored.json));
+  assert.equal(restored.json.active.panelReference, null);
+  await s.close();
+  fs.rmSync(dataDir, { recursive: true, force: true });
 });
 
 test("configured responder speeds and the hazard adjustment drive live calculations", async () => {

@@ -125,12 +125,13 @@ export function InfoButton({ title, children }: { title: string; children: React
   );
 }
 
-export function ConfirmModal({ title, message, confirmLabel, danger, onConfirm, onClose }: {
-  title: string; message: string; confirmLabel: string; danger?: boolean; onConfirm: () => void; onClose: () => void;
+export function ConfirmModal({ title, message, confirmLabel, danger, onConfirm, onClose, children }: {
+  title: string; message: string; confirmLabel: string; danger?: boolean; onConfirm: () => void; onClose: () => void; children?: ReactNode;
 }) {
   return (
     <Modal title={title} onClose={onClose}>
       <p className="text-sm text-slate-600 leading-relaxed">{message}</p>
+      {children}
       <div className="flex gap-2 mt-4">
         <button onClick={onClose} className="min-h-12 flex-1 rounded-xl bg-slate-100 text-sm font-bold text-slate-700">Cancel</button>
         <button onClick={() => { onConfirm(); onClose(); }}

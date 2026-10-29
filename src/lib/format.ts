@@ -1,4 +1,5 @@
-import type { LocationSetBy } from "./types";
+import { ESCALATION_TIERS } from "../../shared/domain.js";
+import type { Incident, LocationSetBy } from "./types";
 
 // How the final location of a ticket was established, in plain words.
 export const LOCATION_SET_BY_LABEL: Record<LocationSetBy, string> = {
@@ -57,6 +58,23 @@ export function duration(from: number, to: number): string {
   if (m < 60) return `${m} min`;
   const h = Math.floor(m / 60);
   return `${h} hr ${m % 60} min`;
+}
+
+/**
+ * Escalation is a separate, time-based rule, not one of the stepper's steps: it
+ * records that nobody acknowledged in time. Once the ticket is acknowledged the
+ * fact stays true, so say that too instead of implying it is still unanswered.
+ */
+export function escalationLabel(
+  inc: Pick<Incident, "escalationLevel" | "acknowledgedBy" | "enRouteAt" | "status">,
+): string {
+  if (inc.escalationLevel <= 0) return "Not escalated";
+  const tier = ESCALATION_TIERS[inc.escalationLevel] ?? "the next tier";
+  const acknowledged =
+    Boolean(inc.acknowledgedBy) || inc.enRouteAt != null || inc.status === "EN_ROUTE" || inc.status === "ON_SITE";
+  return acknowledged
+    ? `Escalated to ${tier} — no acknowledgement in time; acknowledged since`
+    : `Escalated to ${tier} — no acknowledgement in time`;
 }
 
 // Plain words for the two critical-override reasons (no scoring jargon).

@@ -1,7 +1,9 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Check } from "lucide-react";
 import { SCHOOL, STATUS_LABEL } from "../shared/domain.js";
 import { useApp } from "./lib/store";
+import { api } from "./lib/api";
+import ArchivePage from "./components/ArchivePage";
 import { AlertToasts, Header, StatusBanner } from "./components/Chrome";
 import { RoleNav } from "./components/RoleNav";
 import type { ParentTab, PrincipalTab, ResponderTab, TeacherTab } from "./lib/navigation";
@@ -13,6 +15,7 @@ import HistorySection from "./components/History";
 import { IncidentCard } from "./components/Incident";
 import { MasterDetail } from "./components/MasterDetail";
 import { FilterBar } from "./components/FilterBar";
+import { BoundedPane, PageFlow } from "./components/PageShell";
 import {
   facetCounts, filterItems, initialFilterState, matchesQuery, setCategory, setQuery, useFilterState, type FilterSpec,
 } from "./lib/filters";
@@ -43,6 +46,17 @@ function TeacherReports() {
   const mine = incidents.filter((i) => i.reporterId === user!.id && i.status !== "RESOLVED");
   // Status chips + counts persist per screen for the session.
   const [state, setState] = useFilterState("teacher-reports", () => initialFilterState());
+  // The chip count comes from the archive endpoint; activating it swaps in the
+  // dedicated, read-only archive page (nothing is ever deleted).
+  const [archived, setArchived] = useState<Incident[]>([]);
+  const [showArchived, setShowArchived] = useState(false);
+  useEffect(() => {
+    let live = true;
+    void api<{ items: Incident[] }>("GET", "/api/incidents/archive?limit=50")
+      .then((r) => { if (live) setArchived(r.items); })
+      .catch(() => { if (live) setArchived([]); });
+    return () => { live = false; };
+  }, [incidents]);
   const spec: FilterSpec<Incident> = {
     search: (i, q) => matchesQuery(q, i.subLabel, i.room, i.categoryLabel),
     category: (i, c) => i.status === c,
@@ -54,9 +68,10 @@ function TeacherReports() {
   });
   const shown = filterItems(mine, state, spec);
   return (
-    <div className="mx-auto flex w-full max-w-5xl flex-col gap-3 px-3 py-3 lg:h-full lg:min-h-0">
-      <h2 className="shrink-0 text-xs font-bold uppercase tracking-wide text-slate-500">My reports</h2>
-      <div className="shrink-0">
+    <PageFlow width="max-w-5xl" className="space-y-3">
+      <div>
+        <h2 className="text-xs font-bold uppercase tracking-wide text-slate-500">My reports</h2>
+        <div className="mt-2">
         <FilterBar
           search={{
             value: state.query,
@@ -77,23 +92,36 @@ function TeacherReports() {
               })),
             ],
           }}
-          results={{ label: "Reports", shown: shown.length, total: mine.length }}
+          quickChips={[
+            { label: "Archived", count: archived.length, active: showArchived, onToggle: () => setShowArchived((v) => !v) },
+          ]}
+          results={
+            showArchived
+              ? { label: "Archived", shown: archived.length, total: archived.length }
+              : { label: "Reports", shown: shown.length, total: mine.length }
+          }
         />
+        </div>
+        {/* A compact history strip; the list below it is the one bounded section. */}
+        <div className="mt-3 max-h-56 overflow-y-auto scroll-area">
+          <HistorySection title="Report history" />
+        </div>
       </div>
-      <div className="lg:min-h-0 lg:flex-1">
-        <MasterDetail
-          items={shown}
-          ariaLabel="My reports — select a report"
-          emptyList={mine.length === 0 ? "No active reports." : "No reports match those filters."}
-          emptyDetail="No active reports. Your sent reports appear here with their live status."
-          renderList={(inc, active) => <ReportRow inc={inc} active={active} />}
-          renderDetail={(inc) => <IncidentCard inc={inc} />}
-        />
-      </div>
-      <div className="scroll-area shrink-0 lg:max-h-64 lg:overflow-y-auto">
-        <HistorySection title="Report history" />
-      </div>
-    </div>
+      {showArchived ? (
+        <ArchivePage />
+      ) : (
+        <BoundedPane label="My reports">
+          <MasterDetail
+            items={shown}
+            ariaLabel="My reports — select a report"
+            emptyList={mine.length === 0 ? "No active reports." : "No reports match those filters."}
+            emptyDetail="No active reports. Your sent reports appear here with their live status."
+            renderList={(inc, active) => <ReportRow inc={inc} active={active} />}
+            renderDetail={(inc) => <IncidentCard inc={inc} />}
+          />
+        </BoundedPane>
+      )}
+    </PageFlow>
   );
 }
 
@@ -122,7 +150,8 @@ export default function App() {
   if (user.role === "super_admin") return <AdminConsole />;
 
   const title = { teacher: "Teacher", principal: "Principal", parent: "Parent/PTA", responder: "Responder" }[user.role];
-  const subtitle = user.role === "principal" ? SCHOOL.name : user.role === "responder" ? "Barangay Sinalhan + CDRRMO" : user.subtitle;
+  // A responder's subtitle names their own org ("Responder · CDRRMO").
+  const subtitle = user.role === "principal" ? SCHOOL.name : user.subtitle;
 
   return (
     <div className="h-dvh overflow-hidden bg-cream">
@@ -135,9 +164,8 @@ export default function App() {
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
           <Header title={title} subtitle={subtitle} />
           <StatusBanner />
-          <main className="scroll-area min-h-0 flex-1 overflow-x-hidden pb-24 md:pb-6 lg:pb-0">
-            <div className="w-full max-w-6xl lg:h-full lg:min-h-0">
-              {user.role === "teacher" && (
+          <main className="scroll-area min-h-0 flex-1 overflow-x-hidden pb-24 md:pb-8">
+            {user.role === "teacher" && (
                 <>
                   {teacherTab === "report" && (
                     <ReportView
@@ -153,7 +181,6 @@ export default function App() {
               {user.role === "parent" && (parentTab === "alerts" ? <ParentView /> : <AccountView />)}
               {user.role === "principal" && <PrincipalView tab={pTab} />}
               {user.role === "responder" && <ResponderView tab={rTab} />}
-            </div>
           </main>
         </div>
       </div>

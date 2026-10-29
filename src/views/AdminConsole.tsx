@@ -1,16 +1,17 @@
 import { useState, useEffect, useMemo, type ReactNode } from "react";
 import {
   Users, ClipboardList, Calendar, Plus, RefreshCw, Unlock, UserX, UserCheck, Key, Eye, EyeOff, Copy, Check, AlertCircle,
-  SlidersHorizontal, Search, X, History, Pencil, RotateCcw, Save,
+  SlidersHorizontal, Search, X, History, Pencil, RotateCcw, Save, Trash2, FileWarning, Archive, ExternalLink, Radio, ShieldCheck,
 } from "lucide-react";
 import { api } from "../lib/api";
-import type { AccountRecord, AuditEntry, ConfigPayload, ConfigVersion, SchoolYear, TempCredential } from "../lib/types";
+import type { AccountRecord, AuditEntry, ConfigPayload, ConfigVersion, RetentionInfo, SchoolYear, TempCredential } from "../lib/types";
 import { Modal, ConfirmModal } from "../components/Modal";
 import { dateTime } from "../lib/format";
 import { Header, StatusBanner } from "../components/Chrome";
 import { RoleNav } from "../components/RoleNav";
 import { ADMIN_TABS, type AdminTab } from "../lib/navigation";
 import { MasterDetail } from "../components/MasterDetail";
+import { BoundedPane, PageFlow } from "../components/PageShell";
 import { Select } from "../components/Select";
 import { FilterBar } from "../components/FilterBar";
 import { DatePicker } from "../components/DatePicker";
@@ -22,8 +23,9 @@ import {
   useFilterState, type DateRangeState, type FilterSpec,
 } from "../lib/filters";
 import { SECTION_GRADES, gradeCode, gradeLabel, composeSection, parseSection } from "../../shared/section.js";
-import { SCHOOL } from "../../shared/domain.js";
+import { RESPONDER_ORGS, SCHOOL } from "../../shared/domain.js";
 import AccountView from "./AccountView";
+import ArchivePage from "../components/ArchivePage";
 
 const card = "rounded-2xl border border-slate-200 bg-white p-4";
 const h2 = "flex items-center gap-1.5 text-xs font-bold uppercase tracking-wide text-slate-500";
@@ -37,6 +39,7 @@ export default function AdminConsole() {
   const [tab, setTab] = useState<AdminTab>("accounts");
   const [accounts, setAccounts] = useState<AccountRecord[]>([]);
   const [auditEntries, setAuditEntries] = useState<AuditEntry[]>([]);
+  const [retention, setRetention] = useState<RetentionInfo | null>(null);
   // Period chips + custom From/To over the audit records, kept for the session.
   const [auditRange, setAuditRange] = useFilterState<DateRangeState>("admin-audit-range", initialDateRange);
   const [schoolYear, setSchoolYear] = useState<SchoolYear | null>(null);
@@ -49,6 +52,14 @@ export default function AdminConsole() {
   const [resetTarget, setResetTarget] = useState<AccountRecord | null>(null);
   const [resetResult, setResetResult] = useState<string | null>(null);
   const [deactivateTarget, setDeactivateTarget] = useState<AccountRecord | null>(null);
+  const [editTarget, setEditTarget] = useState<AccountRecord | null>(null);
+  const [purgeTarget, setPurgeTarget] = useState<AccountRecord | null>(null);
+  const [requestTarget, setRequestTarget] = useState<AccountRecord | null>(null);
+  // Sub-screen of the Users tab: the dedicated archived-records page.
+  const [archive, setArchive] = useState(false);
+  // "View in Users" from the Accounts archive tab: apply the Archived filter
+  // and (if known) open that account.
+  const [focusArchived, setFocusArchived] = useState<string | null>(null);
   const [rolloverConfirm, setRolloverConfirm] = useState(false);
   const [rolloverResult, setRolloverResult] = useState<TempCredential[] | null>(null);
 
@@ -58,6 +69,9 @@ export default function AdminConsole() {
 
   function guardedSetTab(next: AdminTab) {
     if (tab === "config" && next !== "config" && configDirty) { setLeaveTo(next); return; }
+    // The archive is a sub-screen of Users, not a tab: leaving Users closes it so
+    // it cannot stay rendered underneath (or after) another page.
+    if (next !== "accounts") { setArchive(false); setFocusArchived(null); }
     setConfigDirty(false);
     setTab(next);
   }
@@ -81,6 +95,8 @@ export default function AdminConsole() {
       if (tab === "accounts") {
         const r = await api<{ accounts: AccountRecord[] }>("GET", "/api/admin/accounts");
         setAccounts(r.accounts);
+        const ret = await api<RetentionInfo>("GET", "/api/admin/retention");
+        setRetention(ret && ret.counts && ret.periods ? ret : null);
       } else if (tab === "audit") {
         const r = await api<{ entries: AuditEntry[] }>("GET", "/api/admin/audit");
         setAuditEntries(r.entries);
@@ -110,6 +126,29 @@ export default function AdminConsole() {
     try { await api("POST", `/api/admin/accounts/${deactivateTarget.id}/deactivate`); setDeactivateTarget(null); await loadData(); }
     catch (e) { setError(e instanceof Error ? e.message : "Failed to deactivate"); }
   }
+  async function handleRestore(acc: AccountRecord) {
+    try { await api("POST", `/api/admin/accounts/${acc.id}/restore`); await loadData(); }
+    catch (e) { setError(e instanceof Error ? e.message : "Failed to restore"); }
+  }
+  async function handlePurge(reason: string) {
+    if (!purgeTarget) return;
+    await api("POST", `/api/admin/accounts/${purgeTarget.id}/purge`, { reason, confirm: "PURGE" });
+    setPurgeTarget(null);
+    await loadData();
+  }
+  async function handleDataRequest(v: { type: "restrict" | "erase"; reference: string; reason: string; confirm?: string }) {
+    if (!requestTarget) return;
+    await api("POST", "/api/admin/data-requests", { accountId: requestTarget.id, ...v });
+    setRequestTarget(null);
+    await loadData();
+  }
+  // Edit an account: name, a responder's organization, a parent's section.
+  async function handleEdit(values: { name: string; org?: string; section?: string }) {
+    if (!editTarget) return;
+    await api("PUT", `/api/admin/accounts/${editTarget.id}`, values);
+    setEditTarget(null);
+    await loadData();
+  }
   async function handleReset() {
     if (!resetTarget) return;
     try {
@@ -132,32 +171,45 @@ export default function AdminConsole() {
     <div className="flex h-dvh overflow-hidden bg-cream">
       <RoleNav role="super_admin" tab={tab} setTab={guardedSetTab} />
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-        <Header title="Super Admin" subtitle="Accounts, audit and configuration" />
+        <Header title="Super Admin" subtitle="Users, audit and system settings" />
         <StatusBanner />
-        <main className="scroll-area min-h-0 flex-1 px-3 py-3 pb-24 lg:pb-6">
+        <main className="scroll-area min-h-0 flex-1 pb-24 lg:pb-0">
           {error && (
-            <div className="mb-3 flex items-start gap-2 rounded-xl border border-blush-200 bg-blush-100 p-3 text-sm text-blush-800">
+            <div className="mx-auto mb-3 flex w-full max-w-6xl items-start gap-2 rounded-xl border border-blush-200 bg-blush-100 p-3 text-sm text-blush-800">
               <AlertCircle size={16} className="mt-0.5 shrink-0" />
               <span>{error}</span>
             </div>
           )}
           {loading && <div className="py-8 text-center text-slate-500">Loading…</div>}
 
-          {tab === "accounts" && !loading && (
-            <div className="flex min-h-0 flex-col gap-3 lg:h-full">
-              <div className="flex shrink-0 items-center justify-between">
-                <h2 className={h2}><Users size={14} /> Accounts ({accounts.length})</h2>
-                <button onClick={() => setShowProvision(true)} className={btnPrimary}><Plus size={15} /> Provision</button>
-              </div>
-              <div className="lg:min-h-0 lg:flex-1">
-                <AccountsPane accounts={accounts} onUnlock={handleUnlock} onActivate={handleActivate}
-                  onReset={setResetTarget} onDeactivate={setDeactivateTarget} />
-              </div>
-            </div>
+          {tab === "accounts" && !loading && !archive && (
+            /* FLOW page: the whole page scrolls with the wheel. One bounded
+               MasterDetail section (clamped) sits between the metric cards and
+               the Records & Archives card. */
+            <PageFlow className="space-y-4">
+              <AdminDashboard accounts={accounts} />
+
+              <section aria-label="Users">
+                <div className="mb-2 flex items-center justify-between gap-3">
+                  <h2 className={h2}><Users size={14} /> Users ({accounts.length})</h2>
+                  <button onClick={() => setShowProvision(true)} className={btnPrimary}><Plus size={15} /> Provision</button>
+                </div>
+                {/* Bounded at >= 1024 so the list and detail panes scroll
+                    internally; below that the list opens a slide-over. */}
+                <BoundedPane label="User roster">
+                  <AccountsPane accounts={accounts} onUnlock={handleUnlock} onActivate={handleActivate}
+                    onReset={setResetTarget} onDeactivate={setDeactivateTarget} onRestore={handleRestore}
+                    onPurge={setPurgeTarget} onRequest={setRequestTarget} onEdit={setEditTarget}
+                    focusArchived={focusArchived} onFocusHandled={() => setFocusArchived(null)} />
+                </BoundedPane>
+              </section>
+
+              <RecordsArchivesCard data={retention} onOpenArchive={() => setArchive(true)} />
+            </PageFlow>
           )}
 
           {tab === "audit" && !loading && (
-            <div className="scroll-area space-y-3 lg:h-full lg:overflow-y-auto">
+            <PageFlow className="space-y-3">
               <h2 className={h2}><ClipboardList size={14} /> Audit log (read-only)</h2>
               <DateRangeBar value={auditRange} onChange={setAuditRange} ariaLabel="Audit date range" />
               <p className="-mt-1 text-xs font-bold text-slate-600" aria-live="polite">
@@ -192,11 +244,11 @@ export default function AdminConsole() {
               {auditEntries.length > 0 && auditShown.length === 0 && (
                 <p className="py-8 text-center text-slate-500">No entries in that date range.</p>
               )}
-            </div>
+            </PageFlow>
           )}
 
           {tab === "schoolyear" && !loading && (
-            <div className="scroll-area space-y-3 lg:h-full lg:overflow-y-auto">
+            <PageFlow className="space-y-3">
               <h2 className={h2}><Calendar size={14} /> School year</h2>
               <div className={card}>
                 <div className="flex items-center justify-between gap-3">
@@ -210,11 +262,20 @@ export default function AdminConsole() {
                   </button>
                 </div>
               </div>
-            </div>
+            </PageFlow>
           )}
 
           {tab === "config" && <ConfigTab onDirtyChange={setConfigDirty} />}
           {tab === "account" && <AccountView />}
+          {tab === "accounts" && archive && (
+            <ArchivePage
+              title="Archived records"
+              backLabel="Users"
+              accounts={accounts}
+              onViewInUsers={(id) => { setArchive(false); setFocusArchived(id); }}
+              onBack={() => setArchive(false)}
+            />
+          )}
         </main>
 
       </div>
@@ -224,6 +285,9 @@ export default function AdminConsole() {
           onCreated={(cred) => { setShowProvision(false); setProvisionResult(cred); void loadData(); }} />
       )}
       {provisionResult && <TempCredentialModal title="Account provisioned" credential={provisionResult} onClose={() => setProvisionResult(null)} />}
+      {editTarget && (
+        <AccountEditModal acc={editTarget} onClose={() => setEditTarget(null)} onSave={handleEdit} />
+      )}
       {resetTarget && (
         <ConfirmModal title="Reset password" onClose={() => setResetTarget(null)}
           message={`This will generate a new temporary password for ${resetTarget.name} (${resetTarget.email}). All existing sessions will be revoked.`}
@@ -234,6 +298,12 @@ export default function AdminConsole() {
         <ConfirmModal title="Deactivate account" danger onClose={() => setDeactivateTarget(null)}
           message={`This will deactivate ${deactivateTarget.name} (${deactivateTarget.email}). All their sessions will be revoked immediately.`}
           confirmLabel="Deactivate" onConfirm={() => void handleDeactivate()} />
+      )}
+      {purgeTarget && (
+        <PurgeDialog acc={purgeTarget} onClose={() => setPurgeTarget(null)} onConfirm={handlePurge} />
+      )}
+      {requestTarget && (
+        <DataRequestDialog acc={requestTarget} onClose={() => setRequestTarget(null)} onConfirm={handleDataRequest} />
       )}
       {rolloverConfirm && (
         <ConfirmModal title="Start new school year" onClose={() => setRolloverConfirm(false)}
@@ -251,30 +321,309 @@ export default function AdminConsole() {
   );
 }
 
-function StatusChips({ acc }: { acc: AccountRecord }) {
+/** Actions worth counting as "security events" on the dashboard. */
+const SECURITY_ACTIONS = new Set([
+  "login_failed", "login_policy", "account_locked", "account_unlocked",
+  "password_reset", "password_change_failed", "password_change",
+  "account_archived", "account_restored", "account_purged", "data_request_processed",
+]);
+const ONE_DAY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * The Super Admin landing: three quick metrics, nothing else. The retention
+ * policy table deliberately does NOT live here — it moved to About ASPIRE.
+ */
+function AdminDashboard({ accounts }: { accounts: AccountRecord[] }) {
+  const [recent, setRecent] = useState<number | null>(null);
+  useEffect(() => {
+    let live = true;
+    void api<{ entries: AuditEntry[] }>("GET", "/api/admin/audit?limit=200")
+      .then((r) => {
+        if (!live) return;
+        const cutoff = Date.now() - ONE_DAY_MS;
+        setRecent((r.entries ?? []).filter((e) => e.at >= cutoff && SECURITY_ACTIONS.has(e.action)).length);
+      })
+      .catch(() => { if (live) setRecent(null); });
+    return () => { live = false; };
+  }, []);
+
+  const active = accounts.filter((a) => a.status === "active").length;
+  const responders = accounts.filter((a) => a.role === "responder" && a.status === "active").length;
+  const cards = [
+    { label: "Total users", value: String(accounts.length), hint: `${active} active`, icon: Users },
+    { label: "Active responders", value: String(responders), hint: "Barangay Sinalhan + CDRRMO", icon: Radio },
+    { label: "Recent security events", value: recent === null ? "—" : String(recent), hint: "last 24 hours", icon: ShieldCheck },
+  ];
+  // Three separate cards, one column on phones — same shape as the Principal's
+  // stat cards, not a thin strip.
   return (
-    <div className="flex flex-wrap items-center gap-2">
-      <span className={`rounded-full px-2 py-0.5 text-xs font-bold ${acc.status === "active" ? "bg-emerald-100 text-emerald-700" : "bg-slate-100 text-slate-500"}`}>{acc.status}</span>
-      {acc.mustChange && <span className="rounded-full bg-amber-100 px-2 py-0.5 text-xs font-bold text-amber-700">Must change password</span>}
-      {acc.temp && <span className="rounded-full bg-blue-100 px-2 py-0.5 text-xs font-bold text-blue-700">Temporary credential</span>}
-      {acc.locked && <span className="rounded-full bg-blush-100 px-2 py-0.5 text-xs font-bold text-blush-700">Locked</span>}
+    <div data-metric-cards className="grid gap-3 sm:grid-cols-3">
+      {cards.map((c) => (
+        <div key={c.label} data-metric-card className="rounded-2xl border border-slate-200 bg-white p-4">
+          <p className="flex items-center gap-1.5 text-xs font-bold uppercase tracking-wide text-slate-500">
+            <c.icon size={14} aria-hidden /> {c.label}
+          </p>
+          <p className="mt-2 text-3xl font-black tabular-nums text-slate-900">{c.value}</p>
+          <p className="mt-1 text-xs text-slate-400">{c.hint}</p>
+        </div>
+      ))}
     </div>
   );
 }
 
-function AccountActions({ acc, onUnlock, onActivate, onReset, onDeactivate }: {
+/** Read-only data-governance counters — the policy itself lives in About ASPIRE. */
+function RecordsArchivesCard({ data, onOpenArchive }: { data: RetentionInfo | null; onOpenArchive: () => void }) {
+  if (!data) return null;
+  const counters: [string, number][] = [
+    ["Archived tickets", data.counts.archivedIncidents],
+    ["Tickets eligible for purge", data.counts.eligibleIncidents],
+    ["Tickets already anonymised", data.counts.anonymizedIncidents],
+    ["Archived accounts", data.counts.archivedAccounts],
+    ["Accounts eligible for purge", data.counts.eligibleAccounts],
+    ["Expired drill records", data.counts.expiredDrills],
+  ];
+  return (
+    <section className={`${card} mt-1`} aria-label="Records and archives">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h3 className={h2}><Archive size={14} /> Records &amp; Archives</h3>
+        <button onClick={onOpenArchive} className={btnSecondary}>
+          <ExternalLink size={15} /> Open archive
+        </button>
+      </div>
+      <dl className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-6">
+        {counters.map(([k, v]) => (
+          <div key={k} className="rounded-xl bg-slate-50 px-3 py-2">
+            <dd className="font-mono text-2xl font-black tabular-nums text-slate-800">{v}</dd>
+            <dt className="mt-0.5 text-[11px] font-bold uppercase tracking-wide text-slate-500">{k}</dt>
+          </div>
+        ))}
+      </dl>
+    </section>
+  );
+}
+
+/** Irreversible purge: reason + a typed PURGE confirmation. */
+function PurgeDialog({ acc, onConfirm, onClose }: {
+  acc: AccountRecord;
+  onConfirm: (reason: string) => Promise<void>;
+  onClose: () => void;
+}) {
+  const [reason, setReason] = useState("");
+  const [confirm, setConfirm] = useState("");
+  const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
+  const ready = confirm === "PURGE" && reason.trim().length > 0;
+  async function go() {
+    setBusy(true); setErr("");
+    try { await onConfirm(reason.trim()); onClose(); }
+    catch (e) { setErr(e instanceof Error ? e.message : "Purge failed."); setBusy(false); }
+  }
+  return (
+    <Modal title="Purge personal data" onClose={onClose}>
+      <p className="text-sm leading-relaxed text-slate-600">
+        {acc.name} ({acc.email}) — name, email, section, room and password are erased for good and sessions are destroyed.
+        The account id and role are kept so audit entries and timelines still resolve. Statistics are unaffected.
+      </p>
+      <label className="mt-3 block text-xs font-semibold text-slate-600">Reason
+        <input value={reason} maxLength={200} onChange={(e) => setReason(e.target.value)} placeholder="Data request, retention period passed…"
+          className={`mt-1 ${input}`} />
+      </label>
+      <label className="mt-3 block text-xs font-semibold text-slate-600">Type PURGE to confirm
+        <input value={confirm} maxLength={20} onChange={(e) => setConfirm(e.target.value)} placeholder="PURGE"
+          className={`mt-1 ${input}`} autoComplete="off" />
+      </label>
+      {err && <p className="mt-2 text-sm text-blush-700" role="alert">{err}</p>}
+      <div className="mt-4 flex gap-2">
+        <button onClick={onClose} className={`${btnSecondary} flex-1 justify-center`}>Cancel</button>
+        <button onClick={() => void go()} disabled={!ready || busy}
+          className={`${btnDanger} flex-1 justify-center disabled:opacity-60`}>{busy ? "Purging…" : "Purge"}</button>
+      </div>
+    </Modal>
+  );
+}
+
+/** Admin > account detail > Process data request (restrict / erase). */
+function DataRequestDialog({ acc, onConfirm, onClose }: {
+  acc: AccountRecord;
+  onConfirm: (v: { type: "restrict" | "erase"; reference: string; reason: string; confirm?: string }) => Promise<void>;
+  onClose: () => void;
+}) {
+  const [type, setType] = useState<"restrict" | "erase">("restrict");
+  const [reference, setReference] = useState("");
+  const [reason, setReason] = useState("");
+  const [confirm, setConfirm] = useState("");
+  const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
+  const ready = reference.trim() && reason.trim() && (type === "restrict" || confirm === "ERASE");
+  async function go() {
+    setBusy(true); setErr("");
+    try {
+      await onConfirm({ type, reference: reference.trim(), reason: reason.trim(), ...(type === "erase" ? { confirm } : {}) });
+      onClose();
+    } catch (e) { setErr(e instanceof Error ? e.message : "Request failed."); setBusy(false); }
+  }
+  return (
+    <Modal title="Process data request" onClose={onClose}>
+      <p className="text-sm leading-relaxed text-slate-600">
+        {acc.name} ({acc.email}). A restriction archives the account immediately; an erasure archives and purges it and
+        anonymises every incident it reported, whatever the retention period says.
+      </p>
+      <div className="mt-3 flex gap-2">
+        <button type="button" onClick={() => setType("restrict")} aria-pressed={type === "restrict"}
+          className={`min-h-12 flex-1 rounded-xl text-sm font-bold ${type === "restrict" ? "bg-brand-700 text-white" : "bg-slate-100 text-slate-700"}`}>Restrict</button>
+        <button type="button" onClick={() => setType("erase")} aria-pressed={type === "erase"}
+          className={`min-h-12 flex-1 rounded-xl text-sm font-bold ${type === "erase" ? "bg-blush text-brand-900" : "bg-slate-100 text-slate-700"}`}>Erase</button>
+      </div>
+      <label className="mt-3 block text-xs font-semibold text-slate-600">Request reference
+        <input value={reference} maxLength={80} onChange={(e) => setReference(e.target.value)} placeholder="e.g. DPA-2026-014"
+          className={`mt-1 ${input}`} />
+      </label>
+      <label className="mt-3 block text-xs font-semibold text-slate-600">Reason
+        <input value={reason} maxLength={200} onChange={(e) => setReason(e.target.value)} placeholder="Written request from the data subject"
+          className={`mt-1 ${input}`} />
+      </label>
+      {type === "erase" && (
+        <label className="mt-3 block text-xs font-semibold text-slate-600">Type ERASE to confirm
+          <input value={confirm} maxLength={20} onChange={(e) => setConfirm(e.target.value)} placeholder="ERASE"
+            className={`mt-1 ${input}`} autoComplete="off" />
+        </label>
+      )}
+      {err && <p className="mt-2 text-sm text-blush-700" role="alert">{err}</p>}
+      <div className="mt-4 flex gap-2">
+        <button onClick={onClose} className={`${btnSecondary} flex-1 justify-center`}>Cancel</button>
+        <button onClick={() => void go()} disabled={!ready || busy}
+          className={`${type === "erase" ? btnDanger : btnPrimary} flex-1 justify-center disabled:opacity-60`}>{busy ? "Working…" : "Submit request"}</button>
+      </div>
+    </Modal>
+  );
+}
+
+/** Account state beside the name: Active, Deactivated, Archived or Purged. */
+function StatusBadge({ acc }: { acc: AccountRecord }) {
+  const badge = STATUS_BADGE[acc.status] ?? { label: acc.status, className: "bg-slate-100 text-slate-500" };
+  return <span className={`shrink-0 rounded-full px-2 py-0.5 text-xs font-bold ${badge.className}`}>{badge.label}</span>;
+}
+
+/** Secondary warnings (password change, temporary credential, lockout) — not the status itself. */
+function StatusChips({ acc }: { acc: AccountRecord }) {
+  const chips = [
+    acc.mustChange ? { label: "Must change password", className: "bg-amber-100 text-amber-700" } : null,
+    acc.temp ? { label: "Temporary credential", className: "bg-blue-100 text-blue-700" } : null,
+    acc.locked ? { label: "Locked", className: "bg-blush-100 text-blush-700" } : null,
+  ].filter((c): c is { label: string; className: string } => Boolean(c));
+  if (!chips.length) return null;
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      {chips.map((c) => (
+        <span key={c.label} className={`rounded-full px-2 py-0.5 text-xs font-bold ${c.className}`}>{c.label}</span>
+      ))}
+    </div>
+  );
+}
+
+type AccountAction = {
+  key: string;
+  label: string;
+  icon: ReactNode;
+  onClick: () => void;
+  tone: "primary" | "secondary" | "danger" | "positive";
+  /** A lone or emphasised action fills the whole row. */
+  wide?: boolean;
+  title?: string;
+};
+
+const actionBase = "flex min-h-12 w-full items-center justify-center gap-2 rounded-xl px-3 text-sm font-bold";
+const ACTION_TONE: Record<AccountAction["tone"], string> = {
+  primary: `${actionBase} bg-brand-600 text-white`,
+  secondary: `${actionBase} border border-slate-300 bg-white text-slate-700`,
+  danger: `${actionBase} bg-blush-100 text-blush-700`,
+  positive: `${actionBase} border border-emerald-200 bg-emerald-50 text-emerald-800`,
+};
+
+/** Even two-column rows so the buttons line up instead of wrapping unevenly. */
+function ActionGroup({ title, actions }: { title: string; actions: AccountAction[] }) {
+  if (!actions.length) return null;
+  return (
+    <div>
+      <p className="text-[11px] font-bold uppercase tracking-wide text-slate-400">{title}</p>
+      <div className="mt-1.5 grid grid-cols-1 gap-2 sm:grid-cols-2">
+        {actions.map((a) => (
+          <button key={a.key} type="button" onClick={a.onClick} title={a.title}
+            className={`${ACTION_TONE[a.tone]} ${a.wide || actions.length === 1 ? "sm:col-span-2" : ""}`}>
+            {a.icon} {a.label}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function AccountActions({ acc, onUnlock, onActivate, onReset, onDeactivate, onRestore, onPurge, onRequest, onEdit }: {
   acc: AccountRecord;
   onUnlock: (a: AccountRecord) => void; onActivate: (a: AccountRecord) => void;
   onReset: (a: AccountRecord) => void; onDeactivate: (a: AccountRecord) => void;
+  onRestore?: (a: AccountRecord) => void;
+  onPurge?: (a: AccountRecord) => void;
+  onRequest?: (a: AccountRecord) => void;
+  onEdit?: (a: AccountRecord) => void;
 }) {
+  const closed = acc.status === "archived" || acc.status === "purged";
+  const primary: AccountAction[] = [];
+  const data: AccountAction[] = [];
+
+  if (!closed) {
+    if (onEdit) primary.push({
+      key: "edit", label: "Edit Profile", icon: <Pencil size={15} />, onClick: () => onEdit(acc),
+      tone: "primary", title: "Edit the account name and assignment",
+    });
+    primary.push({
+      key: "reset", label: "Reset Password", icon: <Key size={15} />, onClick: () => onReset(acc),
+      tone: "secondary", title: "Reset password",
+    });
+    if (acc.locked) primary.push({
+      key: "unlock", label: "Unlock Account", icon: <Unlock size={15} />, onClick: () => onUnlock(acc),
+      tone: "secondary", wide: true, title: "Unlock account",
+    });
+    if (onRequest) data.push({
+      key: "request", label: "Process Data Request", icon: <FileWarning size={15} />, onClick: () => onRequest(acc),
+      tone: "secondary", title: "Process a data request",
+    });
+    if (acc.status === "active") data.push({
+      key: "deactivate", label: "Deactivate Account", icon: <UserX size={15} />, onClick: () => onDeactivate(acc),
+      tone: "danger", title: "Deactivate account",
+    });
+    else data.push({
+      key: "activate", label: "Reactivate Account", icon: <UserCheck size={15} />, onClick: () => onActivate(acc),
+      tone: "positive", title: "Reactivate account",
+    });
+  } else {
+    if (acc.status !== "purged" && onEdit) primary.push({
+      key: "edit", label: "Edit Profile", icon: <Pencil size={15} />, onClick: () => onEdit(acc),
+      tone: "primary", title: "Edit the account name and assignment",
+    });
+    if (acc.status === "archived" && onRestore) primary.push({
+      key: "restore", label: "Restore Account", icon: <UserCheck size={15} />, onClick: () => onRestore(acc),
+      tone: "positive", title: "Restore account",
+    });
+    if (acc.status !== "purged" && onRequest) data.push({
+      key: "request", label: "Process Data Request", icon: <FileWarning size={15} />, onClick: () => onRequest(acc),
+      tone: "secondary", title: "Process a data request",
+    });
+    if (acc.purgeEligible && onPurge) data.push({
+      key: "purge", label: "Purge Data", icon: <Trash2 size={15} />, onClick: () => onPurge(acc),
+      tone: "danger", title: "Purge personal data",
+    });
+  }
+
+  if (!primary.length && !data.length) return null;
   return (
-    <div className="flex flex-wrap gap-1.5">
-      {acc.locked && <button onClick={() => onUnlock(acc)} className={btnSecondary} title="Unlock account"><Unlock size={15} /> Unlock</button>}
-      <button onClick={() => onReset(acc)} className={btnSecondary} title="Reset password"><Key size={15} /> Reset</button>
-      {acc.status === "active"
-        ? <button onClick={() => onDeactivate(acc)} className={btnDanger} title="Deactivate"><UserX size={15} /> Deactivate</button>
-        : <button onClick={() => onActivate(acc)} className={btnSecondary} title="Reactivate"><UserCheck size={15} /> Activate</button>}
-    </div>
+    <section className="rounded-2xl border border-slate-200 bg-white p-4">
+      <h3 className="text-xs font-bold uppercase tracking-wide text-slate-500">Actions</h3>
+      <div className="mt-3 space-y-3">
+        <ActionGroup title="Account actions" actions={primary} />
+        <ActionGroup title="Data & account" actions={data} />
+      </div>
+    </section>
   );
 }
 
@@ -291,17 +640,47 @@ const STATUS_CHIPS: { value: string; label: string }[] = [
   { value: "locked", label: "Locked" },
   { value: "mustchange", label: "Must change" },
   { value: "inactive", label: "Deactivated" },
+  { value: "archived", label: "Archived" },
 ];
+
+/** Display + colour per account status (archived/purged are their own states). */
+const STATUS_BADGE: Record<string, { label: string; className: string }> = {
+  active: { label: "Active", className: "bg-emerald-100 text-emerald-700" },
+  inactive: { label: "Deactivated", className: "bg-slate-100 text-slate-500" },
+  archived: { label: "Archived", className: "bg-amber-100 text-amber-800" },
+  purged: { label: "Purged", className: "bg-slate-200 text-slate-600" },
+};
 
 const GRADE_CHIPS: { value: string; label: string }[] = SECTION_GRADES.map((label) => ({
   value: gradeCode(label) ?? "",
   label,
 }));
 
-const ORG_OPTIONS = [SCHOOL.name, "Barangay + CDRRMO"];
+const ORG_OPTIONS = [...RESPONDER_ORGS.map((o: { label: string }) => o.label), SCHOOL.name];
 
-/** Organization: responders belong to the Barangay/CDRRMO, everyone else to the school. */
-const orgOf = (a: AccountRecord) => (a.role === "responder" ? "Barangay + CDRRMO" : SCHOOL.name);
+/** The school's section set — a Parent/PTA account can only belong to one of these. */
+const SECTION_OPTIONS = ["A", "B", "C"];
+
+/** Organization: a responder belongs to one dispatch org; everyone else to the school. */
+const orgOf = (a: AccountRecord) =>
+  a.role === "responder" ? (a.orgLabel || "Unassigned org") : SCHOOL.name;
+
+/** "Responder · CDRRMO" — the org is part of who a responder is. */
+const roleLine = (a: AccountRecord) =>
+  `${a.role}${a.role === "responder" && a.orgLabel ? ` · ${a.orgLabel}` : ""}${a.section ? ` · ${a.section}` : ""}`;
+
+const ROLE_LABEL: Record<string, string> = {
+  teacher: "Teacher", parent: "Parent/PTA", principal: "Principal", responder: "Responder", super_admin: "Super Admin",
+};
+
+/** What the account belongs to: a dispatch org, a class section, the school or the console. */
+const assignmentOf = (a: AccountRecord) => {
+  if (a.role === "responder") return a.orgLabel || "Not assigned";
+  if (a.section) return `${SCHOOL.name} · ${a.section}`;
+  if (a.role === "principal") return `${SCHOOL.name} · School-wide`;
+  if (a.role === "super_admin") return "System console";
+  return SCHOOL.name;
+};
 
 /** Structured grade with a parse fallback for older payloads. */
 const gradeOf = (a: AccountRecord) => a.grade || parseSection(a.section ?? "").grade || "";
@@ -312,7 +691,8 @@ const statusOf = (a: AccountRecord): string[] => {
   if (a.status === "active") out.push("active");
   if (a.locked) out.push("locked");
   if (a.mustChange) out.push("mustchange");
-  if (a.status !== "active") out.push("inactive");
+  if (a.status === "archived") out.push("archived"); // its own bucket: not a suspension
+  else if (a.status !== "active") out.push("inactive");
   return out;
 };
 
@@ -327,19 +707,82 @@ const ACCOUNT_SPEC: FilterSpec<AccountRecord> = {
   },
 };
 
-function AccountDetail({ acc, onUnlock, onActivate, onReset, onDeactivate }: {
+/** One label/value line inside a detail section. */
+function DetailRow({ label, value }: { label: string; value: ReactNode }) {
+  return (
+    <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-0.5 py-2">
+      <dt className="text-xs font-semibold text-slate-500">{label}</dt>
+      <dd className="min-w-0 break-words text-right text-sm font-medium text-slate-800">{value}</dd>
+    </div>
+  );
+}
+
+function AccountDetail({ acc, onUnlock, onActivate, onReset, onDeactivate, onRestore, onPurge, onRequest, onEdit }: {
   acc: AccountRecord;
   onUnlock: (a: AccountRecord) => void; onActivate: (a: AccountRecord) => void;
   onReset: (a: AccountRecord) => void; onDeactivate: (a: AccountRecord) => void;
+  onRestore?: (a: AccountRecord) => void;
+  onPurge?: (a: AccountRecord) => void;
+  onRequest?: (a: AccountRecord) => void;
+  onEdit?: (a: AccountRecord) => void;
 }) {
   return (
-    <div className={card}>
-      <p className="text-lg font-black text-slate-900">{acc.name}</p>
-      <p className="break-words text-sm text-slate-600">{acc.email}</p>
-      <p className="mt-0.5 text-xs text-slate-500">{acc.role}{acc.section ? ` · ${acc.section}` : ""}</p>
-      <div className="mt-2"><StatusChips acc={acc} /></div>
-      {acc.lastLoginAt && <p className="mt-2 text-xs text-slate-400">Last sign-in: {dateTime(acc.lastLoginAt)}</p>}
-      <div className="mt-4"><AccountActions acc={acc} onUnlock={onUnlock} onActivate={onActivate} onReset={onReset} onDeactivate={onDeactivate} /></div>
+    <div className="space-y-3">
+      {/* 1. Who the account belongs to, with its status beside the name. */}
+      <header className="rounded-2xl border border-slate-200 bg-white p-4">
+        <div className="flex flex-wrap items-center gap-2">
+          <h2 className="min-w-0 text-xl font-black leading-tight text-slate-900">{acc.name}</h2>
+          <StatusBadge acc={acc} />
+        </div>
+        <p className="mt-1 break-words text-sm text-slate-600">{acc.email}</p>
+        <p className="text-xs font-medium text-slate-500">{ROLE_LABEL[acc.role] ?? acc.role}</p>
+        <div className="mt-2"><StatusChips acc={acc} /></div>
+      </header>
+
+      {/* 2. Notices that need action, kept apart from ordinary metadata. */}
+      {acc.role === "responder" && !acc.org && (
+        <div role="alert" className="flex items-start gap-2.5 rounded-2xl border border-amber-200 bg-amber-50 p-3">
+          <AlertCircle size={18} className="mt-0.5 shrink-0 text-amber-700" />
+          <p className="text-sm leading-snug text-amber-900">
+            <span className="font-bold">Organization: not assigned</span> — Edit to assign the responder.
+          </p>
+        </div>
+      )}
+      {acc.status === "archived" && !acc.purgeEligible && (
+        <div className="flex items-start gap-2.5 rounded-2xl border border-slate-200 bg-slate-50 p-3">
+          <Archive size={18} className="mt-0.5 shrink-0 text-slate-500" />
+          <p className="text-sm leading-snug text-slate-700">
+            Purge becomes available once the retention period has passed.
+          </p>
+        </div>
+      )}
+
+      {/* 3. Structured information. */}
+      <section className="rounded-2xl border border-slate-200 bg-white p-4">
+        <h3 className="text-xs font-bold uppercase tracking-wide text-slate-500">Account details</h3>
+        <dl className="mt-2 divide-y divide-slate-100">
+          <DetailRow label="Email" value={acc.email} />
+          <DetailRow label="System role" value={ROLE_LABEL[acc.role] ?? acc.role} />
+          <DetailRow label="Organization / Assignment" value={assignmentOf(acc)} />
+        </dl>
+      </section>
+
+      <section className="rounded-2xl border border-slate-200 bg-white p-4">
+        <h3 className="text-xs font-bold uppercase tracking-wide text-slate-500">Activity</h3>
+        <dl className="mt-2 divide-y divide-slate-100">
+          <DetailRow label="Last sign-in" value={acc.lastLoginAt ? dateTime(acc.lastLoginAt) : "Never signed in"} />
+          {acc.archivedAt && (
+            <DetailRow
+              label="Archived"
+              value={`${dateTime(acc.archivedAt)}${acc.archiveReason ? ` — ${acc.archiveReason}` : ""}`}
+            />
+          )}
+        </dl>
+      </section>
+
+      {/* 4. Actions: a primary pair, then the data/account pair, evenly aligned. */}
+      <AccountActions acc={acc} onUnlock={onUnlock} onActivate={onActivate} onReset={onReset} onDeactivate={onDeactivate}
+        onRestore={onRestore} onPurge={onPurge} onRequest={onRequest} onEdit={onEdit} />
     </div>
   );
 }
@@ -353,20 +796,36 @@ function AccountRow({ acc, active }: { acc: AccountRecord; active: boolean }) {
           <span className="shrink-0 rounded-full bg-brand-600 px-1.5 py-0.5 text-white" aria-hidden><Check size={11} /></span>
         )}
       </div>
-      <p className="truncate text-xs text-slate-500">{acc.role}{acc.section ? ` · ${acc.section}` : ""}</p>
-      <p className={`mt-1 text-[11px] font-bold uppercase tracking-wide ${acc.status === "active" ? "text-emerald-700" : "text-slate-400"}`}>{acc.status}</p>
+      <p className="truncate text-xs text-slate-500">{roleLine(acc)}</p>
+      <p className={`mt-1 text-[11px] font-bold uppercase tracking-wide ${acc.status === "active" ? "text-emerald-700" : acc.status === "archived" ? "text-amber-700" : "text-slate-400"}`}>{STATUS_BADGE[acc.status]?.label ?? acc.status}</p>
     </div>
   );
 }
 
-function AccountsPane({ accounts, onUnlock, onActivate, onReset, onDeactivate }: {
+function AccountsPane({ accounts, onUnlock, onActivate, onReset, onDeactivate, onRestore, onPurge, onRequest, onEdit, focusArchived, onFocusHandled }: {
   accounts: AccountRecord[];
   onUnlock: (a: AccountRecord) => void; onActivate: (a: AccountRecord) => void;
   onReset: (a: AccountRecord) => void; onDeactivate: (a: AccountRecord) => void;
+  onRestore: (a: AccountRecord) => void;
+  onPurge: (a: AccountRecord) => void;
+  onRequest: (a: AccountRecord) => void;
+  onEdit: (a: AccountRecord) => void;
+  /** "View in Users" from the archive: apply the Archived filter once. */
+  focusArchived?: string | null;
+  onFocusHandled?: () => void;
 }) {
   // One state for search, the role row, the sheet groups and the sort menu —
   // kept per screen for the session.
   const [state, setState] = useFilterState("admin-accounts", () => initialFilterState({ sort: "name" }));
+
+  // Arriving from the archive's Accounts tab: show archived accounts. The
+  // account id is used to select it once the filter is applied.
+  useEffect(() => {
+    if (!focusArchived) return;
+    setState((s) => ({ ...s, groups: { ...s.groups, status: ["archived"] } }));
+    onFocusHandled?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focusArchived]);
 
   // Sections are known from every account, so an empty section stays selectable.
   const sectionOptions = [...new Set(accounts.map((a) => a.section).filter((s): s is string => Boolean(s)))].sort();
@@ -459,20 +918,21 @@ function AccountsPane({ accounts, onUnlock, onActivate, onReset, onDeactivate }:
         onRemove: () => toggle(e.group, e.value),
       }))}
       onClearAll={() => setState((s) => clearGroupFilters(s))}
-      results={{ label: "Accounts", shown: shown.length, total: accounts.length }}
+      results={{ label: "Users", shown: shown.length, total: accounts.length }}
     />
   );
 
   return (
     <MasterDetail
       items={shown}
-      ariaLabel="Accounts — select an account"
+      ariaLabel="Users — select a user"
       listHeader={listHeader}
       emptyList={accounts.length === 0 ? "No accounts yet." : "No accounts match those filters."}
       emptyDetail="Select an account to see its profile and actions."
       renderList={(acc, active) => <AccountRow acc={acc} active={active} />}
       renderDetail={(acc) => (
-        <AccountDetail acc={acc} onUnlock={onUnlock} onActivate={onActivate} onReset={onReset} onDeactivate={onDeactivate} />
+        <AccountDetail acc={acc} onUnlock={onUnlock} onActivate={onActivate} onReset={onReset} onDeactivate={onDeactivate}
+          onRestore={onRestore} onPurge={onPurge} onRequest={onRequest} onEdit={onEdit} />
       )}
     />
   );
@@ -485,7 +945,7 @@ function AccountsPane({ accounts, onUnlock, onActivate, onReset, onDeactivate }:
 
 type ConfigDraft = {
   severity: string; vulnerability: string; locationRisk: string; timeSensitivity: string;
-  cr: string; panelValidationDate: string;
+  cr: string; panelValidationDate: string; panelReference: string;
   hazardAdjustment: string; barangayMinutes: string; cdrrmoMinutes: string;
   walking: string; motorcycle: string; vehicle: string;
 };
@@ -495,6 +955,16 @@ type ChangeRow = { label: string; from: string; to: string };
 const numOf = (s: string) => (String(s).trim() === "" ? NaN : Number(s));
 const oneDecimal = (n: number) => Math.abs(n * 10 - Math.round(n * 10)) < 1e-9;
 const isDateString = (s: string) => /^\d{4}-\d{2}-\d{2}$/.test(s) && !Number.isNaN(Date.parse(`${s}T00:00:00Z`));
+const PANEL_REFERENCE_MAX = 120;
+
+/** The panel fields record who validated the values and when; they never change scoring. */
+const isDefaultVersion = (v: ConfigVersion) => !v.panelValidationDate;
+
+/** "Validated <date> by <reference>", or the default-values wording. */
+function validatedBy(v: ConfigVersion): string {
+  if (!v.panelValidationDate) return "Default values. Not yet validated by the Expert Panel.";
+  return `Validated ${v.panelValidationDate}${v.panelReference ? ` by ${v.panelReference}` : ""}`;
+}
 
 function draftFrom(v: ConfigVersion): ConfigDraft {
   return {
@@ -504,6 +974,7 @@ function draftFrom(v: ConfigVersion): ConfigDraft {
     timeSensitivity: String(v.weights.timeSensitivity),
     cr: String(v.consistency.cr),
     panelValidationDate: v.panelValidationDate ?? "",
+    panelReference: v.panelReference ?? "",
     hazardAdjustment: String(v.hazardAdjustment),
     barangayMinutes: String(v.escalation.barangayMinutes),
     cdrrmoMinutes: String(v.escalation.cdrrmoMinutes),
@@ -523,6 +994,7 @@ function payloadFrom(d: ConfigDraft): ConfigPayload {
     },
     consistency: { cr: numOf(d.cr) },
     panelValidationDate: d.panelValidationDate,
+    panelReference: d.panelReference.trim(),
     hazardAdjustment: numOf(d.hazardAdjustment),
     escalation: { barangayMinutes: numOf(d.barangayMinutes), cdrrmoMinutes: numOf(d.cdrrmoMinutes) },
     responderSpeeds: { walking: numOf(d.walking), motorcycle: numOf(d.motorcycle), vehicle: numOf(d.vehicle) },
@@ -534,6 +1006,7 @@ function payloadOfVersion(v: ConfigVersion): ConfigPayload {
     weights: { ...v.weights },
     consistency: { cr: v.consistency.cr },
     panelValidationDate: v.panelValidationDate ?? "",
+    panelReference: v.panelReference ?? "",
     hazardAdjustment: v.hazardAdjustment,
     escalation: { ...v.escalation },
     responderSpeeds: { ...v.responderSpeeds },
@@ -566,6 +1039,8 @@ function localErrors(d: ConfigDraft): Record<string, string> {
   if (!Number.isFinite(cr) || cr < 0 || cr > 0.1) out["consistency.cr"] = "The consistency ratio must be 0.10 or lower.";
   if (!d.panelValidationDate.trim()) out.panelValidationDate = "Enter the date the Expert Panel validated these values.";
   else if (!isDateString(d.panelValidationDate)) out.panelValidationDate = "Use a valid date.";
+  if (/[\u0000-\u001F\u007F]/.test(d.panelReference)) out.panelReference = "Remove control characters (line breaks, tabs).";
+  else if (d.panelReference.trim().length > PANEL_REFERENCE_MAX) out.panelReference = `Keep the panel or source to ${PANEL_REFERENCE_MAX} characters or fewer.`;
 
   const hz = numOf(d.hazardAdjustment);
   if (!Number.isInteger(hz) || hz < 0 || hz > 4) out.hazardAdjustment = "Use a whole number from 0 to 4.";
@@ -586,14 +1061,15 @@ function localErrors(d: ConfigDraft): Record<string, string> {
 
 function changeRows(from: ConfigVersion, to: ConfigPayload): ChangeRow[] {
   const pct = (v: number) => `${v} %`;
-  const when = (s?: string | null) => (s ? s : "not set");
+  const panel = (date?: string | null) => (date ? `Validated ${date}` : "Default values");
   return [
     { label: "Severity weight", from: pct(from.weights.severity), to: pct(to.weights.severity) },
     { label: "Vulnerability weight", from: pct(from.weights.vulnerability), to: pct(to.weights.vulnerability) },
     { label: "Location risk weight", from: pct(from.weights.locationRisk), to: pct(to.weights.locationRisk) },
     { label: "Time sensitivity weight", from: pct(from.weights.timeSensitivity), to: pct(to.weights.timeSensitivity) },
     { label: "AHP consistency ratio", from: String(from.consistency.cr), to: String(to.consistency.cr) },
-    { label: "Expert panel validation", from: when(from.panelValidationDate), to: when(to.panelValidationDate) },
+    { label: "Expert panel validation", from: panel(from.panelValidationDate), to: panel(to.panelValidationDate) },
+    { label: "Panel / source", from: from.panelReference ?? "", to: to.panelReference },
     { label: "Hazard Location Risk adjustment", from: `+${from.hazardAdjustment}`, to: `+${to.hazardAdjustment}` },
     { label: "Barangay escalation limit", from: `${from.escalation.barangayMinutes} min`, to: `${to.escalation.barangayMinutes} min` },
     { label: "CDRRMO escalation limit", from: `${from.escalation.cdrrmoMinutes} min`, to: `${to.escalation.cdrrmoMinutes} min` },
@@ -785,18 +1261,27 @@ function ConfigTab({ onDirtyChange }: { onDirtyChange: (dirty: boolean) => void 
   if (loading) return <div className="py-8 text-center text-slate-500">Loading…</div>;
   if (!active) {
     return (
-      <div className="mx-auto w-full max-w-3xl">
+      <PageFlow width="max-w-3xl">
         <p className="rounded-xl border border-blush-200 bg-blush-100 p-3 text-sm text-blush-800">
           {error || "No configuration available."}
         </p>
-      </div>
+      </PageFlow>
     );
   }
 
   const bands: [string, string][] = [["Critical", "4.0 and up"], ["High", "3.0 – 3.99"], ["Moderate", "below 3.0"]];
 
   return (
-    <div className="scroll-area mx-auto w-full max-w-3xl space-y-3 lg:h-full lg:overflow-y-auto">
+    <PageFlow width="max-w-3xl" className="space-y-3">
+      {isDefaultVersion(active) && (
+        <div role="status" className="flex items-start gap-2 rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+          <AlertCircle size={16} className="mt-0.5 shrink-0" />
+          <span className="min-w-0 flex-1">
+            Default values. Not yet validated by the Expert Panel. They score new tickets until a version
+            records the panel date and source.
+          </span>
+        </div>
+      )}
       {error && (
         <p role="alert" className="rounded-xl border border-blush-200 bg-blush-100 p-3 text-sm text-blush-800">{error}</p>
       )}
@@ -842,7 +1327,7 @@ function ConfigTab({ onDirtyChange }: { onDirtyChange: (dirty: boolean) => void 
 
           <section className={card}>
             <h3 className={`${h2} mb-2`}>AHP consistency</h3>
-            <div className="grid gap-3 sm:grid-cols-2">
+            <div className="grid gap-3 sm:grid-cols-3">
               <ConfigField label="Consistency ratio" suffix="max 0.10" error={errors["consistency.cr"]}>
                 <input type="number" inputMode="decimal" step="0.001" min="0" max="0.1" value={draft.cr}
                   onChange={(e) => set({ cr: e.target.value })} className={input} aria-label="Consistency ratio" />
@@ -851,6 +1336,14 @@ function ConfigTab({ onDirtyChange }: { onDirtyChange: (dirty: boolean) => void 
                 <DatePicker ariaLabel="Expert panel validation date" value={draft.panelValidationDate}
                   onChange={(v) => set({ panelValidationDate: v })} clearable className="block w-full"
                 />
+              </ConfigField>
+              <ConfigField label="Panel / source" error={errors.panelReference}>
+                <input value={draft.panelReference} maxLength={PANEL_REFERENCE_MAX}
+                  onChange={(e) => set({ panelReference: e.target.value })} className={input}
+                  placeholder="AHP Expert Panel, SY 2026-2027" aria-label="Panel or source" />
+                <span className="mt-1 block text-[11px] font-normal text-slate-400">
+                  Recorded only: who validated these values and when. It does not change scoring.
+                </span>
               </ConfigField>
             </div>
           </section>
@@ -934,7 +1427,7 @@ function ConfigTab({ onDirtyChange }: { onDirtyChange: (dirty: boolean) => void 
             </dl>
             <p className="mt-2 text-xs text-slate-500">
               Consistency ratio {active.consistency.cr} · λmax {active.consistency.lambdaMax} · CI {active.consistency.ci} ·
-              RI {active.consistency.ri}. Expert panel validation: {active.panelValidationDate ?? "not yet validated"}.
+              RI {active.consistency.ri}. {validatedBy(active)}
             </p>
           </section>
 
@@ -977,8 +1470,9 @@ function ConfigTab({ onDirtyChange }: { onDirtyChange: (dirty: boolean) => void 
                   </p>
                   <p className="text-[11px] text-slate-500">
                     {v.createdBy} · {dateTime(v.createdAt)} · {v.weights.severity}/{v.weights.vulnerability}/
-                    {v.weights.locationRisk}/{v.weights.timeSensitivity} % · CR {v.consistency.cr} · panel{" "}
-                    {v.panelValidationDate ?? "not set"}
+                    {v.weights.locationRisk}/{v.weights.timeSensitivity} % · CR {v.consistency.cr} ·{" "}
+                    {v.panelValidationDate ? `Validated ${v.panelValidationDate}` : "Default values"}
+                    {v.panelReference ? ` · ${v.panelReference}` : ""}
                   </p>
                 </div>
                 {!v.active && (
@@ -1033,17 +1527,22 @@ function ConfigTab({ onDirtyChange }: { onDirtyChange: (dirty: boolean) => void 
           }}
         />
       )}
-    </div>
+    </PageFlow>
   );
 }
 
 
 // ----------------------------------------------------------- Sub-components
 
-function ProvisionModal({ onClose, onCreated }: { onClose: () => void; onCreated: (cred: TempCredential | null) => void }) {
+function ProvisionModal({ onClose, onCreated }: {
+  onClose: () => void;
+  onCreated: (cred: TempCredential | null) => void;
+}) {
   const [email, setEmail] = useState("");
   const [name, setName] = useState("");
   const [role, setRole] = useState<"teacher" | "principal" | "responder" | "parent">("teacher");
+  // Required for responders: which organization the account dispatches for.
+  const [org, setOrg] = useState<"" | "barangay" | "cdrrmo">("");
   const [grade, setGrade] = useState("");
   const [sectionName, setSectionName] = useState("");
   const [password, setPassword] = useState("");
@@ -1056,7 +1555,8 @@ function ProvisionModal({ onClose, onCreated }: { onClose: () => void; onCreated
     setError("");
     try {
       const r = await api<{ account: AccountRecord; tempPassword: string | null }>("POST", "/api/admin/accounts", {
-        email, name, role, section: role === "parent" ? composeSection(grade, sectionName) : undefined, password: password || undefined,
+        email, name, role, org: role === "responder" ? org : undefined,
+        section: role === "parent" ? composeSection(grade, sectionName) : undefined, password: password || undefined,
       });
       onCreated(r.tempPassword ? { id: r.account.id, email, name, role, tempPassword: r.tempPassword } : null);
     } catch (e) {
@@ -1079,17 +1579,22 @@ function ProvisionModal({ onClose, onCreated }: { onClose: () => void; onCreated
           options={[
             { value: "teacher", label: "Teacher" },
             { value: "principal", label: "Principal" },
-            { value: "responder", label: "Responder (Barangay/CDRRMO)" },
+            { value: "responder", label: "Responder (Barangay Sinalhan / CDRRMO)" },
             { value: "parent", label: "Parent / PTA" },
           ]} />
+        {role === "responder" && (
+          <Select label="Organization" labelClassName="text-sm font-medium text-slate-700" value={org}
+            onChange={(v) => setOrg(v as typeof org)} placeholder="Pick the responder's org"
+            options={RESPONDER_ORGS.map((o: { id: string; label: string }) => ({ value: o.id, label: o.label }))} />
+        )}
         {role === "parent" && (
           <div className="space-y-3">
             <Select label="Grade" labelClassName="text-sm font-medium text-slate-700" value={grade}
-              onChange={(v) => setGrade(v)} placeholder="Pick a grade"
+              onChange={setGrade} placeholder="Pick a grade"
               options={SECTION_GRADES.map((label) => ({ value: gradeCode(label) ?? "", label }))} />
-            <label className="block text-sm font-medium text-slate-700">Section
-              <input value={sectionName} maxLength={20} onChange={(e) => setSectionName(e.target.value)} className={`${input} mt-1`} placeholder="Sec A" />
-            </label>
+            <Select label="Section" labelClassName="text-sm font-medium text-slate-700" value={sectionName}
+              onChange={setSectionName} placeholder="Pick a section"
+              options={SECTION_OPTIONS.map((s) => ({ value: s, label: s }))} />
           </div>
         )}
         <div>
@@ -1106,9 +1611,100 @@ function ProvisionModal({ onClose, onCreated }: { onClose: () => void; onCreated
           </div>
         </div>
         {error && <p className="text-sm text-blush-700">{error}</p>}
-        <button onClick={() => void submit()} disabled={busy || !email || !name || (role === "parent" && (!grade || !sectionName.trim()))} className={`${btnPrimary} w-full justify-center`}>
+        <button onClick={() => void submit()}
+          disabled={busy || !email || !name || (role === "responder" && !org) || (role === "parent" && (!grade || !sectionName.trim()))}
+          className={`${btnPrimary} w-full justify-center`}>
           {busy ? "Creating…" : "Create account"}
         </button>
+      </div>
+    </Modal>
+  );
+}
+
+/** Edit what the console owns: the display name, a responder's org, a parent's section. */
+function AccountEditModal({ acc, onClose, onSave }: {
+  acc: AccountRecord;
+  onClose: () => void;
+  onSave: (values: { name: string; org?: string; section?: string }) => Promise<void>;
+}) {
+  const parsed = parseSection(acc.section ?? "");
+  const isResponder = acc.role === "responder";
+  const isParent = acc.role === "parent";
+  const [name, setName] = useState(acc.name);
+  const [org, setOrg] = useState<string>(acc.org ?? "");
+  const [grade, setGrade] = useState(parsed.grade);
+  const [sec, setSec] = useState(parsed.sectionName || acc.section || "");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const section = grade ? composeSection(grade, sec) : sec.trim();
+  // The account's current value stays selectable even if it is outside the set.
+  const sectionChoices = sec && !SECTION_OPTIONS.includes(sec) ? [sec, ...SECTION_OPTIONS] : SECTION_OPTIONS;
+  const canSave =
+    Boolean(name.trim()) &&
+    (!isResponder || Boolean(org)) &&
+    (!isParent || (Boolean(grade) && Boolean(sec.trim())));
+
+  async function save() {
+    setBusy(true);
+    setError("");
+    try {
+      await onSave({ name: name.trim(), ...(isResponder ? { org } : {}), ...(isParent ? { section } : {}) });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not save the account.");
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Modal title="Edit account" onClose={() => { if (!busy) onClose(); }}>
+      <div className="space-y-3">
+        <div>
+          <p className="break-words text-sm font-medium text-slate-700">{acc.email}</p>
+          <p className="text-xs text-slate-500">
+            {acc.role}{acc.status !== "active" ? ` · ${acc.status}` : ""} · email and role cannot be changed
+          </p>
+        </div>
+        <label className="block text-sm font-medium text-slate-700">Name
+          <input value={name} maxLength={80} onChange={(e) => setName(e.target.value)}
+            className={`${input} mt-1`} aria-label="Account name" />
+        </label>
+        {isResponder && (
+          <>
+            <Select label="Organization" labelClassName="text-sm font-medium text-slate-700" value={org}
+              onChange={setOrg} placeholder="Assign an organization"
+              options={RESPONDER_ORGS.map((o: { id: string; label: string }) => ({ value: o.id, label: o.label }))} />
+            <p className="text-xs text-slate-500">
+              Every responder answers for one org. It names them in the ticket timeline and hides their own card
+              on the Escalation page.
+            </p>
+          </>
+        )}
+        {isParent && (
+          <div className="space-y-3">
+            <Select label="Grade" labelClassName="text-sm font-medium text-slate-700" value={grade}
+              onChange={setGrade} placeholder="Pick a grade"
+              options={SECTION_GRADES.map((label) => ({ value: gradeCode(label) ?? "", label }))} />
+            <Select label="Section" labelClassName="text-sm font-medium text-slate-700" value={sec}
+              onChange={setSec} placeholder="Pick a section"
+              options={sectionChoices.map((s) => ({ value: s, label: s }))} />
+            <p className="text-xs text-slate-500">
+              Moves this Parent/PTA account to {section || "another section"} — they see that section's alerts.
+            </p>
+          </div>
+        )}
+        {acc.role === "teacher" && (
+          <p className="text-xs text-slate-500">
+            Renaming also renames the teacher's roster entry. Section and room are edited from the Principal's
+            Teacher roster.
+          </p>
+        )}
+        {error && <p role="alert" className="text-sm font-semibold text-blush-700">{error}</p>}
+        <div className="flex gap-2">
+          <button onClick={onClose} disabled={busy} className={`${btnSecondary} flex-1 justify-center`}>Cancel</button>
+          <button onClick={() => void save()} disabled={busy || !canSave} className={`${btnPrimary} flex-1 justify-center`}>
+            {busy ? "Saving…" : "Save changes"}
+          </button>
+        </div>
       </div>
     </Modal>
   );

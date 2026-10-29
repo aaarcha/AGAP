@@ -1,11 +1,12 @@
 /**
  * The shared FilterBar (src/components/FilterBar.tsx) with its real logic from
  * src/lib/filters.ts, bundled by esbuild and rendered in jsdom — no server.
- * Covers: chip order/counts/aria-pressed, the Filters badge, the phone bottom
- * sheet vs the >=768 popover, zero-count options staying visible but disabled,
- * "Show N results" + Reset, removable active chips + Clear all, the aria-live
- * results header, the search clear button (48px, input pr-12), the list/grid
- * toggle and per-screen session persistence.
+ * Covers the one-row layout (two icon buttons + category chips + Clear, no
+ * wrap classes), the Filters badge, quick chips as toggle rows inside the
+ * panel, groups as Select dropdowns with "Any <name>"/counts/disabled
+ * zero-count options, "Show N results" + Reset, the Clear chip, the summary in
+ * the results header, Esc closing a dropdown before the panel, the search clear
+ * button, the list/grid toggle, the scroll-edge helper and session persistence.
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -23,9 +24,9 @@ fs.mkdirSync(outDir, { recursive: true });
 const entry = `
 import { useFilterState, initialFilterState, toggleGroupValue, setCategory, setQuery, setSort, clearGroupFilters,
   activeFilterCount, activeFilterEntries, selectedValues, isGroupSelected, filterItems, facetCounts, clearSessionStates } from ${JSON.stringify(path.join(root, "src/lib/filters.ts"))};
-import { FilterBar } from ${JSON.stringify(path.join(root, "src/components/FilterBar.tsx"))};
+import { FilterBar, scrollEdges } from ${JSON.stringify(path.join(root, "src/components/FilterBar.tsx"))};
 
-export { clearSessionStates };
+export { clearSessionStates, scrollEdges };
 
 export const ITEMS = [
   { id: "a1", name: "Ms. Reyes", role: "teacher", grade: "3", status: "active", mustChange: false, lastLoginAt: 30 },
@@ -181,7 +182,7 @@ for (const key of shared) {
 Object.defineProperty(globalThis, "getComputedStyle", { value: (...args) => w.getComputedStyle(...args), configurable: true });
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
-const { Demo, ITEMS, clearSessionStates } = await import(`${pathToFileURL(outfile).href}?v=${Date.now()}`);
+const { Demo, ITEMS, clearSessionStates, scrollEdges } = await import(`${pathToFileURL(outfile).href}?v=${Date.now()}`);
 const { render, cleanup, fireEvent, act } = await import("@testing-library/react");
 const React = (await import("react")).default;
 
@@ -197,12 +198,38 @@ const byAria = (label) => {
   assert.ok(el, `button aria-label "${label}" exists`);
   return el;
 };
-const resultsHeader = () => {
-  const el = document.querySelector('[aria-live="polite"]');
-  assert.ok(el, "results header is an aria-live region");
+/** The "<label> N of M" count inside the aria-live header. */
+const resultsCount = () => {
+  const live = document.querySelector('[aria-live="polite"]');
+  assert.ok(live, "results header is an aria-live region");
+  const el = live.querySelector("[data-results]");
+  assert.ok(el, "the header carries a count element");
   return (el.textContent || "").trim();
 };
-/** Chips inside the group with this accessible name. */
+/** The short "Grade 4 · Locked" summary, or "" when nothing is active. */
+const resultsSummary = () => {
+  const el = document.querySelector("[data-filter-summary]");
+  return el ? (el.textContent || "").replace(/^\s*·\s*/, "").trim() : "";
+};
+/** The one filter row. */
+const row = () => {
+  const el = document.querySelector("[data-filter-row]");
+  assert.ok(el, "the filter row exists");
+  return el;
+};
+/** the Filters / Sort icon buttons (identified by their accessible name). */
+const rowButtons = () => [...row().querySelectorAll("button")];
+const filtersTrigger = () => {
+  const el = rowButtons().find((b) => (b.getAttribute("aria-label") || "").startsWith("Filters"));
+  assert.ok(el, "the Filters icon button is in the row");
+  return el;
+};
+const sortTrigger = () => {
+  const el = rowButtons().find((b) => (b.getAttribute("aria-label") || "").startsWith("Sort:"));
+  assert.ok(el, "the Sort icon button is in the row");
+  return el;
+};
+/** Category chips inside the row (role=group with that aria-label). */
 const chipIn = (groupLabel, chipLabel) => {
   const group = [...document.querySelectorAll('[role="group"]')].find((g) => g.getAttribute("aria-label") === groupLabel);
   assert.ok(group, `group "${groupLabel}" exists`);
@@ -210,32 +237,65 @@ const chipIn = (groupLabel, chipLabel) => {
   assert.ok(chip, `chip "${chipLabel}" in group "${groupLabel}" exists`);
   return chip;
 };
+const panel = () => document.querySelector('[role="dialog"][aria-label="Filters"]');
+const openFilters = () => fireEvent.click(filtersTrigger());
+/** Open one group's dropdown inside the panel by its group name. */
+const openGroupMenu = (label) => {
+  const trigger = panel().querySelector(`[data-group-trigger][aria-label^="${label}:"]`);
+  assert.ok(trigger, `the "${label}" dropdown exists in the panel`);
+  fireEvent.click(trigger);
+  const menu = panel().querySelector(`[role="listbox"][aria-label="${label}"]`);
+  assert.ok(menu, `the "${label}" menu opened`);
+  return menu;
+};
+const optionIn = (menu, labelPrefix) => {
+  const opt = [...menu.querySelectorAll('[role="option"]')].find((o) => (o.textContent || "").trim().startsWith(labelPrefix));
+  assert.ok(opt, `option "${labelPrefix}" exists`);
+  return opt;
+};
 
-test("primary category chips: All first with counts, aria-pressed toggles, live results header", () => {
+test("the row holds only the two icon buttons and the category chips, and never wraps", () => {
   render(React.createElement(Demo));
-  const roleGroup = [...document.querySelectorAll('[role="group"]')].find((g) => g.getAttribute("aria-label") === "Role");
-  const chips = [...roleGroup.querySelectorAll("button")];
+  const buttons = rowButtons();
+  assert.equal(row().getAttribute("role"), "group");
+  assert.match(buttons[0].getAttribute("aria-label"), /^Filters/, "the first item is the Filters icon button");
+  assert.match(buttons[1].getAttribute("aria-label"), /^Sort:/, "the second is the Sort icon button");
+  assert.equal((buttons[0].textContent || "").trim(), "", "the Filters button is icon-only (no text)");
+  assert.equal((buttons[1].textContent || "").trim(), "", "the Sort button is icon-only (no text)");
+  assert.equal(buttons.length, 2 + 4, "two icon buttons, then All + three role chips");
+  for (const b of buttons.slice(2)) assert.ok(b.hasAttribute("aria-pressed"), "everything after them is a category chip");
+  assert.ok(row().className.includes("flex-nowrap"), "the row is explicitly nowrap");
+  assert.ok(!row().className.includes("flex-wrap"), "the row never wraps");
+  assert.ok(row().className.includes("overflow-x-auto"), "the row scrolls sideways");
+
+  const chips = buttons.slice(2);
   assert.ok((chips[0].textContent || "").trim().startsWith("All"), "All comes first");
   assert.equal(chips[0].getAttribute("aria-pressed"), "true", "All is pressed by default");
   assert.match((chips[1].textContent || ""), /Teacher\s*2/, "chips carry counts");
-  assert.equal(resultsHeader(), `Accounts ${ITEMS.length} of ${ITEMS.length}`);
+  assert.equal(resultsCount(), `Accounts ${ITEMS.length} of ${ITEMS.length}`);
+  assert.equal(resultsSummary(), "", "no summary while nothing is filtered");
 
   fireEvent.click(chips[1]); // Teacher
   assert.equal(chipIn("Role", "Teacher").getAttribute("aria-pressed"), "true");
-  assert.equal(resultsHeader(), "Accounts 2 of 4", "counts update in the aria-live header");
+  assert.equal(resultsCount(), "Accounts 2 of 4", "counts update in the aria-live header");
+  assert.equal(resultsSummary(), "Teacher", "the header names the active filter");
   fireEvent.click(chipIn("Role", "All"));
-  assert.equal(resultsHeader(), "Accounts 4 of 4");
+  assert.equal(resultsCount(), "Accounts 4 of 4");
 });
 
-test("quick chips are aria-pressed toggles and drive the Filters badge", () => {
+test("quick chips are labelled toggle rows in the panel and drive the badge", () => {
   render(React.createElement(Demo));
-  const locked = btn("Locked1");
-  assert.equal(locked.getAttribute("aria-pressed"), "false");
-  fireEvent.click(locked);
-  assert.equal(btn("Locked1").getAttribute("aria-pressed"), "true");
-  const filtersBtn = [...document.querySelectorAll("button")].find((b) => (b.textContent || "").startsWith("Filters"));
-  assert.equal((filtersBtn.textContent || "").trim(), "Filters1", "badge = active count");
-  assert.equal(filtersBtn.getAttribute("aria-expanded"), "false");
+  assert.equal(document.querySelector('[role="switch"]'), null, "no toggles outside the panel");
+  openFilters();
+  const locked = () => panel().querySelector('button[role="switch"][aria-label="Locked"]');
+  assert.ok(locked(), "Locked is a labelled toggle row in the panel");
+  assert.equal(locked().getAttribute("aria-checked"), "false");
+  fireEvent.click(locked());
+  assert.equal(locked().getAttribute("aria-checked"), "true");
+  assert.equal(filtersTrigger().getAttribute("aria-label"), "Filters, 1 active", "the count is in the accessible name");
+  assert.ok((filtersTrigger().getAttribute("title") || "").includes("1 active"), "and in the hover title");
+  assert.ok(filtersTrigger().querySelector("[data-filter-badge]"), "the icon shows a count badge");
+  assert.equal(filtersTrigger().getAttribute("aria-expanded"), "true");
 });
 
 test("search field: pr-12 padding, 48px clear button, results follow the query", () => {
@@ -245,84 +305,113 @@ test("search field: pr-12 padding, 48px clear button, results follow the query",
   assert.ok(input.className.includes("pl-10"), "and for the leading search icon");
 
   fireEvent.change(input, { target: { value: "rey" } });
-  assert.equal(resultsHeader(), "Accounts 1 of 4");
+  assert.equal(resultsCount(), "Accounts 1 of 4");
   const clear = byAria("Clear search");
   assert.ok(clear.className.includes("w-12"), "the clear button is 48px wide");
   fireEvent.click(clear);
   assert.equal(document.querySelector('input[aria-label="Search accounts"]').value, "");
-  assert.equal(resultsHeader(), "Accounts 4 of 4");
+  assert.equal(resultsCount(), "Accounts 4 of 4");
 });
 
-test("phone: the Filters button opens a bottom sheet with groups, live count and Reset", () => {
+test("phone: the sheet holds Select dropdowns with counts, a disabled zero-count option, Reset and Show N", () => {
   viewportWidth = 0;
   render(React.createElement(Demo));
-  const filtersBtn = [...document.querySelectorAll("button")].find((b) => (b.textContent || "").startsWith("Filters"));
-  fireEvent.click(filtersBtn);
-  assert.equal(filtersBtn.getAttribute("aria-expanded"), "true");
+  openFilters();
+  assert.equal(filtersTrigger().getAttribute("aria-expanded"), "true");
 
-  const sheet = document.querySelector('[role="dialog"][aria-label="Filters"]');
+  const sheet = panel();
   assert.ok(sheet, "the bottom sheet dialog exists");
   assert.ok(sheet.querySelector('button[aria-label="Close"]'), "the sheet has a close button");
   assert.ok(document.querySelector(".bg-black\\/55"), "the sheet is presented over a scrim");
+  assert.match(sheet.textContent || "", /Showing 4 of 4/);
+  assert.equal(sheet.querySelectorAll("[data-group-trigger]").length, 2, "Status and Grade each became a dropdown");
+  assert.equal(sheet.querySelectorAll('[role="group"]').length, 0, "no chip rows are left in the sheet");
 
-  // Grouped options as tappable chips, with counts; zero-count options stay visible but disabled.
-  const statusGroup = [...sheet.querySelectorAll('[role="group"]')].find((g) => g.getAttribute("aria-label") === "Status");
-  const chips = [...statusGroup.querySelectorAll("button")];
-  assert.deepEqual(chips.map((c) => (c.textContent || "").trim()), ["Active2", "Locked1", "Must change1"]);
-  const gradeGroup = [...sheet.querySelectorAll('[role="group"]')].find((g) => g.getAttribute("aria-label") === "Grade");
-  const zero = [...gradeGroup.querySelectorAll("button")].find((c) => (c.textContent || "").trim().startsWith("Kindergarten"));
+  // Counts live in the option labels; zero counts stay visible but disabled.
+  const statusMenu = openGroupMenu("Status");
+  assert.deepEqual(
+    [...statusMenu.querySelectorAll('[role="option"]')].map((o) => (o.textContent || "").trim()),
+    ["Any status", "Active (2)", "Locked (1)", "Must change (1)"],
+  );
+  const zero = optionIn(openGroupMenu("Grade"), "Kindergarten");
   assert.equal(zero.getAttribute("disabled"), "", "a zero-count option is disabled");
-  assert.match((zero.textContent || "").trim(), /0$/, "…but still shows its 0 count");
-  assert.ok((zero.textContent || "").includes("0"), "the option was never hidden");
+  assert.match((zero.textContent || "").trim(), /\(0\)$/, "…but still shows its 0 count");
 
-  assert.match((sheet.textContent || ""), /Show 4 results/);
-  fireEvent.click([...statusGroup.querySelectorAll("button")].find((c) => (c.textContent || "").startsWith("Locked")));
-  assert.match((sheet.textContent || ""), /Show 1 results/, "the result count updates live");
-  const filtersBtn2 = [...document.querySelectorAll("button")].find((b) => (b.textContent || "").startsWith("Filters"));
-  assert.equal((filtersBtn2.textContent || "").trim(), "Filters1");
+  fireEvent.click(optionIn(openGroupMenu("Status"), "Locked"));
+  assert.equal(panel().querySelector('[data-group-trigger][aria-label^="Status"]').getAttribute("aria-label"), "Status: Locked");
+  assert.match(panel().textContent || "", /Showing 1 of 4/, "the result count updates live");
+  assert.equal(filtersTrigger().getAttribute("aria-label"), "Filters, 1 active");
 
-  fireEvent.click([...sheet.querySelectorAll("button")].find((b) => (b.textContent || "").trim() === "Reset"));
-  assert.match((sheet.textContent || ""), /Show 4 results/, "Reset clears the selections");
-  fireEvent.click(sheet.querySelector('button[aria-label="Close"]'));
-  assert.equal(document.querySelector('[role="dialog"][aria-label="Filters"]'), null, "the sheet closes");
+  fireEvent.click([...panel().querySelectorAll("button")].find((b) => (b.textContent || "").trim() === "Reset"));
+  assert.match(panel().textContent || "", /Showing 4 of 4/, "Reset clears the selections");
+  assert.equal(panel().querySelector('[data-group-trigger][aria-label^="Status"]').getAttribute("aria-label"), "Status: Any status");
+
+  fireEvent.click([...panel().querySelectorAll("button")].find((b) => (b.textContent || "").trim() === "Show 4 results"));
+  assert.equal(panel(), null, "Show N results closes the sheet");
 });
 
-test("at >= 768 the Filters panel is a popover (no sheet, no scrim) and Esc closes it", () => {
+test("a group dropdown is multi-select and \"Any <name>\" clears it", () => {
+  render(React.createElement(Demo));
+  openFilters();
+  const gradeMenu = () => panel().querySelector('[role="listbox"][aria-label="Grade"]');
+  const trigger = () => panel().querySelector('[data-group-trigger][aria-label^="Grade"]');
+  openGroupMenu("Grade");
+  fireEvent.click(optionIn(gradeMenu(), "Grade 3"));
+  fireEvent.click(optionIn(gradeMenu(), "Grade 4"));
+  assert.equal(trigger().getAttribute("aria-label"), "Grade: 2 selected");
+  assert.equal(resultsCount(), "Accounts 3 of 4", "both grades are included");
+  fireEvent.click(optionIn(gradeMenu(), "Any grade"));
+  assert.equal(trigger().getAttribute("aria-label"), "Grade: Any grade");
+  assert.equal(resultsCount(), "Accounts 4 of 4");
+});
+
+test("at >= 768 the panel is a popover, and Esc closes a dropdown before the panel", () => {
   viewportWidth = 1024;
   render(React.createElement(Demo));
-  const filtersBtn = [...document.querySelectorAll("button")].find((b) => (b.textContent || "").startsWith("Filters"));
-  fireEvent.click(filtersBtn);
-  const panel = document.querySelector('[role="dialog"][aria-label="Filters"]');
-  assert.ok(panel, "the popover exists");
-  assert.equal(panel.querySelector('button[aria-label="Close"]'), null, "no sheet chrome");
+  openFilters();
+  assert.ok(panel(), "the popover exists");
+  assert.equal(panel().querySelector('button[aria-label="Close"]'), null, "no sheet chrome");
   assert.equal(document.querySelector(".bg-black\\/55"), null, "no scrim at desktop width");
-  assert.match((panel.textContent || ""), /Show 4 results/);
+  assert.match(panel().textContent || "", /Show 4 results/);
+
+  // A dropdown opened inside the panel takes the first Esc.
+  openGroupMenu("Status");
+  fireEvent.keyDown(document.body, { key: "Escape" });
+  assert.equal(panel().querySelector('[role="listbox"]'), null, "the dropdown closed first");
+  assert.ok(panel(), "the panel is still open");
 
   fireEvent.keyDown(document.body, { key: "Escape" });
-  assert.equal(document.querySelector('[role="dialog"][aria-label="Filters"]'), null, "Esc closes the popover");
+  assert.equal(panel(), null, "the second Esc closes the panel");
 });
 
-test("active filters appear as removable chips plus Clear all", () => {
+test("Clear sits at the end of the row only while filters are active, and clears them", () => {
   render(React.createElement(Demo));
-  fireEvent.click(btn("Locked1"));
-  fireEvent.click(btn("Must change password1"));
-  const removeLocked = byAria("Remove filter status:locked");
-  assert.ok(document.body.textContent.includes("Clear all"), "Clear all is offered");
-  fireEvent.click(removeLocked);
-  assert.equal(document.querySelector('[aria-label="Remove filter status:locked"]'), null, "the chip removed its filter");
-  assert.equal([...document.querySelectorAll("button")].find((b) => (b.textContent || "").startsWith("Filters")).textContent.trim(), "Filters1");
+  const clearChip = () => rowButtons().find((b) => (b.textContent || "").trim() === "Clear");
+  assert.equal(clearChip(), undefined, "no Clear while nothing is filtered");
 
-  fireEvent.click(btn("Clear all"));
-  assert.equal(document.querySelector('[aria-label^="Remove filter"]'), null, "Clear all empties the chips");
-  assert.equal([...document.querySelectorAll("button")].find((b) => (b.textContent || "").startsWith("Filters")).textContent.trim(), "Filters");
+  openFilters();
+  fireEvent.click(panel().querySelector('button[role="switch"][aria-label="Locked"]'));
+  fireEvent.click([...panel().querySelectorAll("button")].find((b) => (b.textContent || "").trim() === "Show 1 results"));
+
+  assert.ok(clearChip(), "Clear is offered once a filter is on");
+  assert.equal(rowButtons()[rowButtons().length - 1], clearChip(), "Clear is the last thing in the row");
+  assert.equal(resultsSummary(), "Locked");
+  assert.equal(resultsCount(), "Accounts 1 of 4");
+
+  fireEvent.click(clearChip());
+  assert.equal(clearChip(), undefined, "Clear disappears again");
+  assert.equal(resultsSummary(), "");
+  assert.equal(resultsCount(), "Accounts 4 of 4");
+  assert.equal(filtersTrigger().getAttribute("aria-label"), "Filters", "the badge is gone");
+  assert.equal(filtersTrigger().querySelector("[data-filter-badge]"), null);
 });
 
-test("the Sort button opens a menu whose choice is reflected in state", () => {
+test("the Sort icon button names the current order and applying a choice moves it", () => {
   render(React.createElement(Demo));
   const root = document.querySelector("[data-sort]");
   assert.equal(root.getAttribute("data-sort"), "name");
-  const sortBtn = [...document.querySelectorAll("button")].find((b) => (b.textContent || "").trim() === "Sort");
-  fireEvent.click(sortBtn);
+  assert.equal(sortTrigger().getAttribute("aria-label"), "Sort: Name (A–Z)");
+  fireEvent.click(sortTrigger());
   const dialog = document.querySelector('[role="dialog"][aria-label="Sort accounts"]');
   assert.ok(dialog, "the sort panel opens");
   const options = [...dialog.querySelectorAll('[role="option"]')];
@@ -331,21 +420,24 @@ test("the Sort button opens a menu whose choice is reflected in state", () => {
   fireEvent.click(options[1]);
   assert.equal(document.querySelector("[data-sort]").getAttribute("data-sort"), "lastLogin");
   assert.equal(document.querySelector('[role="dialog"][aria-label="Sort accounts"]'), null, "choosing closes the menu");
+  assert.equal(sortTrigger().getAttribute("aria-label"), "Sort: Last sign-in (newest)");
 });
 
-test("chip rows scroll on phones and wrap at >= 1024; the grade row is a multi-select", () => {
-  const { container } = render(React.createElement(Demo));
-  const gradeRow = [...container.querySelectorAll('[role="group"]')].find((g) => g.getAttribute("aria-label") === "Grade");
-  const scroller = gradeRow.firstElementChild;
-  assert.ok(scroller.className.includes("overflow-x-auto"), "phone rows scroll horizontally");
-  assert.ok(scroller.className.includes("lg:flex-wrap"), "and wrap at >= 1024");
-  assert.ok(gradeRow.querySelector('[aria-hidden="true"]').className.includes("lg:hidden"), "the edge fade only shows below 1024");
+test("the row is one sideways scroller at every width, and the edge helper decides when arrows show", () => {
+  render(React.createElement(Demo));
+  const scroller = row();
+  assert.ok(scroller.className.includes("flex-nowrap"), "the row is nowrap");
+  assert.ok(!scroller.className.includes("flex-wrap"), "…not wrap");
+  assert.ok(!scroller.className.includes("lg:flex-wrap"), "…and does not wrap at >= 1024 either");
+  assert.ok(scroller.className.includes("overflow-x-auto"), "the row scrolls sideways");
+  assert.ok(scroller.className.includes("[&::-webkit-scrollbar]:hidden"), "with the scrollbar hidden");
+  assert.ok(document.querySelector("[data-filter-row] ~ [aria-hidden=\"true\"]"), "a right-edge fade sits over the row");
 
-  fireEvent.click(chipIn("Grade", "Grade 3"));
-  assert.equal(chipIn("Grade", "Grade 3").getAttribute("aria-pressed"), "true");
-  fireEvent.click(chipIn("Grade", "Grade 3"));
-  assert.equal(chipIn("Grade", "Grade 3").getAttribute("aria-pressed"), "false");
-  assert.equal(resultsHeader(), "Accounts 4 of 4");
+  // Arrows appear only when there is something to scroll to.
+  assert.deepEqual(scrollEdges(0, 500, 300), { left: false, right: true, max: 200 });
+  assert.deepEqual(scrollEdges(200, 500, 300), { left: true, right: false, max: 200 });
+  assert.deepEqual(scrollEdges(100, 500, 300), { left: true, right: true, max: 200 });
+  assert.deepEqual(scrollEdges(0, 300, 300), { left: false, right: false, max: 0 });
 });
 
 test("the list/grid toggle reports its mode with aria-pressed", () => {
@@ -362,13 +454,16 @@ test("the list/grid toggle reports its mode with aria-pressed", () => {
 test("selections persist per screen during the session", () => {
   const first = render(React.createElement(Demo, { screenKey: "persist-demo" }));
   fireEvent.click(chipIn("Role", "Teacher"));
-  fireEvent.click(btn("Locked1"));
-  assert.equal(resultsHeader(), "Accounts 1 of 4");
-  assert.ok(document.body.textContent.includes("Clear all"), "the quick chip shows as an active chip");
+  openFilters();
+  fireEvent.click(panel().querySelector('button[role="switch"][aria-label="Locked"]'));
+  fireEvent.click([...panel().querySelectorAll("button")].find((b) => (b.textContent || "").trim() === "Show 1 results"));
+  assert.equal(resultsCount(), "Accounts 1 of 4");
+  assert.equal(resultsSummary(), "Teacher · Locked", "the summary names both filters");
   first.unmount();
 
   render(React.createElement(Demo, { screenKey: "persist-demo" }));
   assert.equal(chipIn("Role", "Teacher").getAttribute("aria-pressed"), "true", "the category survives a remount");
-  assert.equal(resultsHeader(), "Accounts 1 of 4", "so does the filter selection");
-  assert.ok(document.body.textContent.includes("Clear all"), "active chips survive too");
+  assert.equal(resultsCount(), "Accounts 1 of 4", "so does the filter selection");
+  assert.equal(resultsSummary(), "Teacher · Locked", "the summary survives too");
+  assert.equal(filtersTrigger().getAttribute("aria-label"), "Filters, 1 active");
 });

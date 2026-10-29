@@ -9,6 +9,7 @@ import { CampusPicker } from "../components/CampusPicker";
 import { ChangePasswordForm } from "../components/ChangePassword";
 import { Select } from "../components/Select";
 import AboutView from "./AboutView";
+import { PageFlow } from "../components/PageShell";
 import { SCHOOL } from "../../shared/domain.js";
 import { SECTION_GRADES, gradeCode, parseSection, composeSection } from "../../shared/section.js";
 import { roomById } from "../../shared/campus.js";
@@ -160,9 +161,9 @@ function ProfileEditor({ onBack }: { onBack: () => void }) {
     "mt-1.5 min-h-12 w-full rounded-xl border border-slate-300 px-3 text-base font-normal outline-none focus:border-brand-500";
 
   return (
-    <div className="mx-auto w-full max-w-3xl">
+    <PageFlow width="max-w-3xl" className="px-0 py-0">
       <BackBarFor title="My profile" onBack={back} />
-      <div className="scroll-area min-h-0 flex-1 overflow-y-auto px-4 pb-6 pt-4 space-y-4">
+      <div className="px-4 pb-6 pt-4 space-y-4">
         {/* a. Name */}
         <Card>
           <SectionLabel>Name</SectionLabel>
@@ -305,7 +306,7 @@ function ProfileEditor({ onBack }: { onBack: () => void }) {
           onClose={() => setConfirmDiscard(false)}
         />
       )}
-    </div>
+    </PageFlow>
   );
 }
 
@@ -372,7 +373,7 @@ export default function AccountView({ onBack, openProfileSignal = 0, onProfileOp
   if (screen === "about") return <AboutView onBack={() => setScreen(null)} />;
 
   return (
-    <div className="mx-auto w-full max-w-md">
+    <PageFlow width="max-w-md" className="px-0 py-0">
       {/* When Account is opened from a parent screen (Principal › More), the
           menu itself carries exactly one back bar. */}
       {onBack && <BackBarFor title="Account" onBack={onBack} />}
@@ -424,6 +425,6 @@ export default function AccountView({ onBack, openProfileSignal = 0, onProfileOp
           />
         </Modal>
       )}
-    </div>
+    </PageFlow>
   );
 }

@@ -65,19 +65,16 @@ input::-ms-clear { display: none; }
 .animate-pulse-ring { animation: pulse-ring 1.6s ease-out infinite; }
 
 /* Scroll area utility.
-   `overscroll-behavior: contain` is only applied where the pane has a bounded
-   height (>= 1024). On phones the same class is used on wrappers that are not
-   scrollable, and `contain` on those swallows the swipe instead of letting the
-   page underneath scroll. */
+   `overscroll-behavior` is deliberately left at `auto` at every width: a
+   bounded pane sits INSIDE a scrolling page, so when the pane reaches its end
+   the wheel/touch must chain to the page underneath instead of being swallowed
+   (and vice versa). */
 .scroll-area {
   overflow-y: auto;
   overscroll-behavior: auto;
   scrollbar-width: thin;
   scrollbar-color: rgb(100 116 139 / .45) transparent;
   scroll-padding-top: var(--scroll-sticky-offset, 0px);
-}
-@media (min-width: 1024px) {
-  .scroll-area { overscroll-behavior: contain; }
 }
 .scroll-area::-webkit-scrollbar { width: 8px; }
 .scroll-area::-webkit-scrollbar-thumb {

@@ -1,13 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode, type RefObject } from "react";
-import { ArrowLeft, Building2, ChevronRight, Info, MapPin, User, Users } from "lucide-react";
+import { ArrowLeft, Building2, ChevronRight, MapPin, User, Users } from "lucide-react";
 import { useApp } from "../lib/store";
 import { startOfToday } from "../lib/format";
 import HistorySection from "../components/History";
+import ArchivePage from "../components/ArchivePage";
+import { BoundedPane, PageFlow } from "../components/PageShell";
 import ReportView from "./ReportView";
 import RosterPanel from "./RosterPanel";
 import SafetyView from "./SafetyView";
 import AccountView from "./AccountView";
-import AboutView from "./AboutView";
 import { QueueRow } from "./ResponderView";
 import { IncidentCard } from "../components/Incident";
 import { SchoolMap, type RoomMarker } from "../components/SchoolMap";
@@ -67,7 +68,7 @@ export function CommandPanes({ queue, detail }: { queue: ReactNode; detail: Reac
   return (
     <div
       data-command-panes
-      className="grid min-h-0 w-full min-w-0 flex-1 grid-cols-[minmax(320px,400px)_minmax(0,1fr)] gap-3 overflow-hidden"
+      className="grid h-full min-h-0 w-full min-w-0 grid-cols-[minmax(320px,400px)_minmax(0,1fr)] gap-3 overflow-hidden"
     >
       <section
         aria-label="Active incident command queue"
@@ -436,7 +437,7 @@ export function Command() {
 
   if (!wide) {
     return (
-      <div className="mx-auto flex h-full min-h-0 w-full min-w-0 flex-col gap-3 overflow-hidden px-3 py-3">
+      <PageFlow className="space-y-3">
         {stats}
         {filterBar}
         <Segmented
@@ -447,7 +448,7 @@ export function Command() {
         />
 
         {phonePane === "list" ? (
-          <section className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-xl border border-slate-200 bg-white">
+          <section className="min-w-0 rounded-xl border border-slate-200 bg-white">
             <QueuePane
               incidents={queue}
               selectedId={selectedId}
@@ -459,7 +460,7 @@ export function Command() {
             />
           </section>
         ) : (
-          <section className="min-h-0 min-w-0 flex-1 overflow-y-auto">
+          <section className="min-w-0">
             <MapPane
               incidents={mapIncidents}
               place={place}
@@ -471,51 +472,53 @@ export function Command() {
         )}
 
         {phoneDetail.open && selected && <PhoneDetail inc={selected} onClose={phoneDetail.close} />}
-      </div>
+      </PageFlow>
     );
   }
 
   return (
-    <div className="mx-auto flex h-full min-h-0 w-full min-w-0 flex-col gap-3 overflow-hidden px-3 py-3">
+    <PageFlow className="space-y-3">
       {stats}
       {filterBar}
-      <CommandPanes
-        queue={
-          <QueuePane
-            incidents={queue}
-            selectedId={selectedId}
-            onSelect={openIncident}
-            onKeyDown={onKeyDown}
-            listRef={listRef}
-            title="Active incident command queue"
-            empty={emptyText}
-          />
-        }
-        detail={
-          <>
-            <Segmented
-              label="Command view"
-              value={pane}
-              onChange={setPane}
-              options={[{ id: "details", label: "Details" }, { id: "map", label: "Map" }]}
+      <BoundedPane label="Incident command">
+        <CommandPanes
+          queue={
+            <QueuePane
+              incidents={queue}
+              selectedId={selectedId}
+              onSelect={openIncident}
+              onKeyDown={onKeyDown}
+              listRef={listRef}
+              title="Active incident command queue"
+              empty={emptyText}
             />
-            {pane === "details" ? (
-              <DetailsPane inc={selected} empty={EMPTY_QUEUE} />
-            ) : (
-              <div className="scroll-area min-h-0 min-w-0 flex-1 overflow-y-auto p-3">
-                <MapPane
-                  incidents={mapIncidents}
-                  place={place}
-                  onPickPlace={setPlace}
-                  selectedId={selectedId}
-                  onPickIncident={openIncident}
-                />
-              </div>
-            )}
-          </>
-        }
-      />
-    </div>
+          }
+          detail={
+            <>
+              <Segmented
+                label="Command view"
+                value={pane}
+                onChange={setPane}
+                options={[{ id: "details", label: "Details" }, { id: "map", label: "Map" }]}
+              />
+              {pane === "details" ? (
+                <DetailsPane inc={selected} empty={EMPTY_QUEUE} />
+              ) : (
+                <div className="scroll-area min-h-0 min-w-0 flex-1 overflow-y-auto p-3">
+                  <MapPane
+                    incidents={mapIncidents}
+                    place={place}
+                    onPickPlace={setPlace}
+                    selectedId={selectedId}
+                    onPickIncident={openIncident}
+                  />
+                </div>
+              )}
+            </>
+          }
+        />
+      </BoundedPane>
+    </PageFlow>
   );
 }
 
@@ -531,25 +534,24 @@ function BackBar({ title, onBack }: { title: string; onBack: () => void }) {
 }
 
 function More() {
-  const [screen, setScreen] = useState<"menu" | "roster" | "about" | "account">("menu");
+  const [screen, setScreen] = useState<"menu" | "roster" | "account">("menu");
   const items = [
     { id: "roster" as const, label: "Teacher roster", hint: "Sections, rooms and registries", icon: Users },
-    { id: "about" as const, label: "About ASPIRE", hint: "Purpose, privacy, version", icon: Info },
-    { id: "account" as const, label: "Account", hint: "Password and sign out", icon: User },
+    { id: "account" as const, label: "Account", hint: "Password, About and sign out", icon: User },
   ];
   const shell = (title: string, node: ReactNode) => (
-    <div className="flex flex-col lg:h-full lg:min-h-0">
+    <div className="flex flex-col">
       <div className="shrink-0"><BackBar title={title} onBack={() => setScreen("menu")} /></div>
-      <div className="lg:min-h-0 lg:flex-1">{node}</div>
+      <div>{node}</div>
     </div>
   );
-  // Only "roster" keeps the shell: AboutView and AccountView carry their own
-  // single back bar, so wrapping them here would render two.
+  // Only "roster" keeps the shell: AccountView carries its own single back bar,
+  // so wrapping it here would render two. About lives inside Account > About
+  // ASPIRE, like every other role.
   if (screen === "roster") return shell("Teacher roster", <RosterPanel />);
-  if (screen === "about") return <AboutView onBack={() => setScreen("menu")} />;
   if (screen === "account") return <AccountView onBack={() => setScreen("menu")} />;
   return (
-    <div className="scroll-area mx-auto w-full max-w-md space-y-2 px-3 py-3 lg:h-full lg:overflow-y-auto">
+    <PageFlow width="max-w-md" className="space-y-2">
       {items.map((it) => (
         <button key={it.id} onClick={() => setScreen(it.id)}
           className="flex min-h-16 w-full items-center gap-3 rounded-2xl border border-slate-200 bg-white px-4 text-left">
@@ -561,7 +563,18 @@ function More() {
           <ChevronRight size={18} className="shrink-0 text-slate-400" />
         </button>
       ))}
-    </div>
+    </PageFlow>
+  );
+}
+
+/** History tab: the live record, plus the dedicated archived-records page. */
+function HistoryTab() {
+  const [archive, setArchive] = useState(false);
+  if (archive) return <ArchivePage title="Archived records" backLabel="History" onBack={() => setArchive(false)} />;
+  return (
+    <PageFlow width="max-w-3xl">
+      <HistorySection title="Incident history (official record)" onOpenArchive={() => setArchive(true)} />
+    </PageFlow>
   );
 }
 
@@ -571,7 +584,7 @@ export default function PrincipalView({ tab }: { tab: PrincipalTab }) {
       {tab === "command" && <Command />}
       {tab === "report" && <ReportView />}
       {tab === "safety" && <SafetyView />}
-      {tab === "history" && <div className="scroll-area mx-auto w-full max-w-3xl px-3 py-3 lg:h-full lg:overflow-y-auto"><HistorySection title="Incident history (official record)" /></div>}
+      {tab === "history" && <HistoryTab />}
       {tab === "more" && <More />}
     </>
   );

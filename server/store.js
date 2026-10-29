@@ -44,6 +44,21 @@ export function normalize(d) {
   d.audit = Array.isArray(d.audit) ? d.audit : [];
   d.configs = Array.isArray(d.configs) ? d.configs : [];
   d.schoolYear = d.schoolYear && Number.isFinite(d.schoolYear.count) ? d.schoolYear : { count: 0, startedAt: null };
+  // Archive / purge layers (see server/retention.js). Backfilled so an old data
+  // file keeps working: "inactive" is the long-standing deactivated state, and
+  // "deactivated" is accepted as its alias so older/newer files interoperate.
+  const ACCOUNT_STATUSES = ["active", "inactive", "deactivated", "archived", "purged"];
+  for (const a of d.accounts) {
+    if (!ACCOUNT_STATUSES.includes(a.status)) a.status = "active";
+    a.archivedAt ??= null;
+    a.archivedBy ??= null;
+    a.archiveReason ??= null;
+    a.purgedAt ??= null;
+    // Per-user "remove from my list" bookkeeping, capped so the document stays small.
+    a.hiddenIncidentIds = Array.isArray(a.hiddenIncidentIds)
+      ? a.hiddenIncidentIds.filter((x) => typeof x === "string").slice(0, 500)
+      : [];
+  }
   for (const r of d.roster) {
     if (!Number.isInteger(r.registry)) r.registry = 30;
     r.registryUpdatedAt ??= null; // when today's registry was last set (profile / roster edit)
@@ -69,13 +84,23 @@ export function normalize(d) {
     i.drillId ??= null;
     i.interactions ??= 0;
     i.eta ??= null;
+    // Step timestamps are write-once: normalisation only fills gaps, never resets.
+    i.seenAt ??= null;
     i.enRouteAt ??= null;
     i.onSiteAt ??= null;
+    i.resolvedAt ??= null;
     i.firstHeadcountAt ??= null;
     i.hiddenBy ??= [];
     // Which configuration version scored this ticket (stamped on creation, never recomputed).
     i.configId ??= null;
     i.configVersion ??= null;
+    // Archive layer: set by the Principal or by the retention sweep, never a delete.
+    i.archivedAt ??= null;
+    i.archivedBy ??= null;
+    i.archiveReason ??= null;
+    i.archivedAuto ??= false;
+    // Set by an Admin purge: personal data erased, anonymous statistics kept.
+    i.anonymizedAt ??= null;
   }
   return d;
 }
@@ -141,12 +166,14 @@ export function createStore({ dataDir, onPersistError = console.error } = {}) {
       db = normalize({ ...freshDb(), roster, accounts, sessions, audit, schoolYear, configs, version: db.version });
       save();
     },
-    // Keep the incident list from growing forever: drop resolved tickets older than `keepDays` (default 90).
+    // Keep the incident list from growing forever: drop live resolved tickets
+    // older than `keepDays` (default 90). ARCHIVED records are never pruned —
+    // they are the official record and only leave through the Admin purge.
     prune(now = Date.now(), keepDays = 90) {
       const cutoff = now - keepDays * 24 * 3600 * 1000;
       const idCutoff = now - 7 * 24 * 3600 * 1000;
       const before = db.incidents.length;
-      db.incidents = db.incidents.filter((i) => i.status !== "RESOLVED" || (i.resolvedAt || i.createdAt) > cutoff);
+      db.incidents = db.incidents.filter((i) => i.archivedAt || i.status !== "RESOLVED" || (i.resolvedAt || i.createdAt) > cutoff);
       for (const k of Object.keys(db.clientIds)) if (db.clientIds[k].at < idCutoff) delete db.clientIds[k];
       return before !== db.incidents.length;
     },

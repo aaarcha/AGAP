@@ -20,7 +20,8 @@ const ADMIN_PASSWORD = "Sinalhan-SchoolHead-2026!";
 const slug = (s) => String(s).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
 const emailFor = (role, accountId) => {
   if (role === "principal") return "principal@sinalhanes.deped.ph";
-  if (role === "responder") return "responder@sinalhanes.deped.ph";
+  if (role === "responder") return "barangay@sinalhanes.deped.ph";
+  if (role === "cdrrmo") return "cdrrmo@sinalhanes.deped.ph";
   if (role === "super_admin") return ADMIN_EMAIL;
   if (role === "teacher") return `${accountId}@sinalhanes.deped.ph`;
   if (role === "parent") return `parent-${slug(accountId)}@sinalhanes.deped.ph`;
@@ -247,8 +248,11 @@ test("teacher profile edits and roster CRUD are reflected for the principal inst
   assert.equal(blocked.json.message, "Invalid email or password.", "generic error – no account enumeration");
   assert.equal((await s.call("GET", "/api/state", { token: newTeacherTok })).status, 401, "existing session is cut off");
   await s.call("PUT", `/api/roster/${newId}`, { token: principal, body: { status: "active" } });
-  await s.call("DELETE", `/api/roster/${newId}`, { token: principal });
-  assert.equal((await s.call("GET", "/api/state", { token: principal })).json.roster.some((r) => r.id === newId), false);
+  // Deleting is gone: the roster entry is ARCHIVED instead (reversible from the Admin console).
+  assert.equal((await s.call("DELETE", `/api/roster/${newId}`, { token: principal })).status, 404, "DELETE /api/roster/:id is not a route");
+  const archived = await s.call("POST", `/api/roster/${newId}/archive`, { token: principal, body: { reason: "Transferred" } });
+  assert.equal(archived.status, 200, "the Principal can archive a teacher");
+  assert.equal((await s.call("GET", "/api/state", { token: principal })).json.roster.some((r) => r.id === newId), false, "archived teachers leave the live roster");
   assert.equal((await s.call("GET", "/api/state", { token: newTeacherTok })).status, 401);
   void parentOld;
   await s.close();
@@ -368,6 +372,9 @@ test("cancel is blocked once a responder is on site or when others corroborated 
   const t1 = await s.login("teacher", "t1");
   const responder = await s.login("responder");
   const a = (await s.call("POST", "/api/incidents", { token: t1, body: report() })).json.incident;
+  // Strict order: on site needs an acknowledgement first.
+  assert.equal((await s.call("POST", `/api/incidents/${a.id}/onsite`, { token: responder })).status, 409);
+  await s.call("POST", `/api/incidents/${a.id}/ack`, { token: responder, body: {} });
   await s.call("POST", `/api/incidents/${a.id}/onsite`, { token: responder });
   assert.equal((await s.call("POST", `/api/incidents/${a.id}/cancel`, { token: t1 })).status, 409);
   await s.call("POST", `/api/incidents/${a.id}/resolve`, { token: responder, body: {} });
@@ -383,49 +390,70 @@ test("cancel is blocked once a responder is on site or when others corroborated 
   await s.close();
 });
 
-test("history: principal deletes permanently; other roles only clear their own view", async () => {
+// ---------------------------------------------------------------- no deletes
+const { fileURLToPath } = await import("node:url");
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+
+test("no API route accepts DELETE and the old delete helpers no longer exist", async () => {
   const s = await boot();
   const teacher = await s.login("teacher", "t1");
   const principal = await s.login("principal");
-  const responder = await s.login("responder");
+  const admin = await s.loginSuper();
   const parent = await s.login("parent", "Grade 3 - Sec A");
+  const responder = await s.login("responder");
   const open = (await s.call("POST", "/api/incidents", { token: teacher, body: report() })).json.incident;
 
-  // open incidents cannot be deleted
-  for (const tok of [teacher, principal, responder, parent]) {
-    assert.equal((await s.call("DELETE", `/api/incidents/${open.id}`, { token: tok })).status, 409);
+  const paths = [
+    "/api/history", `/api/incidents/${open.id}`, "/api/roster/t1", "/api/admin/reset",
+    "/api/admin/audit", "/api/admin/accounts", "/api/incidents",
+  ];
+  for (const p of paths) {
+    for (const [name, tok] of [["teacher", teacher], ["principal", principal], ["admin", admin], ["parent", parent], ["responder", responder]]) {
+      const r = await s.call("DELETE", p, { token: tok });
+      assert.equal(r.status, 404, `DELETE ${p} as ${name} must not be a route (got ${r.status})`);
+    }
+    // Anonymous traffic is stopped by the auth gate before routing — never served.
+    assert.equal((await s.call("DELETE", p)).status, 401, `DELETE ${p} as anon is rejected`);
   }
-  await s.call("POST", `/api/incidents/${open.id}/resolve`, { token: responder, body: { outcome: "resolved" } });
-
-  // a parent from another section can't touch it
-  const stranger = await s.login("parent", "Grade 4 - Sec B");
-  assert.equal((await s.call("DELETE", `/api/incidents/${open.id}`, { token: stranger })).status, 404);
-
-  // teacher hides -> gone for teacher only
-  assert.equal((await s.call("DELETE", `/api/incidents/${open.id}`, { token: teacher })).json.mode, "hidden");
-  assert.equal((await s.call("GET", "/api/state", { token: teacher })).json.incidents.length, 0);
-  for (const tok of [principal, responder, parent]) {
-    assert.equal((await s.call("GET", "/api/state", { token: tok })).json.incidents.length, 1);
-  }
-  // responder + parent clear their history
-  assert.equal((await s.call("DELETE", "/api/history", { token: responder })).json.count, 1);
-  assert.equal((await s.call("DELETE", `/api/incidents/${open.id}`, { token: parent })).status, 200);
-  assert.equal((await s.call("GET", "/api/state", { token: responder })).json.incidents.length, 0);
-  assert.equal((await s.call("GET", "/api/state", { token: parent })).json.incidents.length, 0);
-  // principal still has the record until they delete it permanently
-  assert.equal((await s.call("GET", "/api/state", { token: principal })).json.incidents.length, 1);
-  assert.equal((await s.call("DELETE", `/api/incidents/${open.id}`, { token: principal })).json.mode, "permanent");
-  assert.equal((await s.call("GET", "/api/state", { token: principal })).json.incidents.length, 0);
-
-  // clear-all as principal wipes only closed incidents
-  const a = (await s.call("POST", "/api/incidents", { token: teacher, body: report() })).json.incident;
-  const b = (await s.call("POST", "/api/incidents", { token: teacher, body: report({ categoryId: "medical", subId: "heatstroke" }) })).json.incident;
-  await s.call("POST", `/api/incidents/${a.id}/resolve`, { token: principal, body: {} });
-  const cleared = await s.call("DELETE", "/api/history", { token: principal });
-  assert.equal(cleared.json.count, 1);
-  const left = (await s.call("GET", "/api/state", { token: principal })).json.incidents;
-  assert.deepEqual(left.map((i) => i.id), [b.id]);
+  // …and nothing was removed by those attempts.
+  assert.equal((await s.call("GET", "/api/state", { token: principal })).json.incidents.length, 1, "the record survives every DELETE attempt");
   await s.close();
+
+  // The client store no longer exports deleteTeacher / deleteIncident / clearHistory.
+  const storeSrc = fs.readFileSync(path.join(ROOT, "src/lib/store.tsx"), "utf8");
+  for (const gone of ["deleteTeacher", "deleteIncident", "clearHistory"]) {
+    assert.equal(storeSrc.includes(gone), false, `${gone} must be gone from src/lib/store.tsx`);
+  }
+  assert.equal(/method:\s*"DELETE"/.test(storeSrc), false, "the client never sends DELETE");
+});
+
+test("the demo reset is off by default, refused without the flag and refused in production", async () => {
+  // 1. off by default
+  const off = await boot();
+  const p1 = await off.login("principal");
+  const offRes = await off.call("POST", "/api/admin/reset", { token: p1 });
+  assert.equal(offRes.status, 403, "reset is refused when allowReset is false");
+  assert.match(offRes.json.message, /disabled/i);
+  await off.close();
+
+  // 2. allowed when the flag is on
+  const on = await boot({ allowReset: true });
+  const p2 = await on.login("principal");
+  assert.equal((await on.call("POST", "/api/admin/reset", { token: p2 })).status, 200, "reset runs when allowReset is on");
+  await on.close();
+
+  // 3. refused in production even with the flag on
+  const prev = process.env.NODE_ENV;
+  process.env.NODE_ENV = "production";
+  try {
+    const prod = await boot({ allowReset: true });
+    const p3 = await prod.login("principal");
+    assert.equal((await prod.call("POST", "/api/admin/reset", { token: p3 })).status, 403, "refused when NODE_ENV=production");
+    await prod.close();
+  } finally {
+    if (prev === undefined) delete process.env.NODE_ENV;
+    else process.env.NODE_ENV = prev;
+  }
 });
 
 test("old resolved incidents are pruned only after the retention window", async () => {
@@ -844,7 +872,7 @@ test("school-year rollover issues temporary credentials, forces a new password a
   const roll = await s.call("POST", "/api/admin/school-year/start", { token: admin });
   assert.equal(roll.status, 200);
   assert.equal(roll.json.year, 1);
-  assert.equal(roll.json.accounts.length, 8, "every non-admin account (3 teachers, principal, responder, 3 parents) is rolled over");
+  assert.equal(roll.json.accounts.length, 9, "every non-admin account (3 teachers, principal, 2 responders, 3 parents) is rolled over");
   assert.equal((await s.call("GET", "/api/state", { token: teacher2 })).status, 401, "existing sessions are invalidated");
 
   const entry = roll.json.accounts.find((a) => a.email === emailFor("teacher", "t1"));
@@ -1411,5 +1439,95 @@ test("a new teacher whose registry is 28 and who reports 28 present gets no mism
   assert.equal(inc.headcounts[0].expected, 28, "expected comes from the updated registry");
   assert.notEqual(inc.accountability.status, "mismatch");
   assert.equal(inc.accountability.status, "verified");
+  await s.close();
+});
+
+test("status steps only move forward and every step timestamp is locked after its first write", async () => {
+  let t = Date.now();
+  const s = await boot({ now: () => t, autoTick: false });
+  const teacher = await s.login("teacher", "t1");
+  const responder = await s.login("responder");
+  const principal = await s.login("principal");
+  const { incident } = (await s.call("POST", "/api/incidents", { token: teacher, body: report() })).json;
+  const id = incident.id;
+  assert.equal(incident.status, "SENT");
+  assert.deepEqual(
+    [incident.seenAt, incident.enRouteAt, incident.onSiteAt, incident.resolvedAt],
+    [null, null, null, null],
+    "nothing is stamped before a step happens",
+  );
+
+  // On site cannot skip the acknowledgement that comes before it.
+  const skipped = await s.call("POST", `/api/incidents/${id}/onsite`, { token: responder });
+  assert.equal(skipped.status, 409);
+  assert.equal(skipped.json.error, "out_of_order");
+  assert.equal((await s.call("GET", "/api/state", { token: responder })).json.incidents[0].status, "SENT", "the refused step changed nothing");
+
+  t += 1000;
+  const seen = (await s.call("POST", `/api/incidents/${id}/seen`, { token: responder })).json.incident;
+  assert.equal(seen.status, "SEEN");
+  assert.equal(seen.seenAt, t, "Seen is stamped when it happens");
+  t += 1000;
+  const seenAgain = (await s.call("POST", `/api/incidents/${id}/seen`, { token: responder })).json;
+  assert.equal(seenAgain.changed, false, "Seen is not re-triggered");
+  assert.equal(seenAgain.incident.seenAt, seen.seenAt, "the seen timestamp never moves");
+
+  t += 1000;
+  const ack = (await s.call("POST", `/api/incidents/${id}/ack`, {
+    token: responder, body: { mode: "walking", distanceKm: 1 },
+  })).json.incident;
+  assert.equal(ack.status, "EN_ROUTE");
+  assert.equal(ack.enRouteAt, t, "En route is stamped when it happens");
+  assert.equal(ack.responses.barangay.ackAt, t);
+  const logLength = ack.log.length;
+
+  t += 1000;
+  const reAck = await s.call("POST", `/api/incidents/${id}/ack`, {
+    token: responder, body: { mode: "vehicle", distanceKm: 3 },
+  });
+  assert.equal(reAck.json.changed, false, "an org that already acknowledged cannot acknowledge again");
+  const afterAck = reAck.json.incident;
+  assert.equal(afterAck.enRouteAt, ack.enRouteAt, "the en route timestamp is locked");
+  assert.equal(afterAck.responses.barangay.ackAt, ack.responses.barangay.ackAt, "the org acknowledgement time is locked");
+  assert.equal(afterAck.responses.barangay.mode, "walking", "the first transport and ETA are kept");
+  assert.equal(afterAck.log.length, logLength, "no duplicate en route entry is written");
+
+  t += 1000;
+  const onsite = (await s.call("POST", `/api/incidents/${id}/onsite`, { token: responder })).json.incident;
+  assert.equal(onsite.status, "ON_SITE");
+  assert.equal(onsite.onSiteAt, t, "On site is stamped when it happens");
+
+  t += 1000;
+  const onsiteAgain = (await s.call("POST", `/api/incidents/${id}/onsite`, { token: responder })).json;
+  assert.equal(onsiteAgain.changed, false, "On site is not re-triggered");
+  assert.equal(onsiteAgain.incident.onSiteAt, onsite.onSiteAt, "the on site timestamp never moves");
+
+  // The ticket-level steps never go backwards: an earlier action is a no-op.
+  const earlier = (await s.call("POST", `/api/incidents/${id}/ack`, { token: principal, body: {} })).json;
+  assert.equal(earlier.changed, false, "Acknowledge cannot be re-triggered after the ticket moved on");
+  assert.equal(earlier.incident.status, "ON_SITE", "the ticket stays on site");
+  assert.equal(earlier.incident.enRouteAt, onsite.enRouteAt);
+
+  t += 1000;
+  const done = (await s.call("POST", `/api/incidents/${id}/resolve`, { token: principal, body: { outcome: "resolved" } })).json.incident;
+  assert.equal(done.status, "RESOLVED");
+  assert.equal(done.resolvedAt, t, "Resolved is stamped when it happens");
+  assert.equal(done.metrics.toAckMs, done.enRouteAt - done.createdAt, "the recorded acknowledgment duration is fixed");
+  assert.equal(done.metrics.toOnSiteMs, done.onSiteAt - done.createdAt, "the recorded on-site duration is fixed");
+
+  t += 1000;
+  for (const action of ["ack", "onsite", "resolve"]) {
+    const late = await s.call("POST", `/api/incidents/${id}/${action}`, { token: principal, body: {} });
+    assert.equal(late.status, 409, `${action} after resolution is refused`);
+  }
+  const lateSeen = (await s.call("POST", `/api/incidents/${id}/seen`, { token: principal })).json;
+  assert.equal(lateSeen.changed, false, "Seen cannot reopen a closed ticket");
+  assert.equal(lateSeen.incident.seenAt, seen.seenAt);
+  const final = (await s.call("GET", "/api/state", { token: principal })).json.incidents.find((i) => i.id === id);
+  assert.deepEqual(
+    [final.seenAt, final.enRouteAt, final.onSiteAt, final.resolvedAt],
+    [seen.seenAt, ack.enRouteAt, onsite.onSiteAt, done.resolvedAt],
+    "no later call moved a single step timestamp",
+  );
   await s.close();
 });

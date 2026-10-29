@@ -1,18 +1,21 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { useMediaQuery } from "../lib/hooks";
 import { Check } from "lucide-react";
 import { STATUS_LABEL, bandFor } from "../../shared/domain.js";
 import { useApp } from "../lib/store";
 import type { Incident } from "../lib/types";
 import { BAND_STYLE, catTheme } from "../lib/theme";
-import { EscalationTable, IncidentCard } from "../components/Incident";
+import { IncidentCard } from "../components/Incident";
+import Escalation from "../components/Escalation";
+import HistorySection from "../components/History";
+import ArchivePage from "../components/ArchivePage";
 import { MasterDetail } from "../components/MasterDetail";
 import { FilterBar } from "../components/FilterBar";
 import { filterQueue, incidentFilterBarProps } from "../lib/command";
 import { initialFilterState, useFilterState } from "../lib/filters";
-import HistorySection from "../components/History";
 import { RouteControl } from "../components/Rules";
 import AccountView from "./AccountView";
+import { BoundedPane, PageFlow } from "../components/PageShell";
 import type { ResponderTab } from "../lib/navigation";
 
 export type { ResponderTab };
@@ -79,16 +82,35 @@ export default function ResponderView({ tab }: { tab: ResponderTab }) {
   return (
     <>
       {tab === "queue" && (
-        <div className={`mx-auto flex w-full ${wide ? "max-w-7xl" : "max-w-3xl"} flex-col gap-3 px-3 py-3 lg:h-full lg:min-h-0`}>
-          <div className={`shrink-0 ${wide ? "" : "max-w-xl"}`}><RouteControl /></div>
-          <div className="lg:min-h-0 lg:flex-1">
+        <PageFlow width={wide ? "max-w-7xl" : "max-w-3xl"} className="space-y-3">
+          <div className={wide ? "" : "max-w-xl"}><RouteControl /></div>
+          <BoundedPane label="Priority dispatch queue">
             <IncidentQueue incidents={incidents} title="Priority dispatch queue" empty="No active dispatches." />
-          </div>
-        </div>
+          </BoundedPane>
+        </PageFlow>
       )}
-      {tab === "history" && <div className={`scroll-area mx-auto w-full ${wide ? "max-w-5xl" : "max-w-3xl"} px-3 py-3 lg:h-full lg:overflow-y-auto`}><HistorySection title="Incident history" /></div>}
-      {tab === "ref" && <div className={`scroll-area mx-auto w-full ${wide ? "max-w-5xl" : "max-w-2xl"} px-3 py-3 lg:h-full lg:overflow-y-auto`}><EscalationTable /></div>}
+      {tab === "escalation" && (
+        <PageFlow width={wide ? "max-w-3xl" : "max-w-2xl"}>
+          <Escalation />
+        </PageFlow>
+      )}
+      {tab === "history" && <ResponderHistory wide={wide} />}
       {tab === "account" && <AccountView />}
     </>
+  );
+}
+
+/**
+ * History tab: the record of closed work plus the dedicated archived-records
+ * page. It is a sub-screen of this tab — leaving History unmounts the archive,
+ * the same way the Principal's History works.
+ */
+function ResponderHistory({ wide }: { wide: boolean }) {
+  const [archive, setArchive] = useState(false);
+  if (archive) return <ArchivePage title="Archived records" backLabel="History" onBack={() => setArchive(false)} />;
+  return (
+    <PageFlow width={wide ? "max-w-4xl" : "max-w-3xl"}>
+      <HistorySection title="Incident history (official record)" onOpenArchive={() => setArchive(true)} />
+    </PageFlow>
   );
 }

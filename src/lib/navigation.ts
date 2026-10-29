@@ -39,19 +39,22 @@ export const PRINCIPAL_TABS: NavTab<PrincipalTab>[] = [
   { id: "more", label: "More", icon: Menu },
 ];
 
-export type ResponderTab = "queue" | "history" | "ref" | "account";
+// Responders get four tabs: their open dispatches, their hotline/agency content
+// (Escalation, the only screen that shows contact numbers) and the record of
+// closed and archived work.
+export type ResponderTab = "queue" | "escalation" | "history" | "account";
 export const RESPONDER_TABS: NavTab<ResponderTab>[] = [
   { id: "queue", label: "Queue", icon: Radio },
+  { id: "escalation", label: "Escalation", icon: BookOpen },
   { id: "history", label: "History", icon: HistoryIcon },
-  { id: "ref", label: "Escalation", icon: BookOpen },
   { id: "account", label: "Account", icon: User },
 ];
 
 export type AdminTab = "accounts" | "audit" | "schoolyear" | "config" | "account";
 export const ADMIN_TABS: NavTab<AdminTab>[] = [
-  { id: "accounts", label: "Accounts", icon: Users },
+  { id: "accounts", label: "Users", icon: Users },
   { id: "audit", label: "Audit", icon: ClipboardList },
   { id: "schoolyear", label: "Year", icon: Calendar },
-  { id: "config", label: "Configuration", icon: SlidersHorizontal },
-  { id: "account", label: "Account", icon: User },
+  { id: "config", label: "System Settings", icon: SlidersHorizontal },
+  { id: "account", label: "Profile", icon: User },
 ];

@@ -90,6 +90,7 @@ w.matchMedia = (query) => {
 const NOW = Date.now();
 const HOUR = 3_600_000;
 const DAY = 86_400_000;
+const START_OF_TODAY = new Date(NOW).setHours(0, 0, 0, 0);
 const AUDIT_ENTRIES = [
   { at: NOW - HOUR, action: "login", by: "Sys Admin", target: null, detail: "", ip: "127.0.0.1" },
   { at: NOW - 10 * DAY, action: "account.create", by: "Sys Admin", target: "reyes@school.test", detail: "", ip: "127.0.0.1" },
@@ -137,8 +138,38 @@ const USERS = {
 
 /** The FilterBar's (or the audit tab's) live results header, e.g. "Teachers 1 of 3". */
 function resultsText() {
-  const p = document.querySelector('[aria-live="polite"] p, p[aria-live="polite"]');
-  return (p?.textContent ?? "").trim();
+  const el = document.querySelector("[data-results]") ?? document.querySelector('p[aria-live="polite"]');
+  return (el?.textContent ?? "").trim();
+}
+
+/** The short active-filter summary under the row ("Grade 4 · Locked"). */
+function summaryText() {
+  const el = document.querySelector("[data-filter-summary]");
+  return el ? (el.textContent || "").replace(/^\s*·\s*/, "").trim() : "";
+}
+
+/** Open the Filters icon button (the row's first item). */
+function openFilters() {
+  const b = [...document.querySelectorAll("button[aria-label]")]
+    .find((x) => (x.getAttribute("aria-label") || "").startsWith("Filters"));
+  assert.ok(b, "the Filters icon button is on screen");
+  fireEvent.click(b);
+}
+
+/** Toggle one quick filter row inside the panel (Locked, Drill, Escalated…). */
+function toggleInPanel(label) {
+  const b = [...document.querySelectorAll('button[role="switch"]')]
+    .find((x) => (x.getAttribute("aria-label") || "") === label);
+  assert.ok(b, `the "${label}" toggle is in the Filters panel`);
+  fireEvent.click(b);
+  return b;
+}
+
+/** Close the panel with its "Show N results" footer button. */
+function closeFilters() {
+  const b = [...document.querySelectorAll("button")].find((x) => /^Show \d+ results$/.test((x.textContent || "").trim()));
+  assert.ok(b, "the panel's Show N results button exists");
+  fireEvent.click(b);
 }
 
 /** Buttons inside one chip row (role=group with that aria-label). */
@@ -259,7 +290,7 @@ test("My Reports: status chips filter the teacher's own open reports", async () 
   assert.ok(!document.body.textContent.includes("Fever in Grade 3"), "the SENT report is filtered out");
 });
 
-test("Command queue: Drill and Escalated quick chips narrow the queue", async () => {
+test("Command queue: the Drill and Escalated toggles in the Filters panel narrow the queue", async () => {
   __resetCtx({
     user: USERS.principal,
     incidents: [
@@ -273,22 +304,28 @@ test("Command queue: Drill and Escalated quick chips narrow the queue", async ()
   assert.equal(resultsText(), "Incidents 3 of 3");
   assert.equal(document.querySelectorAll("[data-incident-id]").length, 3, "three queue rows");
 
-  const drill = clickQuick("Drill");
-  assert.equal(drill.getAttribute("aria-pressed"), "true");
+  openFilters();
+  const drill = toggleInPanel("Drill");
+  assert.equal(drill.getAttribute("aria-checked"), "true");
   assert.equal(resultsText(), "Incidents 1 of 3");
+  assert.equal(summaryText(), "Drill", "the header summarises the active filter");
   const rows = document.querySelectorAll("[data-incident-id]");
   assert.equal(rows.length, 1, "only the drill stays in the queue");
   assert.ok(rows[0].textContent.includes("Fire drill"));
 
-  clickQuick("Drill");
+  toggleInPanel("Drill");
+  closeFilters();
   assert.equal(resultsText(), "Incidents 3 of 3");
+  assert.equal(summaryText(), "");
 
-  clickQuick("Escalated");
+  openFilters();
+  toggleInPanel("Escalated");
+  closeFilters();
   assert.equal(resultsText(), "Incidents 1 of 3");
   assert.ok(document.querySelector("[data-incident-id]").textContent.includes("Escalated fire"));
 });
 
-test("Responder queue: quick chips filter the dispatch list", async () => {
+test("Responder queue: the Escalated toggle in the Filters panel filters the dispatch list", async () => {
   __resetCtx({
     user: USERS.responder,
     incidents: [
@@ -302,44 +339,55 @@ test("Responder queue: quick chips filter the dispatch list", async () => {
   assert.equal(resultsText(), "Incidents 3 of 3");
   assert.equal(listOf("Priority dispatch queue — select a ticket").querySelectorAll("li").length, 3);
 
-  clickQuick("Escalated");
+  openFilters();
+  toggleInPanel("Escalated");
+  closeFilters();
   assert.equal(resultsText(), "Incidents 1 of 3");
   const items = listOf("Priority dispatch queue — select a ticket").querySelectorAll("li");
   assert.equal(items.length, 1, "only the escalated dispatch is listed");
   assert.ok(items[0].textContent.includes("Escalated flood"));
 
-  clickQuick("Escalated");
+  openFilters();
+  toggleInPanel("Escalated");
+  closeFilters();
   assert.equal(resultsText(), "Incidents 3 of 3");
 });
 
-test("Admin accounts: the role row and the Locked quick chip filter the list", async () => {
+test("Admin accounts: the role row and the Locked toggle filter the list", async () => {
   __resetCtx({ user: USERS.super_admin });
   render(React.createElement(App));
 
-  await waitFor(() => assert.equal(resultsText(), "Accounts 4 of 4"));
-  assert.equal(listOf("Accounts — select an account").querySelectorAll("li").length, 4);
+  await waitFor(() => assert.equal(resultsText(), "Users 4 of 4"));
+  assert.equal(listOf("Users — select a user").querySelectorAll("li").length, 4);
 
   clickChip("Role", "Teacher");
-  assert.equal(resultsText(), "Accounts 2 of 4");
+  assert.equal(resultsText(), "Users 2 of 4");
   assert.ok(document.body.textContent.includes("Mr. Dizon"));
   assert.ok(!document.body.textContent.includes("PTA Grade 3"), "non-teachers are filtered out");
 
-  clickQuick("Locked");
-  assert.equal(resultsText(), "Accounts 1 of 4");
-  const items = listOf("Accounts — select an account").querySelectorAll("li");
+  openFilters();
+  toggleInPanel("Locked");
+  closeFilters();
+  assert.equal(resultsText(), "Users 1 of 4");
+  assert.equal(summaryText(), "Teacher · Locked", "the header summarises both filters");
+  const items = listOf("Users — select a user").querySelectorAll("li");
   assert.equal(items.length, 1, "only the locked teacher remains");
   assert.ok(items[0].textContent.includes("Mr. Dizon"));
 
-  clickQuick("Locked");
+  openFilters();
+  toggleInPanel("Locked");
+  closeFilters();
   clickChip("Role", "All");
-  assert.equal(resultsText(), "Accounts 4 of 4");
+  assert.equal(resultsText(), "Users 4 of 4");
 });
 
 test("My Reports: the period chips filter the record history", async () => {
   __resetCtx({
     user: USERS.teacher,
     incidents: [
-      inc("h1", { status: "RESOLVED", outcome: "resolved", resolvedAt: NOW - HOUR, subLabel: "Closed today" }),
+      // Anchored to the start of today, so the "Today" period cannot flip to
+      // yesterday when the suite happens to run just after midnight.
+      inc("h1", { status: "RESOLVED", outcome: "resolved", resolvedAt: START_OF_TODAY + HOUR, subLabel: "Closed today" }),
       inc("h2", { status: "RESOLVED", outcome: "resolved", resolvedAt: NOW - 10 * DAY, subLabel: "Closed last week" }),
     ],
   });

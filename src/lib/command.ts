@@ -254,13 +254,9 @@ export function incidentFilterBarProps({
         ...INCIDENT_CATEGORIES.map((c) => ({ ...c, count: countOf(catCounts, c.value) })),
       ],
     },
+    // Quick toggles are the shortcuts; Tier and Status are the dropdowns below
+    // them in the panel, so they are not repeated here.
     quickChips: [
-      ...INCIDENT_TIERS.map((t) => ({
-        label: t.label,
-        count: countOf(tierCounts, t.value),
-        active: isGroupSelected(state, "tier", t.value),
-        onToggle: () => toggle("tier", t.value),
-      })),
       { label: "Escalated", count: countOf(escCounts, "yes"), active: isGroupSelected(state, "escalated", "yes"), onToggle: () => toggle("escalated", "yes") },
       { label: "Drill", count: countOf(drillCounts, "yes"), active: isGroupSelected(state, "drill", "yes"), onToggle: () => toggle("drill", "yes") },
     ],
@@ -268,8 +264,6 @@ export function incidentFilterBarProps({
       groups: [
         { id: "tier", label: "Tier", options: INCIDENT_TIERS.map((t) => ({ ...t, count: countOf(tierCounts, t.value), disabled: countOf(tierCounts, t.value) === 0 && !isGroupSelected(state, "tier", t.value) })), selected: selectedValues(state, "tier"), onToggle: toggle },
         { id: "status", label: "Status", options: INCIDENT_STATUSES.map((s) => ({ ...s, count: countOf(statusCounts, s.value), disabled: countOf(statusCounts, s.value) === 0 && !isGroupSelected(state, "status", s.value) })), selected: selectedValues(state, "status"), onToggle: toggle },
-        { id: "escalated", label: "Escalated", options: [{ value: "yes", label: "Escalated only", count: countOf(escCounts, "yes"), disabled: countOf(escCounts, "yes") === 0 && !isGroupSelected(state, "escalated", "yes") }], selected: selectedValues(state, "escalated"), onToggle: toggle },
-        { id: "drill", label: "Drill", options: [{ value: "yes", label: "Drill only", count: countOf(drillCounts, "yes"), disabled: countOf(drillCounts, "yes") === 0 && !isGroupSelected(state, "drill", "yes") }], selected: selectedValues(state, "drill"), onToggle: toggle },
       ],
       activeCount: activeFilterCount(state),
       onReset: () => setState((s) => clearGroupFilters(s)),

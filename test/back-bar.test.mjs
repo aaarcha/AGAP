@@ -176,13 +176,13 @@ test("principal: every screen — including More — has at most one back bar", 
   clickBack();
   assertAtMostOneBar("More menu (after roster)");
 
-  clickButton("About ASPIRE");
-  assert.equal(backBars().length, 1, "About from More: exactly one back bar, not two");
-  clickBack();
-  assertAtMostOneBar("More menu (after about)");
-
+  // About is no longer a More row (STEP 2): it lives only inside Account > About ASPIRE.
   clickButton("Account");
-  assert.equal(backBars().length, 1, "Account from More: exactly one back bar");
+  assertAtMostOneBar("Account from More");
+  clickButton("About ASPIRE");
+  assert.equal(backBars().length, 1, "About inside Account: exactly one back bar, not two");
+  clickBack();
+  assertAtMostOneBar("Account (after about)");
   clickBack();
   assertAtMostOneBar("More menu (after account)");
 });
@@ -192,8 +192,6 @@ test("responder: every screen has at most one back bar", () => {
   render(React.createElement(App));
 
   assertAtMostOneBar("Queue");
-  clickRail("History");
-  assertAtMostOneBar("History");
   clickRail("Escalation");
   assertAtMostOneBar("Escalation");
   clickRail("Account");
@@ -204,13 +202,13 @@ test("super admin: every screen has at most one back bar", () => {
   __resetCtx({ user: USERS.super_admin });
   render(React.createElement(App));
 
-  assertAtMostOneBar("Accounts");
+  assertAtMostOneBar("Users");
   clickRail("Audit");
   assertAtMostOneBar("Audit");
   clickRail("Year");
   assertAtMostOneBar("Year");
-  clickRail("Configuration");
-  assertAtMostOneBar("Configuration");
-  clickRail("Account");
-  assertAtMostOneBar("Account menu"); // root tab, no onBack → no bar
+  clickRail("System Settings");
+  assertAtMostOneBar("System Settings");
+  clickRail("Profile");
+  assertAtMostOneBar("Profile menu"); // root tab, no onBack → no bar
 });

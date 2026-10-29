@@ -6,6 +6,9 @@
 // created: server/app.js looks the ticket's stamped config id up here.
 //
 // This module is the only place that reads or writes store.db.configs.
+//
+// The panel fields (panelValidationDate, panelReference) are a record of who
+// validated these values and when; they never change scoring.
 import * as D from "../shared/domain.js";
 
 export const WEIGHT_KEYS = ["severity", "vulnerability", "locationRisk", "timeSensitivity"];
@@ -21,11 +24,13 @@ const MINUTES_MIN = 1;
 const MINUTES_MAX = 60;
 const KMH_MIN = 1;
 const KMH_MAX = 120;
+const PANEL_REFERENCE_MAX = 120;
 
 export const CONFIG_DEFAULTS = deepFreeze({
   weights: { severity: 50, vulnerability: 29, locationRisk: 11, timeSensitivity: 10 },
   consistency: { ...D.CONSISTENCY },
   panelValidationDate: null,
+  panelReference: null,
   hazardAdjustment: D.HAZARD_LOCATION_BOOST,
   escalation: {
     barangayMinutes: D.DEFAULT_ESCALATION_MINUTES[0],
@@ -99,13 +104,29 @@ export function validateConfig(input, { requireDate = true } = {}) {
   else if (cr < 0 || cr > CR_MAX) errors["consistency.cr"] = "A consistency ratio above 0.10 is not acceptable — revise the pairwise judgements.";
   else value.consistency = { ...CONFIG_DEFAULTS.consistency, cr: Number(cr.toFixed(4)) };
 
-  // ---- expert-panel validation date
+  // ---- expert-panel validation: WHO validated the values and WHEN. These two
+  // fields are a provenance record only — scoring never reads them.
   if (src.panelValidationDate === null || src.panelValidationDate === undefined || src.panelValidationDate === "") {
     if (requireDate) errors.panelValidationDate = "Enter the date the Expert Panel validated these values.";
   } else if (!isIsoDate(src.panelValidationDate)) {
     errors.panelValidationDate = "Use a valid date (YYYY-MM-DD).";
   } else {
     value.panelValidationDate = src.panelValidationDate;
+  }
+
+  // ---- panel / source reference (optional): the panel, body or document that
+  // validated the values. A record only; it does not change scoring.
+  const ref = src.panelReference;
+  if (ref === null || ref === undefined || (typeof ref === "string" && ref.trim() === "")) {
+    value.panelReference = null;
+  } else if (typeof ref !== "string") {
+    errors.panelReference = "Enter the panel or source as text.";
+  } else if (/[\u0000-\u001F\u007F]/.test(ref)) {
+    errors.panelReference = "Remove control characters (line breaks, tabs).";
+  } else if (ref.trim().length > PANEL_REFERENCE_MAX) {
+    errors.panelReference = `Keep the panel or source to ${PANEL_REFERENCE_MAX} characters or fewer.`;
+  } else {
+    value.panelReference = ref.trim();
   }
 
   // ---- hazard mode adds this many points to Location Risk
@@ -147,6 +168,8 @@ function publicRecord(rec) {
     weights: { ...rec.weights },
     consistency: { ...rec.consistency },
     panelValidationDate: rec.panelValidationDate ?? null,
+    // Versions written before this field existed carry null, never undefined.
+    panelReference: rec.panelReference ?? null,
     hazardAdjustment: rec.hazardAdjustment,
     escalation: { ...rec.escalation },
     responderSpeeds: { ...rec.responderSpeeds },
@@ -166,6 +189,7 @@ function resolve(rec) {
     weightsPercent: { ...rec.weights },
     consistency: { ...rec.consistency },
     panelValidationDate: rec.panelValidationDate ?? null,
+    panelReference: rec.panelReference ?? null,
     hazardAdjustment: rec.hazardAdjustment,
     escalation: { ...rec.escalation },
     escalationMinutes: [rec.escalation.barangayMinutes, rec.escalation.cdrrmoMinutes],

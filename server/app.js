@@ -11,6 +11,7 @@ import * as D from "../shared/domain.js";
 import * as C from "../shared/campus.js";
 import { createStore } from "./store.js";
 import { createConfigService, ConfigError } from "./config.js";
+import { createRetention, archiveExpired, incidentExpired, accountExpired, drillExpired } from "./retention.js";
 import { validatePassword, POLICY_TEXT, PASSWORD_MIN, tempPasswordFromBytes } from "../shared/password.js";
 import { parseSection } from "../shared/section.js";
 
@@ -49,6 +50,8 @@ export const DEMO_PASSWORD = "Sinalhan-Demo-2026!";
 export const DEMO_ADMIN_EMAIL = "admin@sinalhanes.deped.ph";
 
 const ACCOUNT_ROLES = new Set(["teacher", "principal", "responder", "parent", "super_admin"]);
+// A responder belongs to exactly one organisation — there is no shared account.
+const ACCOUNT_ORGS = new Set(D.RESPONDER_ORG_IDS);
 const ADMIN_ROLES = new Set(["super_admin", "principal"]); // role-based idle timeout: short for admins
 const normEmail = (v) => String(v ?? "").trim().toLowerCase();
 const emailOk = (e) => e.length <= 160 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e);
@@ -93,6 +96,9 @@ export function createApp(opts = {}) {
   } = opts;
 
   const store = createStore({ dataDir, onPersistError: (...a) => log(...a) });
+  // Placeholder retention periods (see server/retention.js): read once at boot,
+  // invalid env values fall back to the defaults with a warning.
+  const retention = createRetention({ env: process.env, warn: (msg) => log(msg) });
   const sseClients = new Set();
   const buckets = new Map();
   const gzCache = new Map();
@@ -127,11 +133,21 @@ export function createApp(opts = {}) {
   const clientIp = (req) => String(req.headers["x-forwarded-for"] || req.socket.remoteAddress || "?").split(",")[0].trim();
 
   // Append-only audit trail. NEVER put passwords, hashes or tokens in here.
-  function audit(action, { by = null, target = null, detail = "", req = null } = {}) {
-    store.db.audit.push({ at: now(), action, by, target, detail, ip: req ? clientIp(req) : "" });
+  // New entries store IDS (actor id, target id) plus role/org and the reason —
+  // never a person's name.
+  function audit(action, { by = null, target = null, detail = "", req = null, role = null, org = null, reason = null } = {}) {
+    const entry = { at: now(), action, by, target, detail, ip: req ? clientIp(req) : "" };
+    if (role) entry.role = role;
+    if (org) entry.org = org;
+    if (reason) entry.reason = reason;
+    store.db.audit.push(entry);
     if (store.db.audit.length > 1000) store.db.audit.splice(0, store.db.audit.length - 800);
     store.save();
   }
+
+  /** Organisation a role belongs to — stored on audit entries instead of a name. */
+  const orgOf = (acc) =>
+    acc && acc.role === "responder" ? (D.orgLabel(acc.org) || "Responder") : D.SCHOOL.name;
 
   // Admin configuration: versioned records, cached active version, safe fallback.
   // ESCALATION_MINUTES from the environment only seeds the very first version.
@@ -207,7 +223,10 @@ export function createApp(opts = {}) {
     if (!acc || acc.status !== "active") return null;
     if (acc.role === "super_admin") return { id: acc.id, role: "super_admin", name: acc.name, subtitle: acc.email };
     if (acc.role === "principal") return { id: acc.id, role: "principal", name: acc.name, subtitle: acc.email };
-    if (acc.role === "responder") return { id: acc.id, role: "responder", name: acc.name, subtitle: "Barangay + CDRRMO liaison" };
+    if (acc.role === "responder") {
+      const org = D.orgById(acc.org) ? acc.org : null;
+      return { id: acc.id, role: "responder", name: acc.name, org, subtitle: `Responder · ${D.orgLabel(org) || "Unassigned org"}` };
+    }
     if (acc.role === "teacher") {
       const t = db.roster.find((r) => r.id === acc.teacherId);
       if (!t || t.status !== "active") return null;
@@ -218,11 +237,13 @@ export function createApp(opts = {}) {
     return null;
   }
 
-  function newAccount({ email, role, name, password, mustChange = false, temp = false, id = null, teacherId = null, section = null }) {
+  function newAccount({ email, role, name, password, mustChange = false, temp = false, id = null, teacherId = null, section = null, org = null }) {
     const { salt, hash } = hashPassword(password);
     const structured = parseSection(section);
     const acc = {
       id: id || store.nextId("acc"), email, role, name, teacherId, section,
+      // Only responders carry an organisation; nobody else belongs to a dispatch org.
+      org: role === "responder" ? (ACCOUNT_ORGS.has(org) ? org : null) : null,
       // Structured grade (K|1..6) + section name derived from the stored string.
       grade: structured.grade, sectionName: structured.sectionName,
       pwSalt: salt, pwHash: hash, status: "active", mustChange, temp,
@@ -234,16 +255,24 @@ export function createApp(opts = {}) {
 
   function publicAccount(a, t = now()) {
     const roster = a.teacherId ? store.db.roster.find((r) => r.id === a.teacherId) : null;
-    const section = a.role === "parent" ? a.section : roster ? roster.section : a.section || null;
+    // A purged account exposes nothing personal: no section, no roster details.
+    const purged = a.status === "purged";
+    const section = purged ? null : a.role === "parent" ? a.section : roster ? roster.section : a.section || null;
     const structured = parseSection(section);
     return {
       id: a.id, email: a.email, role: a.role, name: a.name,
+      // Responders show which organization they answer for; other roles are the school's.
+      org: a.role === "responder" ? (a.org ?? null) : null,
+      orgLabel: a.role === "responder" ? (D.orgLabel(a.org) || "Unassigned org") : D.SCHOOL.name,
       section,
       grade: structured.grade, sectionName: structured.sectionName,
       status: a.status, mustChange: Boolean(a.mustChange), temp: Boolean(a.temp),
       locked: a.lockedUntil > t, lockedUntil: a.lockedUntil, failed: a.failed,
       lastLoginAt: a.lastLoginAt, createdAt: a.createdAt,
-      teacher: a.teacherId ? {
+      archivedAt: a.archivedAt ?? null, archiveReason: a.archiveReason ?? null, archivedAuto: Boolean(a.archivedAuto), purgedAt: a.purgedAt ?? null,
+      // Admin purge is offered only once the placeholder retention period has passed.
+      purgeEligible: a.status === "archived" && accountExpired(a, t, retention.accountDays),
+      teacher: a.teacherId && !purged ? {
         id: roster?.id ?? a.teacherId,
         name: roster?.name ?? a.name,
         section: roster?.section ?? null,
@@ -371,6 +400,87 @@ export function createApp(opts = {}) {
     }
   }
 
+  // ------------------------------------------------- archive (never delete)
+  // ARCHIVE = organisation-wide "leave the live views": sessions die, sign-in is
+  // blocked with the generic message, rosters and role lists hide the account.
+  // Reversible through restore. Used by the Principal's roster and the Admin console.
+  function archiveAccount(acc, { by = null, role = null, reason = "", req = null }) {
+    if (acc.status === "archived") throw new HttpError(409, "already_archived", "That account is already archived.");
+    if (acc.status === "purged") throw new HttpError(409, "already_purged", "That account has been purged.");
+    if (acc.id === by) throw bad("You cannot archive your own account.");
+    if (acc.role === "super_admin" && !store.db.accounts.some((a) => a.id !== acc.id && a.role === "super_admin" && a.status === "active"))
+      throw new HttpError(409, "last_admin", "At least one Super Admin account must stay active.");
+    const t = now();
+    acc.status = "archived";
+    acc.archivedAt = t;
+    acc.archivedBy = by ?? null;
+    acc.archiveReason = clean(reason, 200) || null;
+    const revoked = revokeSessions(acc.id);
+    store.save();
+    audit("account_archived", {
+      by, role, org: orgOf(acc), target: acc.id, reason: acc.archiveReason,
+      detail: `${revoked} session(s) revoked`, req,
+    });
+    return revoked;
+  }
+
+  /** Admin restore: active again and forced to set a new password at next sign-in. */
+  function restoreAccount(acc, { by = null, role = null, req = null }) {
+    if (acc.status !== "archived") throw bad("Only an archived account can be restored.");
+    acc.status = "active";
+    acc.mustChange = true;
+    acc.archivedAt = null;
+    acc.archivedBy = null;
+    acc.archiveReason = null;
+    store.save();
+    audit("account_restored", { by, role, org: orgOf(acc), target: acc.id, req, detail: "password change required at next sign-in" });
+    return acc;
+  }
+
+  /**
+   * PURGE — irreversible, Admin only, typed confirmation. Personal data is
+   * erased; the id and role/organisation are kept so audit entries and timelines
+   * still resolve. `byRoute` enforces the retention eligibility that a data
+   * request deliberately bypasses.
+   */
+  function purgeAccount(acc, { by = null, role = null, reason = "", confirm = null, req = null, byRoute = true }) {
+    if (confirm !== "PURGE") throw bad("Type PURGE to confirm. This cannot be undone.", "confirm_required");
+    if (byRoute && acc.status !== "archived")
+      throw new HttpError(409, "not_eligible", "Only an archived account can be purged.");
+    if (byRoute && !accountExpired(acc, now(), retention.accountDays))
+      throw new HttpError(409, "not_eligible", `This account is still inside its ${retention.accountDays}-day retention period.`);
+    const t = now();
+    const roster = acc.teacherId ? store.db.roster.find((r) => r.id === acc.teacherId) : null;
+    // Personal data out — a non-identifying tombstone stays where the email was.
+    acc.name = "Purged account";
+    acc.email = `purged-${acc.id}@removed.invalid`;
+    acc.section = null;
+    acc.grade = "";
+    acc.sectionName = "";
+    acc.pwSalt = "";
+    acc.pwHash = "";
+    acc.mustChange = false;
+    acc.temp = false;
+    acc.failed = 0;
+    acc.lockedUntil = 0;
+    acc.hiddenIncidentIds = [];
+    acc.status = "purged";
+    acc.purgedAt = t;
+    if (roster) {
+      roster.name = "Purged account";
+      roster.room = "";
+    }
+    const sessions = store.db.sessions.filter((s) => s.accountId === acc.id).length;
+    store.db.sessions = store.db.sessions.filter((s) => s.accountId !== acc.id);
+    closeStreamsFor(acc.id);
+    store.save();
+    audit("account_purged", {
+      by, role, org: orgOf(acc), target: acc.id, reason: clean(reason, 200) || null,
+      detail: `${sessions} session(s) erased`, req,
+    });
+    return acc;
+  }
+
 
   function commit(evt) {
     store.prune(now(), historyDays);
@@ -438,6 +548,17 @@ export function createApp(opts = {}) {
     };
   }
 
+  /** Every organization's response, always both keys (null until the org acts). */
+  function publicResponses(i) {
+    const rs = i.responses && typeof i.responses === "object" ? i.responses : {};
+    const out = {};
+    for (const o of D.RESPONDER_ORGS) {
+      const r = rs[o.id];
+      out[o.id] = r ? { ...r, org: o.id, orgLabel: o.label } : null;
+    }
+    return out;
+  }
+
   function publicIncident(i, user) {
     const role = user.role;
     const acc = accountabilityOf(i);
@@ -450,6 +571,10 @@ export function createApp(opts = {}) {
       room: i.room,
       createdAt: i.createdAt,
       status: i.status,
+      // Step timestamps — audit facts, never rewritten once recorded.
+      seenAt: i.seenAt ?? null,
+      enRouteAt: i.enRouteAt ?? null,
+      onSiteAt: i.onSiteAt ?? null,
       confirmedBy: i.confirmedBy,
       linkedSection: i.linkedSection,
       populationId: D.populationIdOf(i),
@@ -476,7 +601,12 @@ export function createApp(opts = {}) {
       reporterName: i.reporterName,
       reporterId: i.reporterId,
       acknowledgedBy: i.acknowledgedBy,
+      // Which org first acknowledged (the headline status names it) and every
+      // org's own response, ETA included. Legacy rows have no responses yet.
+      acknowledgedByOrg: i.acknowledgedByOrg ?? null,
+      responses: publicResponses(i),
       resolvedBy: i.resolvedBy,
+      resolvedByOrg: i.resolvedByOrg ?? null,
       log: i.log,
       metrics: metricsOf(i),
       canCancel: canCancel(i, user),
@@ -501,16 +631,26 @@ export function createApp(opts = {}) {
 
   function stateFor(user) {
     const db = store.db;
-    const list = db.incidents.filter((i) => canSee(i, user) && !isHiddenFor(i, user));
+    // Archived tickets are excluded from the live state for EVERY role (they live
+    // behind GET /api/incidents/archive), and hidden ones from that user's lists.
+    const list = db.incidents.filter((i) => !i.archivedAt && canSee(i, user) && !isHiddenFor(i, user));
     const incidents = [...list].sort((a, b) => b.createdAt - a.createdAt).map((i) => publicIncident(i, user));
+    // Records this user hid: delivered separately so the "Hidden" chip can offer Unhide.
+    const hiddenIncidents = db.incidents
+      .filter((i) => !i.archivedAt && isHiddenFor(i, user) && canSee(i, user))
+      .sort((a, b) => b.createdAt - a.createdAt)
+      .map((i) => publicIncident(i, user));
     let roster = [];
-    if (user.role === "principal") roster = db.roster;
+    // Archived accounts leave every roster and role list (they stay readable in the Admin console).
+    const archivedTeachers = new Set(db.accounts.filter((a) => (a.status === "archived" || a.status === "purged") && a.teacherId).map((a) => a.teacherId));
+    if (user.role === "principal") roster = db.roster.filter((r) => !archivedTeachers.has(r.id));
     if (user.role === "teacher") roster = db.roster.filter((r) => r.id === user.id);
     return {
       version: db.version,
       serverTime: now(),
       me: user,
       incidents,
+      hidden: hiddenIncidents,
       roster,
       sections: user.role === "principal" ? sections() : [],
       modes: publicModes(user),
@@ -703,6 +843,8 @@ export function createApp(opts = {}) {
       drillId: drillMode.active ? drillMode.id : null,
       interactions,
       eta: null,
+      // Step timestamps: written once, then locked (see transition()).
+      seenAt: null,
       enRouteAt: null,
       onSiteAt: null,
       room,
@@ -719,9 +861,13 @@ export function createApp(opts = {}) {
       status: "SENT",
       confirmedBy: 1,
       acknowledgedBy: null,
+      acknowledgedByOrg: null,
+      // Per-organization response records: both orgs respond independently.
+      responses: { barangay: null, cdrrmo: null },
       outcome: null,
       resolvedAt: null,
       resolvedBy: null,
+      resolvedByOrg: null,
       hiddenBy: [],
       log: [{ at: t, by: reporter.name, role: user.role, action: "reported", note: `${cat.categoryLabel} – ${cat.subLabel}${drillMode.active ? " (DRILL)" : ""}` }],
     };
@@ -737,6 +883,31 @@ export function createApp(opts = {}) {
     return { incident, merged: false };
   }
 
+  // ---------------------------------------------------- responder organizations
+  // Each organization responds to a ticket on its own: acknowledge, on site and
+  // resolve are recorded per org, so the two orgs never block each other. The
+  // ticket's status is the furthest progress of either org, and the first org to
+  // act owns the headline ETA (Details lists both).
+  function responsesOf(inc) {
+    const rs = inc.responses && typeof inc.responses === "object" ? inc.responses : {};
+    for (const id of D.RESPONDER_ORG_IDS) if (!(id in rs)) rs[id] = null;
+    inc.responses = rs;
+    return rs;
+  }
+
+  function ticketStatus(inc) {
+    if (inc.status === "RESOLVED") return "RESOLVED";
+    const rs = Object.values(inc.responses || {}).filter(Boolean);
+    if (rs.some((r) => r.status === "on_site")) return "ON_SITE";
+    if (rs.some((r) => r.status === "en_route")) return "EN_ROUTE";
+    return inc.status; // SENT / SEEN — nobody has responded yet
+  }
+
+  const etaView = (e) => ({
+    mode: e.mode, distanceKm: e.distanceKm, routeStatus: e.routeStatus, blocked: Boolean(e.blocked),
+    minutes: e.minutes ?? null, startedAt: e.startedAt ?? null, arriveBy: e.arriveBy ?? null,
+  });
+
   function transition(user, id, action, body = {}) {
     const inc = store.db.incidents.find((i) => i.id === id);
     if (!inc) throw new HttpError(404, "not_found", "Incident not found.");
@@ -745,12 +916,28 @@ export function createApp(opts = {}) {
       throw new HttpError(409, "already_resolved", "This incident is already closed.");
     }
     const t = now();
-    const push = (act, note) => inc.log.push({ at: t, by: user.name, role: user.role, action: act, note });
+    // Timestamps are audit facts: the first write wins and no later click or API
+    // call may move them, so the recorded durations stay true.
+    const stamp = (field) => {
+      if (inc[field] == null) inc[field] = t;
+      return inc[field];
+    };
+    // Which organization (if any) is acting — responders always carry one.
+    const org = user.role === "responder" && D.orgById(user.org) ? user.org : null;
+    const actor = org ? D.orgLabel(org) : user.name;
+    const push = (act, note) => inc.log.push({ at: t, by: actor, role: user.role, action: act, note, ...(org ? { org } : {}) });
+    const rs = responsesOf(inc);
+    const mine = org ? rs[org] : null;
     let changed = false;
     if (action === "seen" && inc.status === "SENT") {
+      inc.seenAt = stamp("seenAt");
       inc.status = "SEEN"; push("seen"); changed = true;
-    } else if (action === "ack" && (inc.status === "SENT" || inc.status === "SEEN")) {
-      // Validate everything first so a rejected request never leaves the ticket half-updated.
+    } else if (action === "ack") {
+      // Any open ticket can be acknowledged by either org, even while the other is
+      // already on site. Acknowledging is one-way per actor: an org that already
+      // acknowledged cannot trigger it again, and the ticket never steps back.
+      if (mine) return { incident: inc, changed: false };
+      if (!org && inc.status !== "SENT" && inc.status !== "SEEN") return { incident: inc, changed: false };
       let eta = null;
       let note = "Acknowledged";
       if (body.mode) {
@@ -763,17 +950,60 @@ export function createApp(opts = {}) {
         eta = { mode: mode.id, distanceKm: km, routeStatus: route, blocked: Boolean(r.blocked), minutes: r.minutes, startedAt: t, arriveBy: r.blocked ? null : t + r.minutes * 60000 };
         note = r.blocked ? `Acknowledged — ${mode.label}, ${km} km, route BLOCKED (no ETA)` : `Acknowledged — ${mode.label}, ${km} km, ETA ${r.minutes} min (route ${route})`;
       }
-      inc.status = "EN_ROUTE"; inc.acknowledgedBy = user.name; inc.enRouteAt = t; inc.eta = eta;
+      if (org) {
+        rs[org] = {
+          org, orgLabel: D.orgLabel(org), status: "en_route",
+          ackAt: t, onSiteAt: null, resolvedAt: null, byName: user.name,
+          ...(eta ? etaView(eta) : { mode: null, distanceKm: null, routeStatus: null, blocked: false, minutes: null, startedAt: null, arriveBy: null }),
+        };
+      }
+      inc.enRouteAt = stamp("enRouteAt");
+      if (!inc.acknowledgedByOrg && org) inc.acknowledgedByOrg = org;
+      inc.acknowledgedBy = inc.acknowledgedBy || actor;
+      // Headline ETA = the first org that acked (per-org ETAs live in `responses`).
+      if (!inc.eta && eta) inc.eta = eta;
+      inc.status = ticketStatus(inc);
+      // An acknowledgement is an En route step even for an actor with no org
+      // response record (a principal, or a responder account without an org):
+      // the ticket must never stay at Seen after it was acknowledged.
+      if (inc.status === "SENT" || inc.status === "SEEN") inc.status = "EN_ROUTE";
       push("en_route", note); changed = true;
-    } else if (action === "onsite" && inc.status !== "ON_SITE") {
-      inc.status = "ON_SITE"; inc.acknowledgedBy = inc.acknowledgedBy || user.name; inc.onSiteAt = t; inc.enRouteAt = inc.enRouteAt || t;
+    } else if (action === "onsite") {
+      // On site follows En route at the ticket level: it can never be the first
+      // step, so the recorded report → acknowledged → on site order stays true.
+      if (inc.status === "SENT" || inc.status === "SEEN") {
+        throw new HttpError(409, "out_of_order", "Acknowledge this ticket before marking on site.");
+      }
+      if (org ? mine?.status === "on_site" : inc.status === "ON_SITE") return { incident: inc, changed: false };
+      if (org) {
+        rs[org] = {
+          org, orgLabel: D.orgLabel(org), status: "on_site",
+          ackAt: mine?.ackAt ?? t, onSiteAt: t, resolvedAt: null, byName: user.name,
+          // The org has arrived: its own countdown stops.
+          ...etaView({ ...(mine ?? {}), blocked: false, minutes: null, arriveBy: null }),
+        };
+      }
+      inc.onSiteAt = stamp("onSiteAt");
+      inc.enRouteAt = stamp("enRouteAt");
+      if (!inc.acknowledgedByOrg && org) inc.acknowledgedByOrg = org;
+      inc.acknowledgedBy = inc.acknowledgedBy || actor;
+      inc.status = org ? ticketStatus(inc) : "ON_SITE";
       push("on_site", `Report → on site in ${Math.max(0, Math.round((t - inc.createdAt) / 60000))} min`); changed = true;
     } else if (action === "resolve") {
+      // One resolution closes the ticket for everyone; the other org's timeline stays.
       const falseAlarm = body.outcome === "false_alarm";
+      if (org) {
+        rs[org] = {
+          org, orgLabel: D.orgLabel(org), status: "resolved",
+          ackAt: mine?.ackAt ?? t, onSiteAt: mine?.onSiteAt ?? null, resolvedAt: t, byName: user.name,
+          ...etaView({ ...(mine ?? {}), blocked: false, minutes: null, arriveBy: null }),
+        };
+      }
       inc.status = "RESOLVED";
       inc.outcome = falseAlarm ? "false_alarm" : "resolved";
-      inc.resolvedAt = t;
-      inc.resolvedBy = user.name;
+      inc.resolvedAt = stamp("resolvedAt");
+      inc.resolvedBy = actor;
+      inc.resolvedByOrg = org;
       push(falseAlarm ? "false_alarm" : "resolved", falseAlarm ? "Cancelled as false alarm" : "Marked resolved");
       changed = true;
     }
@@ -848,15 +1078,27 @@ export function createApp(opts = {}) {
       clientId: "seed-1", clientIds: ["seed-1"], category: "flood", categoryLabel: "Flooding/Natural",
       subLabel: "Flash Flood", severity: 4, vulnerability: 4, locationRisk: 2, timeSensitivity: 3,
       baseLocationRisk: 2, baseTimeSensitivity: 3, lowLying: true, escalationLevel: 0, escalatedAt: null, headcounts: [], overrideReasons: [],
-      firstHeadcountAt: null, drill: false, drillId: null, interactions: 3, eta: null, enRouteAt: t - 3 * 60000, onSiteAt: null,
+      firstHeadcountAt: null, drill: false, drillId: null, interactions: 3, enRouteAt: t - 3 * 60000, onSiteAt: null,
+      // Headline ETA: the first org to acknowledge (Barangay here).
+      eta: { mode: "motorcycle", distanceKm: 1.4, routeStatus: "passable", blocked: false, minutes: 4, startedAt: t - 3 * 60000, arriveBy: t + 60000 },
       score: D.computeScore(4, 4, 2, 3), room: "Bldg B | Flr 1 | Rm 105",      populationId: "classroom",
       populationLabel: "Classroom / Section",
       reporterId: "t3", reporterIds: ["t3"], reporterName: "Ms. Bautista", linkedSection: "Grade 5 - Sec A",
-      createdAt: t - 6 * 60000, status: "EN_ROUTE", confirmedBy: 2, acknowledgedBy: "Brgy. Sinalhan / CDRRMO",
-      outcome: null, resolvedAt: null, resolvedBy: null, hiddenBy: [],
+      createdAt: t - 6 * 60000, status: "EN_ROUTE", confirmedBy: 2, acknowledgedBy: "Barangay Sinalhan",
+      acknowledgedByOrg: "barangay",
+      responses: {
+        barangay: {
+          org: "barangay", orgLabel: "Barangay Sinalhan", status: "en_route",
+          ackAt: t - 3 * 60000, onSiteAt: null, resolvedAt: null, byName: "Barangay Sinalhan",
+          mode: "motorcycle", distanceKm: 1.4, routeStatus: "passable", blocked: false,
+          minutes: 4, startedAt: t - 3 * 60000, arriveBy: t + 60000,
+        },
+        cdrrmo: null,
+      },
+      outcome: null, resolvedAt: null, resolvedBy: null, resolvedByOrg: null, hiddenBy: [],
       log: [
         { at: t - 6 * 60000, by: "Ms. Bautista", role: "teacher", action: "reported", note: "Flooding/Natural – Flash Flood" },
-        { at: t - 3 * 60000, by: "Brgy. Sinalhan / CDRRMO", role: "responder", action: "en_route", note: "Acknowledged" },
+        { at: t - 3 * 60000, by: "Barangay Sinalhan", role: "responder", org: "barangay", action: "en_route", note: "Acknowledged — Motorcycle, 1.4 km, ETA 4 min (route passable)" },
       ],
     });
     store.save();
@@ -873,7 +1115,9 @@ export function createApp(opts = {}) {
       mk(`${r.id}@sinalhanes.deped.ph`, "teacher", r.name, { teacherId: r.id, section: r.section });
     }
     mk("principal@sinalhanes.deped.ph", "principal", "Dr. Santos", {}, "principal");
-    mk("responder@sinalhanes.deped.ph", "responder", "Brgy. Sinalhan / CDRRMO", {}, "responder");
+    // Two responder accounts, one per organization — never a shared account.
+    mk("barangay@sinalhanes.deped.ph", "responder", "Barangay Sinalhan", { org: "barangay" }, "responder-barangay");
+    mk("cdrrmo@sinalhanes.deped.ph", "responder", "CDRRMO", { org: "cdrrmo" }, "responder-cdrrmo");
     for (const sec of sections()) mk(`parent-${slugify(sec)}@sinalhanes.deped.ph`, "parent", "Parent / PTA Representative", { section: sec });
     audit("account_seeded", { detail: `${store.db.accounts.length} demo accounts seeded (demo mode)` });
   }
@@ -895,6 +1139,32 @@ export function createApp(opts = {}) {
   }
 
   // ------------------------------------------------------------------- API
+  // Retention sweep: runs once at boot and then hourly. It archives — never
+  // deletes — closed tickets older than archiveAfterDays, and writes ONE audit
+  // entry listing the ids. `archiveExpired` is pure over an injected clock, and
+  // tests can call runArchiveSweep() directly.
+  function runArchiveSweep() {
+    const ids = archiveExpired({
+      incidents: store.db.incidents,
+      now: now(),
+      archiveAfterDays: retention.archiveAfterDays,
+    });
+    if (!ids.length) return ids;
+    store.save();
+    audit("incident_auto_archived", {
+      by: "system",
+      role: "system",
+      org: D.SCHOOL.name,
+      target: ids.join(","),
+      detail: `${ids.length} closed ticket(s) older than ${retention.archiveAfterDays} days moved to the archive`,
+    });
+    broadcast({ type: "archive_changed" }); // payload carries no incident id
+    return ids;
+  }
+  runArchiveSweep();
+  const archiveTimer = autoTick ? setInterval(() => { try { runArchiveSweep(); } catch (err) { log("Archive sweep failed:", err.message); } }, 60 * 60 * 1000) : null;
+  if (archiveTimer) archiveTimer.unref();
+
   async function api(req, res, url) {
     const p = url.pathname;
     const m = req.method;
@@ -902,7 +1172,7 @@ export function createApp(opts = {}) {
     if (p === "/api/health" && m === "GET") return send(res, 200, { ok: true, version: store.db.version, uptime: Math.round(process.uptime()) });
 
     if (p === "/api/config" && m === "GET")
-      return send(res, 200, { accessCodeRequired: Boolean(accessCode), demoReset: Boolean(allowReset), passwordMin: PASSWORD_MIN, passwordPolicy: POLICY_TEXT, school: { ...D.SCHOOL, phone: schoolPhone } });
+      return send(res, 200, { accessCodeRequired: Boolean(accessCode), demoReset: Boolean(allowReset) && process.env.NODE_ENV !== "production", passwordMin: PASSWORD_MIN, passwordPolicy: POLICY_TEXT, school: { ...D.SCHOOL, phone: schoolPhone } });
 
     if (p === "/api/login" && m === "POST") {
       rateLimit(req, "login", 30);
@@ -1037,6 +1307,39 @@ export function createApp(opts = {}) {
       return send(res, 200, { user, mustChange: Boolean(account.mustChange), policy: POLICY_TEXT });
     }
 
+    // HIDE — a per-user "remove from my list" for Teachers and Parents.
+    // The record itself never changes and stays visible to everyone else.
+    if (p === "/api/me/hidden" && m === "POST") {
+      const { account, user } = authenticate(req, url, p);
+      need(user, "teacher", "parent"); // responders have no hide; principals archive instead
+      rateLimit(req, "write", 120);
+      const body = await readJson(req);
+      const inc = store.db.incidents.find((i) => i.id === String(body.incidentId ?? ""));
+      if (!inc || (user.role === "parent" && !canSee(inc, user)))
+        throw new HttpError(404, "not_found", "Incident not found.");
+      if (user.role === "teacher" && !inc.reporterIds.includes(user.id))
+        throw new HttpError(403, "forbidden", "You can only hide your own reports.");
+      if (inc.status !== "RESOLVED" && !inc.archivedAt)
+        throw bad("Only resolved, cancelled or archived records can be hidden.", "not_closed");
+      const hide = body.hidden !== false;
+      const list = Array.isArray(account.hiddenIncidentIds) ? account.hiddenIncidentIds : (account.hiddenIncidentIds = []);
+      const already = list.includes(inc.id);
+      if (hide && !already) {
+        if (list.length >= 500) throw bad("You have hidden the maximum of 500 records. Unhide one first.", "hide_limit");
+        list.push(inc.id);
+      }
+      if (!hide) account.hiddenIncidentIds = list.filter((x) => x !== inc.id);
+      const visible = inc.hiddenBy || [];
+      if (hide && !visible.includes(user.id)) inc.hiddenBy = [...visible, user.id];
+      if (!hide) inc.hiddenBy = visible.filter((x) => x !== user.id);
+      store.save();
+      audit(hide ? "incident_hidden" : "incident_unhidden", {
+        by: account.id, role: user.role, org: orgOf(account), target: inc.id, req,
+      });
+      commit({ type: "hidden_changed" });
+      return send(res, 200, { ok: true, hidden: hide, incidentId: inc.id });
+    }
+
     if (p === "/api/stream" && m === "GET") {
       const { user, session } = authenticate(req, url, p);
       res.writeHead(200, {
@@ -1074,7 +1377,13 @@ export function createApp(opts = {}) {
       if (findAccount(email)) throw new HttpError(409, "email_taken", "An account with that email already exists.");
       const role = clean(body.role, 20);
       if (!ACCOUNT_ROLES.has(role)) throw bad("Choose which role this account gets.");
-      const name = clean(body.name, 80) || ({ responder: "Brgy. Sinalhan / CDRRMO", parent: "Parent / PTA Representative", super_admin: "Super Admin" }[role] || "");
+      // A responder answers for exactly one organization — the admin picks it.
+      let org = null;
+      if (role === "responder") {
+        org = clean(body.org, 20);
+        if (!ACCOUNT_ORGS.has(org)) throw bad("Choose the organization this responder answers for: Barangay Sinalhan or CDRRMO.", "org_required");
+      }
+      const name = clean(body.name, 80) || ({ responder: D.orgLabel(org), parent: "Parent / PTA Representative", super_admin: "Super Admin" }[role] || "");
       if (!name) throw bad("Name is required.");
       let section = null;
       if (role === "parent") {
@@ -1097,14 +1406,69 @@ export function createApp(opts = {}) {
         teacherId = entry.id;
         section = entry.section;
       }
-      const acc = newAccount({ email, role, name, password, mustChange, temp, teacherId, section });
+      const acc = newAccount({ email, role, name, password, mustChange, temp, teacherId, section, org });
       store.save();
-      audit("account_created", { by: user.email, target: email, detail: `role ${role}${temp ? " (temporary credentials)" : ""}`, req });
+      audit("account_created", { by: user.email, target: email, detail: `role ${role}${org ? ` (${D.orgLabel(org)})` : ""}${temp ? " (temporary credentials)" : ""}`, req });
       if (teacherId) commit({ type: "roster_updated", id: teacherId });
       return send(res, 201, { account: publicAccount(acc), tempPassword: temp ? password : null, teacherId });
     }
 
-    let mact = p.match(/^\/api\/admin\/accounts\/([\w-]+)\/(reset-password|deactivate|activate|unlock)$/);
+    // Edit an existing account. The Super Admin can fix the display name, assign a
+    // responder's organization (accounts created before orgs existed have none),
+    // and move a Parent/PTA account to another section. Email and role are
+    // identity fields and stay fixed.
+    let medit = p.match(/^\/api\/admin\/accounts\/([\w-]+)$/);
+    if (medit && m === "PUT") {
+      need(user, "super_admin");
+      const acc = accountById(medit[1]);
+      if (!acc) throw new HttpError(404, "not_found", "Account not found.");
+      if (acc.status === "purged") throw new HttpError(409, "purged", "This account was purged and can no longer be edited.");
+      const body = await readJson(req);
+      const changed = [];
+
+      let name = acc.name;
+      if (body.name !== undefined) {
+        name = clean(body.name, 80);
+        if (!name) throw bad("Name is required.");
+      }
+      // A responder always answers for exactly one org — assigning it is the point.
+      let org = acc.org ?? null;
+      if (acc.role === "responder") {
+        if (body.org !== undefined) org = clean(body.org, 20);
+        if (!ACCOUNT_ORGS.has(org)) throw bad("Choose the organization this responder answers for: Barangay Sinalhan or CDRRMO.", "org_required");
+      }
+      let section = acc.section;
+      if (acc.role === "parent" && body.section !== undefined) {
+        section = clean(body.section, 60);
+        if (!section) throw bad("Grade / section is required for a Parent/PTA account.");
+      }
+
+      if (name !== acc.name) { acc.name = name; changed.push("name"); }
+      if (acc.role === "responder" && org !== acc.org) { acc.org = org; changed.push("org"); }
+      if (acc.role === "parent" && section !== acc.section) {
+        acc.section = section;
+        const structured = parseSection(section);
+        acc.grade = structured.grade;
+        acc.sectionName = structured.sectionName;
+        changed.push("section");
+      }
+      // A teacher's name IS the roster entry's name: keep the two in step.
+      if (changed.includes("name") && acc.teacherId) {
+        const entry = store.db.roster.find((r) => r.id === acc.teacherId);
+        if (entry) {
+          entry.name = acc.name;
+          for (const inc of store.db.incidents) if (inc.reporterId === entry.id) inc.reporterName = entry.name;
+        }
+      }
+      if (changed.length) {
+        store.save();
+        audit("account_updated", { by: user.email, role: user.role, org: orgOf(acc), target: acc.email, detail: `changed ${changed.join(", ")}`, req });
+        if (acc.teacherId) commit({ type: "roster_updated", id: acc.teacherId });
+      }
+      return send(res, 200, { ok: true, account: publicAccount(acc), changed });
+    }
+
+    let mact = p.match(/^\/api\/admin\/accounts\/([\w-]+)\/(reset-password|deactivate|activate|unlock|archive|restore)$/);
     if (mact && m === "POST") {
       need(user, "super_admin");
       const acc = accountById(mact[1]);
@@ -1142,12 +1506,175 @@ export function createApp(opts = {}) {
         if (acc.teacherId) commit({ type: "roster_updated", id: acc.teacherId });
         return send(res, 200, { ok: true });
       }
+      if (action === "archive") {
+        const body = await readJson(req);
+        archiveAccount(acc, { by: account.id, role: user.role, reason: body.reason, req });
+        if (acc.teacherId) commit({ type: "roster_updated", id: acc.teacherId });
+        return send(res, 200, { ok: true, account: publicAccount(acc) });
+      }
+      if (action === "restore") {
+        restoreAccount(acc, { by: account.id, role: user.role, req });
+        if (acc.teacherId) commit({ type: "roster_updated", id: acc.teacherId });
+        return send(res, 200, { ok: true, account: publicAccount(acc) });
+      }
       // unlock – Super Admin can release a locked account early
       const wasLocked = acc.lockedUntil > t;
       acc.failed = 0; acc.lockedUntil = 0;
       store.save();
       audit("account_unlocked", { by: user.email, target: acc.email, detail: wasLocked ? "locked account released" : "failed counter cleared", req });
       return send(res, 200, { ok: true, wasLocked });
+    }
+
+    // -------------------------------------------------- retention / purge (Admin)
+    // Read-only eligibility card. Every period here is a PLACEHOLDER set by the
+    // school's data protection contact (see server/retention.js).
+    if (p === "/api/admin/retention" && m === "GET") {
+      need(user, "super_admin");
+      const t = now();
+      const archivedIncidents = store.db.incidents.filter((i) => i.archivedAt);
+      const eligibleIncidents = archivedIncidents.filter((i) => !i.anonymizedAt && incidentExpired(i, t, retention.incidentDays));
+      const archivedAccounts = store.db.accounts.filter((a) => a.status === "archived");
+      const eligibleAccounts = archivedAccounts.filter((a) => accountExpired(a, t, retention.accountDays));
+      const expiredDrills = store.db.drills.filter((d) => drillExpired(d, t, retention.drillDays));
+      return send(res, 200, {
+        placeholder: retention.placeholder,
+        label: "Placeholder periods",
+        periods: {
+          archiveAfterDays: retention.archiveAfterDays,
+          incidents: retention.incidentDays,
+          accounts: retention.accountDays,
+          drills: retention.drillDays,
+          notifications: retention.notificationDays,
+        },
+        counts: {
+          archivedIncidents: archivedIncidents.length,
+          anonymizedIncidents: archivedIncidents.filter((i) => i.anonymizedAt).length,
+          eligibleIncidents: eligibleIncidents.length,
+          archivedAccounts: archivedAccounts.length,
+          eligibleAccounts: eligibleAccounts.length,
+          expiredDrills: expiredDrills.length,
+        },
+        // Types with no persistent store are reported, never silently periodised.
+        skipped: retention.skipped,
+      });
+    }
+
+    /** Replace a person's name with a role/organisation label (purge, timeline, headcounts). */
+    const actorLabel = (role, org = null) => (role === "responder"
+      ? (D.orgLabel(org) || "Responder")
+      : ({ teacher: "Teacher", principal: "Principal", super_admin: "Admin", parent: "Parent/PTA", system: "System" }[role] || "Unknown"));
+
+    /** Anonymise a ticket: identifiers and free-text notes out, statistics kept. */
+    function anonymizeIncident(inc) {
+      const labelFor = (actions) => {
+        const e = (inc.log || []).find((l) => actions.includes(l.action) && l.role && l.role !== "system");
+        return e ? actorLabel(e.role, e.org) : null;
+      };
+      const ackBy = labelFor(["en_route"]);
+      const closedBy = labelFor(["resolved", "false_alarm", "cancelled", "drill_end"]);
+      inc.reporterId = null;
+      inc.reporterName = null;
+      inc.reporterIds = [];
+      inc.acknowledgedBy = ackBy;
+      inc.resolvedBy = closedBy;
+      inc.locationNote = null; // free text
+      for (const h of inc.headcounts || []) h.by = h.byRole ? actorLabel(h.byRole) : "Headcount taken";
+      for (const l of inc.log || []) {
+        l.by = actorLabel(l.role, l.org); // actor names → role/organisation label
+        l.note = ""; // free-text notes are erased
+      }
+      inc.anonymizedAt = now();
+      return inc;
+    }
+
+    if (p === "/api/admin/incidents/purge" && m === "POST") {
+      need(user, "super_admin");
+      const body = await readJson(req);
+      const reason = clean(body.reason, 200);
+      if (!reason) throw bad("A reason is required.", "reason_required");
+      if (body.confirm !== "PURGE") throw bad("Type PURGE to confirm. This cannot be undone.", "confirm_required");
+      const t = now();
+      let targets;
+      if (body.expired === true) {
+        targets = store.db.incidents.filter((i) => i.archivedAt && !i.anonymizedAt && incidentExpired(i, t, retention.incidentDays));
+      } else {
+        const ids = Array.isArray(body.ids) ? body.ids.map(String) : [];
+        if (!ids.length) throw bad("Choose at least one record, or pass expired: true.", "ids_required");
+        targets = ids.map((id) => store.db.incidents.find((i) => i.id === id) || null);
+        if (targets.some((i) => !i)) throw new HttpError(404, "not_found", "One or more records were not found.");
+        const notArchived = targets.filter((i) => !i.archivedAt);
+        if (notArchived.length) throw bad("Only archived records can be purged. Archive them first.", "not_eligible");
+        const tooYoung = targets.filter((i) => !incidentExpired(i, t, retention.incidentDays));
+        if (tooYoung.length)
+          throw new HttpError(409, "not_eligible", `${tooYoung.length} record(s) are still inside their ${retention.incidentDays}-day retention period.`);
+      }
+      if (!targets.length) throw bad("Nothing is eligible for a purge yet.", "not_eligible");
+      for (const i of targets) anonymizeIncident(i);
+      // Expired drill summaries are removed entirely (they hold no personal data).
+      const beforeDrills = store.db.drills.length;
+      if (body.expired === true) store.db.drills = store.db.drills.filter((d) => !drillExpired(d, t, retention.drillDays));
+      const removedDrills = beforeDrills - store.db.drills.length;
+      store.save();
+      audit("incidents_purged", {
+        by: account.id, role: user.role, org: orgOf(account), reason,
+        target: targets.map((i) => i.id).join(","),
+        detail: `${targets.length} record(s) anonymised${removedDrills ? `, ${removedDrills} expired drill record(s) removed` : ""}`,
+        req,
+      });
+      commit({ type: "purged" });
+      return send(res, 200, { ok: true, count: targets.length, removedDrills });
+    }
+
+    let mpurge = p.match(/^\/api\/admin\/accounts\/([\w-]+)\/purge$/);
+    if (mpurge && m === "POST") {
+      need(user, "super_admin");
+      const acc = accountById(mpurge[1]);
+      if (!acc) throw new HttpError(404, "not_found", "Account not found.");
+      const body = await readJson(req);
+      purgeAccount(acc, { by: account.id, role: user.role, reason: body.reason, confirm: body.confirm, req, byRoute: true });
+      if (acc.teacherId) commit({ type: "roster_updated", id: acc.teacherId });
+      return send(res, 200, { ok: true, account: publicAccount(acc) });
+    }
+
+    // Data requests (restrict / erase) — reference and reason are mandatory.
+    if (p === "/api/admin/data-requests" && m === "POST") {
+      need(user, "super_admin");
+      const body = await readJson(req);
+      const type = clean(body.type, 20);
+      if (type !== "restrict" && type !== "erase") throw bad("Type must be restrict or erase.", "type_required");
+      const reference = clean(body.reference, 80);
+      const reason = clean(body.reason, 200);
+      if (!reference) throw bad("A request reference is required.", "reference_required");
+      if (!reason) throw bad("A reason is required.", "reason_required");
+      const acc = accountById(String(body.accountId ?? ""));
+      if (!acc) throw new HttpError(404, "not_found", "Account not found.");
+      if (type === "erase" && body.confirm !== "ERASE") throw bad("Type ERASE to confirm. Personal data cannot be recovered.", "confirm_required");
+      if (type === "restrict") {
+        if (acc.status === "active" || acc.status === "inactive") {
+          archiveAccount(acc, { by: account.id, role: user.role, reason: `Data request ${reference} — ${reason}`, req });
+        }
+      } else {
+        // erase: archive (unless that already happened), purge, then anonymise
+        // every incident this account reported — whatever retention says.
+        if (acc.status !== "purged") {
+          if (acc.status !== "archived") {
+            archiveAccount(acc, { by: account.id, role: user.role, reason: `Data request ${reference} — ${reason}`, req });
+          }
+          purgeAccount(acc, { by: account.id, role: user.role, reason: `Data request ${reference} — ${reason}`, confirm: "PURGE", req, byRoute: false });
+        }
+        const ids = new Set([acc.id, acc.teacherId].filter(Boolean));
+        const mine = store.db.incidents.filter((i) => ids.has(i.reporterId) || (i.reporterIds || []).some((x) => ids.has(x)));
+        for (const i of mine) if (!i.anonymizedAt) anonymizeIncident(i);
+        store.save();
+        if (acc.teacherId) commit({ type: "roster_updated", id: acc.teacherId });
+      }
+      audit("data_request_processed", {
+        by: account.id, role: user.role, org: orgOf(account), target: acc.id, reason,
+        detail: `${type} · reference ${reference}`,
+        req,
+      });
+      commit({ type: "account_changed" });
+      return send(res, 200, { ok: true, type, account: publicAccount(acc) });
     }
 
     if (p === "/api/admin/audit" && m === "GET") {
@@ -1206,7 +1733,7 @@ export function createApp(opts = {}) {
       }
       audit("config_saved", {
         by: account.email, target: saved.id, req,
-        detail: `v${saved.version} activated — weights ${saved.weights.severity}/${saved.weights.vulnerability}/${saved.weights.locationRisk}/${saved.weights.timeSensitivity} %, CR ${saved.consistency.cr}, panel ${saved.panelValidationDate}`,
+        detail: `v${saved.version} activated — weights ${saved.weights.severity}/${saved.weights.vulnerability}/${saved.weights.locationRisk}/${saved.weights.timeSensitivity} %, CR ${saved.consistency.cr}, panel ${saved.panelValidationDate}${saved.panelReference ? ` (${saved.panelReference})` : ""}`,
       });
       commit({ type: "config_saved", id: saved.id });
       return send(res, 200, { active: saved, versions: config.list(), openTickets: openRealTickets() });
@@ -1231,7 +1758,7 @@ export function createApp(opts = {}) {
       }
       if (!saved) throw new HttpError(404, "not_found", "Configuration version not found.");
       // Restoring never rewrites the old record – it appends a new version with the same values.
-      audit("config_restored", { by: account.email, target: saved.id, req, detail: `v${saved.version} created from v${source.version}` });
+      audit("config_restored", { by: account.email, target: saved.id, req, detail: `v${saved.version} created from v${source.version} — panel ${saved.panelValidationDate ?? "default values"}${saved.panelReference ? ` (${saved.panelReference})` : ""}` });
       commit({ type: "config_saved", id: saved.id });
       return send(res, 200, { active: saved, versions: config.list(), openTickets: openRealTickets() });
     }
@@ -1251,7 +1778,14 @@ export function createApp(opts = {}) {
       need(user, "principal", "responder");
       const transitionalBody = mt[2] === "resolve" || mt[2] === "ack" ? await readJson(req) : {};
       const { incident, changed } = transition(user, mt[1], mt[2], transitionalBody);
-      if (changed) commit({ type: "incident_updated", id: incident.id, status: incident.status });
+      if (changed) {
+        // Responder actions are audit-logged with the organization that acted.
+        if (user.role === "responder") {
+          const action = { ack: "incident_acknowledged", onsite: "incident_on_site", resolve: "incident_resolved" }[mt[2]];
+          if (action) audit(action, { by: account.id, role: user.role, org: orgOf(account), target: incident.id, req, detail: incident.status });
+        }
+        commit({ type: "incident_updated", id: incident.id, status: incident.status });
+      }
       return send(res, 200, { incident: publicIncident(incident, user), changed });
     }
 
@@ -1267,41 +1801,134 @@ export function createApp(opts = {}) {
       const t = now();
       inc.status = "RESOLVED";
       inc.outcome = "cancelled";
-      inc.resolvedAt = t;
+      inc.resolvedAt = inc.resolvedAt ?? t;
       inc.resolvedBy = user.name;
       inc.log.push({ at: t, by: user.name, role: user.role, action: "cancelled", note: "Cancelled by the reporter" });
       commit({ type: "incident_updated", id: inc.id, status: inc.status });
       return send(res, 200, { incident: publicIncident(inc, user), changed: true });
     }
 
-    // History: only closed incidents can be removed.
-    // Principal = permanent delete for everyone. Other roles = remove from their own history only.
-    if (p === "/api/history" && m === "DELETE") {
-      need(user, "teacher", "principal", "parent", "responder");
-      const db = store.db;
-      const mine = db.incidents.filter((i) => i.status === "RESOLVED" && canSee(i, user) && !isHiddenFor(i, user));
-      if (user.role === "principal") {
-        const ids = new Set(mine.map((i) => i.id));
-        db.incidents = db.incidents.filter((i) => !ids.has(i.id));
-      } else {
-        for (const i of mine) (i.hiddenBy = i.hiddenBy || []).push(user.id);
+    // Records are never deleted through the API. The only remove-like verbs are
+    // POST /api/me/hidden (per-user, reversible), POST /api/incidents/:id/archive
+    // (organization-wide) and the Admin purge routes — all added below.
+
+
+    // ---- ARCHIVE (Principal): the record leaves the live views but stays readable
+    // and audit-logged. There is no delete path — see /api/admin/*/purge for erasure.
+    const archiveRoleLabel = (id) => {
+      const entry = store.db.roster.find((r) => r.id === id);
+      if (entry) return "Teacher";
+      const acc = accountById(id);
+      if (!acc) return "Unknown";
+      return { teacher: "Teacher", principal: "Principal", super_admin: "Admin", responder: "Responder", parent: "Parent/PTA" }[acc.role] || "Unknown";
+    };
+
+    /** Read-only archive row: the reporter is shown as a role label, never a name/id. */
+    const archiveEntry = (i, forUser) => {
+      const view = publicIncident(i, forUser);
+      delete view.reporterName;
+      delete view.reporterId;
+      return {
+        ...view,
+        reporterRole: archiveRoleLabel(i.reporterId),
+        archivedAt: i.archivedAt,
+        archivedAuto: Boolean(i.archivedAuto),
+        archiveReason: i.archiveReason ?? null,
+        anonymizedAt: i.anonymizedAt ?? null,
+        readOnly: true,
+        hidden: isHiddenFor(i, forUser),
+      };
+    };
+
+    const canArchiveTicket = (i) => {
+      if (i.status !== "RESOLVED")
+        throw bad("Only closed tickets can be archived — resolve or cancel it first. Active tickets are never archived.", "active_ticket");
+    };
+
+    if (p === "/api/incidents/archive-resolved" && m === "POST") {
+      need(user, "principal");
+      const body = await readJson(req);
+      const reason = clean(body.reason, 200);
+      const t = now();
+      const targets = store.db.incidents.filter((i) => !i.archivedAt && i.status === "RESOLVED");
+      for (const inc of targets) {
+        inc.archivedAt = t;
+        inc.archivedBy = account.id;
+        inc.archiveReason = reason || null;
+        inc.archivedAuto = false;
+        inc.log.push({ at: t, by: user.name, role: user.role, action: "archived", note: reason ? `Archived — ${reason}` : "Archived" });
       }
-      if (mine.length) commit({ type: "history_changed" });
-      return send(res, 200, { ok: true, count: mine.length, mode: user.role === "principal" ? "permanent" : "hidden" });
+      if (targets.length) {
+        store.save();
+        // One audit entry listing the ids — never a name.
+        audit("incident_archived", {
+          by: account.id, role: user.role, org: orgOf(account), target: targets.map((i) => i.id).join(","),
+          reason: reason || null, detail: `${targets.length} closed ticket(s) archived at once`, req,
+        });
+        commit({ type: "archive_changed" }); // no incident id in the SSE payload
+      }
+      return send(res, 200, { ok: true, count: targets.length });
     }
 
-    let md = p.match(/^\/api\/incidents\/([\w-]+)$/);
-    if (md && m === "DELETE") {
-      need(user, "teacher", "principal", "parent", "responder");
-      const inc = store.db.incidents.find((i) => i.id === md[1] && canSee(i, user));
+    let mar = p.match(/^\/api\/incidents\/([\w-]+)\/(archive|restore)$/);
+    if (mar && m === "POST") {
+      need(user, "principal");
+      const inc = store.db.incidents.find((i) => i.id === mar[1]);
       if (!inc) throw new HttpError(404, "not_found", "Incident not found.");
-      if (inc.status !== "RESOLVED") throw new HttpError(409, "not_closed", "Only closed incidents can be deleted from history.");
-      if (user.role === "principal") store.db.incidents = store.db.incidents.filter((i) => i.id !== inc.id);
-      else if (!isHiddenFor(inc, user)) (inc.hiddenBy = inc.hiddenBy || []).push(user.id);
-      commit({ type: "history_changed", id: inc.id });
-      return send(res, 200, { ok: true, mode: user.role === "principal" ? "permanent" : "hidden" });
+      const body = await readJson(req);
+      const t = now();
+      if (mar[2] === "archive") {
+        if (inc.archivedAt) throw new HttpError(409, "already_archived", "This ticket is already archived.");
+        canArchiveTicket(inc);
+        const reason = clean(body.reason, 200);
+        inc.archivedAt = t;
+        inc.archivedBy = account.id;
+        inc.archiveReason = reason || null;
+        inc.archivedAuto = false;
+        inc.log.push({ at: t, by: user.name, role: user.role, action: "archived", note: reason ? `Archived — ${reason}` : "Archived" });
+        store.save();
+        audit("incident_archived", {
+          by: account.id, role: user.role, org: orgOf(account), target: inc.id,
+          reason: reason || null, req,
+        });
+        commit({ type: "archive_changed" });
+        return send(res, 200, { ok: true, incident: archiveEntry(inc, user) });
+      }
+      // restore
+      if (!inc.archivedAt) throw bad("This ticket is not archived.");
+      const reason = clean(body.reason, 200);
+      inc.archivedAt = null;
+      inc.archivedBy = null;
+      inc.archiveReason = null;
+      inc.archivedAuto = false;
+      inc.log.push({ at: t, by: user.name, role: user.role, action: "restored", note: reason ? `Restored to live view — ${reason}` : "Restored to live view" });
+      store.save();
+      audit("incident_restored", {
+        by: account.id, role: user.role, org: orgOf(account), target: inc.id,
+        reason: reason || null, req,
+      });
+      commit({ type: "archive_changed" });
+      return send(res, 200, { ok: true, incident: publicIncident(inc, user) });
     }
 
+    // Paginated archive: Principal + Admin see every archived ticket, a Teacher only
+    // their own reports, a Responder the records of every ticket they can work with,
+    // every other role is refused.
+    if (p === "/api/incidents/archive" && m === "GET") {
+      if (!['principal', 'super_admin', 'teacher', 'responder'].includes(user.role))
+        throw new HttpError(403, "forbidden", "Your role cannot read the archive.");
+      const limit = Math.min(50, Math.max(1, Number(url.searchParams.get("limit")) || 50));
+      const page = Math.max(1, Number(url.searchParams.get("page")) || 1);
+      let items = store.db.incidents.filter((i) => i.archivedAt);
+      if (user.role === "teacher") items = items.filter((i) => i.reporterIds.includes(user.id));
+      items = [...items].sort((a, b) => (b.archivedAt || 0) - (a.archivedAt || 0));
+      const total = items.length;
+      const start = (page - 1) * limit;
+      return send(res, 200, {
+        items: items.slice(start, start + limit).map((i) => archiveEntry(i, user)),
+        total, limit, page, pages: Math.max(1, Math.ceil(total / limit)),
+      });
+    }
 
     // ---- Headcount verification (aggregate numbers only – no pupil names or personal data)
     let mh = p.match(/^\/api\/incidents\/([\w-]+)\/headcount$/);
@@ -1385,16 +2012,38 @@ export function createApp(opts = {}) {
       const t = now();
       const rt = store.db.modes.route;
       Object.assign(rt, { status: body.status, note: clean(body.note, 140), updatedAt: t, by: user.name });
-      for (const inc of store.db.incidents) {
-        if (!inc.eta || inc.status !== "EN_ROUTE") continue; // arrived or closed: nothing to re-estimate
-        const e = inc.eta;
+      // Re-estimate every org still on the way — each has its own ETA — plus the
+      // headline ETA of the org that owns it.
+      const restimate = (e) => {
         const oldMs = e.blocked || !e.minutes ? null : e.minutes * 60000;
-        const remainingFrac = oldMs ? Math.max(0, 1 - (t - e.startedAt) / oldMs) : 1;
+        const frac = oldMs ? Math.max(0, 1 - (t - e.startedAt) / oldMs) : 1;
         const r = D.computeEta({ mode: e.mode, distanceKm: e.distanceKm, route: body.status, speeds: config.active().responderSpeeds });
         const oldMin = e.blocked ? "blocked" : `${Math.max(0, Math.ceil((e.arriveBy - t) / 60000))} min left`;
-        if (r.blocked) inc.eta = { ...e, routeStatus: body.status, blocked: true, minutes: null, arriveBy: null };
-        else inc.eta = { ...e, routeStatus: body.status, blocked: false, minutes: r.minutes, startedAt: t - (1 - remainingFrac) * r.minutes * 60000, arriveBy: t + remainingFrac * r.minutes * 60000 };
-        const newMin = inc.eta.blocked ? "no usable route — reroute" : `${Math.max(0, Math.ceil((inc.eta.arriveBy - t) / 60000))} min left`;
+        const next = r.blocked
+          ? { ...e, routeStatus: body.status, blocked: true, minutes: null, arriveBy: null }
+          : { ...e, routeStatus: body.status, blocked: false, minutes: r.minutes, startedAt: t - (1 - frac) * r.minutes * 60000, arriveBy: t + frac * r.minutes * 60000 };
+        const newMin = next.blocked ? "no usable route — reroute" : `${Math.max(0, Math.ceil((next.arriveBy - t) / 60000))} min left`;
+        return { next, oldMin, newMin };
+      };
+      for (const inc of store.db.incidents) {
+        if (inc.status !== "EN_ROUTE") continue; // arrived or closed: nothing to re-estimate
+        const rs = inc.responses && typeof inc.responses === "object" ? inc.responses : {};
+        const moving = D.RESPONDER_ORG_IDS.filter((id) => rs[id] && rs[id].status === "en_route" && rs[id].mode);
+        if (moving.length) {
+          for (const id of moving) {
+            const { next, oldMin, newMin } = restimate(rs[id]);
+            rs[id] = next;
+            const label = D.orgLabel(id);
+            inc.log.push({ at: t, by: label, role: user.role, org: id, action: "route", note: `Approach route ${body.status} (${label}): ETA ${oldMin} → ${newMin}` });
+          }
+          const owner = inc.acknowledgedByOrg;
+          if (owner && rs[owner] && rs[owner].status === "en_route") inc.eta = { ...etaView(rs[owner]) };
+          continue;
+        }
+        // Legacy ticket scored before per-org responses existed.
+        if (!inc.eta) continue;
+        const { next, oldMin, newMin } = restimate(inc.eta);
+        inc.eta = next;
         inc.log.push({ at: t, by: user.name, role: user.role, action: "route", note: `Approach route ${body.status}: ETA ${oldMin} → ${newMin}` });
       }
       commit({ type: "route_status", status: body.status });
@@ -1448,22 +2097,24 @@ export function createApp(opts = {}) {
       return send(res, 201, { teacher: entry, account: publicAccount(acc), tempPassword });
     }
 
+    mt = p.match(/^\/api\/roster\/([\w-]+)\/archive$/);
+    if (mt && m === "POST") {
+      need(user, "principal");
+      const body = await readJson(req);
+      const entry = store.db.roster.find((r) => r.id === mt[1]);
+      if (!entry) throw new HttpError(404, "not_found", "Teacher not found.");
+      const acc = teacherAccount(entry.id);
+      if (!acc) throw new HttpError(404, "not_found", "That teacher has no sign-in account to archive.");
+      archiveAccount(acc, { by: account.id, role: user.role, reason: body.reason, req });
+      commit({ type: "roster_updated", id: entry.id });
+      return send(res, 200, { ok: true, account: publicAccount(acc) });
+    }
+
     mt = p.match(/^\/api\/roster\/([\w-]+)$/);
-    if (mt && (m === "PUT" || m === "DELETE")) {
+    if (mt && m === "PUT") {
       need(user, "principal");
       const entry = store.db.roster.find((r) => r.id === mt[1]);
       if (!entry) throw new HttpError(404, "not_found", "Teacher not found.");
-      if (m === "DELETE") {
-        store.db.roster = store.db.roster.filter((r) => r.id !== entry.id);
-        const acc = teacherAccount(entry.id);
-        if (acc) {
-          acc.status = "inactive";
-          revokeSessions(acc.id);
-          audit("account_deactivated", { by: user.email, target: acc.email, detail: "removed from roster", req });
-        }
-        commit({ type: "roster_updated", id: entry.id });
-        return send(res, 200, { ok: true });
-      }
       const body = await readJson(req);
       const values = parseTeacherFields(body, { partial: true });
       if (body.status === "active" || body.status === "inactive") values.status = body.status;
@@ -1487,6 +2138,9 @@ export function createApp(opts = {}) {
     if (p === "/api/admin/reset" && m === "POST") {
       need(user, "principal");
       if (!allowReset) throw new HttpError(403, "forbidden", "Demo reset is disabled on this server.");
+      // Never available in production, even when the demo flag is switched on.
+      if (process.env.NODE_ENV === "production")
+        throw new HttpError(403, "forbidden", "Demo reset is disabled on this server.");
       store.reset({ keepRoster: false });
       if (seedDemoIncident) seedDemo();
       commit({ type: "reset" });
@@ -1503,7 +2157,7 @@ export function createApp(opts = {}) {
     const items = db.incidents.filter((i) => i.drillId === dm.id);
     for (const inc of items) {
       if (inc.status === "RESOLVED") continue;
-      inc.status = "RESOLVED"; inc.outcome = "drill"; inc.resolvedAt = t; inc.resolvedBy = user.name;
+      inc.status = "RESOLVED"; inc.outcome = "drill"; inc.resolvedAt = inc.resolvedAt ?? t; inc.resolvedBy = user.name;
       inc.log.push({ at: t, by: user.name, role: user.role, action: "drill_end", note: "Drill ended" });
     }
     const avg = (arr) => { const v = arr.filter((x) => x !== null && x !== undefined); return v.length ? Math.round(v.reduce((a, b) => a + b, 0) / v.length) : null; };
@@ -1593,8 +2247,11 @@ export function createApp(opts = {}) {
     server,
     store,
     runEscalations,
+    runArchiveSweep,
+    retention,
     close() {
       if (tickTimer) clearInterval(tickTimer);
+      if (archiveTimer) clearInterval(archiveTimer);
       store.flush();
       for (const c of sseClients) { try { c.res.end(); } catch { /* ignore */ } }
       sseClients.clear();

@@ -1,5 +1,6 @@
 // Shared between the Node server and the React client.
 // Everything that decides an urgency score lives here so both sides agree.
+import { leadAgencyFor } from "./agencies.js";
 
 export const SCHOOL = {
   name: "Sinalhan Elementary School",
@@ -156,64 +157,10 @@ export function searchCatalog(query) {
   return out;
 }
 
-// Escalation reference. `verified:false` numbers came from the original Replit build and
-// have NOT been confirmed against an official directory – confirm before go-live.
-export const ESCALATION_MATRIX = [
-  {
-    category: "fire",
-    label: "Fire / Chemical",
-    agency: "Bureau of Fire Protection – Sta. Rosa",
-    hotlines: [
-      { number: "160", verified: false },
-      { number: "(049) 544-0136", verified: false },
-    ],
-    action: "Evacuate immediately. Do not use elevators.",
-  },
-  {
-    category: "medical",
-    label: "Medical / EMS",
-    agency: "Nearest hospital / EMS · Philippine Red Cross",
-    hotlines: [
-      { number: "143", note: "Red Cross", verified: true },
-      { number: "(049) 534-0890", verified: false },
-    ],
-    action: "Keep patient still. Do not move unconscious persons.",
-  },
-  {
-    category: "flood",
-    label: "Flooding / Natural Disaster",
-    agency: "CDRRMO – Santa Rosa City",
-    hotlines: [
-      { number: "911", verified: true },
-      { number: "(049) 534-2291", verified: false },
-    ],
-    action: "Move to higher ground. Avoid floodwater.",
-  },
-  {
-    category: "security",
-    label: "Security / Threat",
-    agency: "PNP – Sta. Rosa City Station",
-    hotlines: [
-      { number: "911", verified: true },
-      { number: "(049) 544-0001", verified: false },
-    ],
-    action: "Lockdown. Do not confront intruder.",
-  },
-  {
-    category: "other",
-    label: "Other / General",
-    agency: "CDRRMO Santa Rosa (general dispatch)",
-    hotlines: [
-      { number: "911", verified: true },
-      { number: "(049) 534-2291", verified: false },
-    ],
-    action: "Follow school DRRM officer instructions.",
-  },
-];
-
+// The agency a ticket recommends, in plain text. Only the lead agency of the
+// mapping (shared/agencies.js) — numbers never leave the responder Escalation page.
 export function agencyFor(category) {
-  const row = ESCALATION_MATRIX.find((r) => r.category === category) || ESCALATION_MATRIX[4];
-  return row.agency;
+  return leadAgencyFor(category)?.name ?? "";
 }
 
 export const DISCLAIMERS = {
@@ -294,6 +241,18 @@ export function scoreIncident(inc, { hazardActive = false, config = null } = {})
   if (mismatch) overrideReasons.push("HEADCOUNT_MISMATCH");
   return { locationRisk, timeSensitivity, score, overrideReasons, hazardApplied };
 }
+
+// Responder organizations. A responder account belongs to exactly ONE org (no
+// shared accounts); both orgs can respond to the same ticket independently.
+export const RESPONDER_ORGS = [
+  { id: "barangay", label: "Barangay Sinalhan", short: "Barangay" },
+  { id: "cdrrmo", label: "CDRRMO", short: "CDRRMO" },
+];
+export const RESPONDER_ORG_IDS = RESPONDER_ORGS.map((o) => o.id);
+export const orgById = (id) => RESPONDER_ORGS.find((o) => o.id === id) || null;
+export const orgLabel = (id) => orgById(id)?.label ?? "";
+// Suggested transport per org when acknowledging. All three modes stay selectable.
+export const ORG_SUGGESTED_MODES = { barangay: ["walking", "motorcycle"], cdrrmo: ["vehicle"] };
 
 // Feature: responder ETA by transport mode and approach-route status.
 export const TRANSPORT_MODES = [

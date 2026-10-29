@@ -1,17 +1,42 @@
-import { useState } from "react";
-import { Pencil, Plus, Trash2 } from "lucide-react";
+import { useEffect, useState } from "react";
+import { Archive, MoreVertical, Pencil, Plus } from "lucide-react";
 import { useApp } from "../lib/store";
 import type { RosterEntry } from "../lib/types";
 import { ConfirmModal, Modal } from "../components/Modal";
 import { Select } from "../components/Select";
 import { FilterBar } from "../components/FilterBar";
+import { PageFlow } from "../components/PageShell";
 import {
   facetCounts, filterItems, initialFilterState, matchesQuery, setCategory, setQuery, useFilterState, type FilterSpec,
 } from "../lib/filters";
-import { SECTION_GRADES, gradeCode, parseSection, composeSection } from "../../shared/section.js";
+import { SECTION_GRADES, gradeCode, gradeLabel, parseSection, composeSection } from "../../shared/section.js";
 
 const GRADE_OPTIONS = SECTION_GRADES.map((label) => ({ value: gradeCode(label) ?? "", label }));
 const GRADE_CODES = GRADE_OPTIONS.map((g) => g.value);
+
+/** Structured grade, falling back to the stored section string. */
+const gradeOf = (t: RosterEntry) => t.grade || parseSection(t.section).grade || "";
+
+/** "Grade 3 · Sec A" for the roster tiles and rows. */
+function gradeAndSection(t: RosterEntry): string {
+  const grade = gradeLabel(gradeOf(t));
+  const sec = t.sectionName || parseSection(t.section).sectionName;
+  if (grade && sec) return `${grade} · Sec ${sec}`;
+  return grade || sec || t.section;
+}
+
+function StatusChip({ status, compact = false }: { status: RosterEntry["status"]; compact?: boolean }) {
+  const on = status === "active";
+  return (
+    <span
+      className={`shrink-0 rounded-full font-bold ${compact ? "px-1.5 py-0.5 text-[10px]" : "px-2 py-1 text-xs"} ${
+        on ? "bg-emerald-50 text-emerald-700" : "bg-slate-100 text-slate-500"
+      }`}
+    >
+      {on ? "On duty" : "Off duty"}
+    </span>
+  );
+}
 
 function TeacherForm({ initial, onClose }: { initial: RosterEntry | null; onClose: () => void }) {
   const { addTeacher, editTeacher } = useApp();
@@ -88,14 +113,33 @@ function TeacherForm({ initial, onClose }: { initial: RosterEntry | null; onClos
 }
 
 export default function RosterPanel() {
-  const { roster, deleteTeacher } = useApp();
+  const { roster, archiveTeacher } = useApp();
   const [editing, setEditing] = useState<RosterEntry | "new" | null>(null);
-  const [deleting, setDeleting] = useState<RosterEntry | null>(null);
+  const [archiving, setArchiving] = useState<RosterEntry | null>(null);
+  const [reason, setReason] = useState("");
   // Grade chips + counts persist per screen for the session (as does the view).
   const [state, setState] = useFilterState("principal-roster", () => initialFilterState());
   const [view, setView] = useFilterState("principal-roster:view", "grid" as "list" | "grid");
+  // Which row's overflow menu is open (list mode only).
+  const [menuFor, setMenuFor] = useState<string | null>(null);
 
-  const gradeOf = (t: RosterEntry) => t.grade || parseSection(t.section).grade || "";
+  // The row menu closes on an outside press or Escape.
+  useEffect(() => {
+    if (!menuFor) return;
+    const onDown = (e: PointerEvent) => {
+      const target = e.target as Element | null;
+      if (target && target.closest("[data-roster-menu-root]")) return;
+      setMenuFor(null);
+    };
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setMenuFor(null); };
+    document.addEventListener("pointerdown", onDown, true);
+    document.addEventListener("keydown", onKey, true);
+    return () => {
+      document.removeEventListener("pointerdown", onDown, true);
+      document.removeEventListener("keydown", onKey, true);
+    };
+  }, [menuFor]);
+
   const spec: FilterSpec<RosterEntry> = {
     search: (t, q) => matchesQuery(q, t.name, t.section, t.room),
     category: (t, c) => gradeOf(t) === c,
@@ -105,7 +149,7 @@ export default function RosterPanel() {
   const shown = filterItems(roster, state, spec);
 
   return (
-    <div className="scroll-area mx-auto w-full max-w-6xl px-3 py-3 lg:h-full lg:overflow-y-auto">
+    <PageFlow>
       <div className="flex items-center justify-between mb-2">
         <h2 className="text-xs font-bold text-slate-500 uppercase tracking-wide">Teacher Roster &amp; Section Mapping</h2>
         <button onClick={() => setEditing("new")} className="flex min-h-12 items-center gap-1 rounded-xl bg-brand-600 px-3 text-sm font-bold text-white"><Plus size={16} /> Add teacher</button>
@@ -129,37 +173,90 @@ export default function RosterPanel() {
             ],
           }}
           results={{ label: "Teachers", shown: shown.length, total: roster.length }}
-          view={{ mode: view, onToggle: (m) => setView(m) }}
+          view={{ mode: view, onToggle: (m) => { setMenuFor(null); setView(m); } }}
         />
       </div>
-      <div className={`gap-2 ${view === "grid" ? "grid md:grid-cols-2 lg:grid-cols-3" : "grid grid-cols-1"}`}>
-        {shown.map((t) => (
-          <div key={t.id} className="bg-white border border-slate-200 rounded-2xl p-3">
-            <div className="flex items-start justify-between gap-2">
-              <div className="min-w-0">
-                <p className="text-base font-bold text-slate-800">{t.name}</p>
-                <p className="text-sm text-slate-600">{t.section}</p>
-                <p className="text-xs text-slate-500 mt-0.5">📍 {t.room}</p>
-                <p className="text-xs text-slate-500">👥 Registry today: <span className="font-mono font-bold">{t.registry}</span></p>
+      {view === "grid" ? (
+        /* Grid: compact tiles — 2 per phone row, 3 at md, 4 at xl. */
+        <ul data-roster-grid className="grid list-none grid-cols-1 gap-2 min-[360px]:grid-cols-2 md:grid-cols-3 xl:grid-cols-4">
+          {shown.map((t) => (
+            <li key={t.id} className="min-w-0">
+              <button type="button" data-roster-tile onClick={() => setEditing(t)}
+                className="flex min-h-12 w-full min-w-0 flex-col gap-1 rounded-2xl border border-slate-200 bg-white p-2.5 text-left hover:border-brand-300">
+                <span className="flex w-full min-w-0 items-start justify-between gap-1.5">
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate text-sm font-bold text-slate-800">{t.name}</span>
+                    <span className="mt-0.5 block truncate text-[11px] text-slate-600">{gradeAndSection(t)}</span>
+                  </span>
+                  <StatusChip status={t.status} compact />
+                </span>
+                <span className="block text-[11px] text-slate-500">
+                  Registry <span className="font-mono font-bold text-slate-700">{t.registry}</span>
+                </span>
+              </button>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        /* List: one dense row per teacher at every width. */
+        <ul data-roster-list className="grid list-none grid-cols-1 gap-1.5">
+          {shown.map((t) => (
+            <li key={t.id} data-roster-row
+              className="relative flex min-h-14 min-w-0 items-center gap-1.5 rounded-xl border border-slate-200 bg-white py-1 pl-3 pr-1">
+              <button type="button" onClick={() => setEditing(t)} className="flex min-h-12 min-w-0 flex-1 items-center gap-2 text-left">
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate text-sm font-bold text-slate-800">{t.name}</span>
+                  <span className="block truncate text-[11px] text-slate-600">
+                    {gradeAndSection(t)} · {t.room || "No room set"}
+                  </span>
+                </span>
+                <span className="shrink-0 text-right text-[10px] leading-tight text-slate-500">
+                  <span className="block font-mono text-xs font-bold text-slate-700">{t.registry}</span>
+                  registry
+                </span>
+                <StatusChip status={t.status} />
+              </button>
+              <div className="relative shrink-0" data-roster-menu-root>
+                <button type="button" aria-haspopup="menu" aria-expanded={menuFor === t.id}
+                  aria-label={`Actions for ${t.name}`}
+                  onClick={() => setMenuFor((id) => (id === t.id ? null : t.id))}
+                  className="flex h-11 w-11 items-center justify-center rounded-lg text-slate-500 hover:bg-slate-100">
+                  <MoreVertical size={18} />
+                </button>
+                {menuFor === t.id && (
+                  <div role="menu" aria-label={`Actions for ${t.name}`}
+                    className="absolute right-0 top-full z-20 mt-1 w-44 rounded-xl border border-slate-200 bg-white p-1 shadow-lg">
+                    <button type="button" role="menuitem"
+                      onClick={() => { setMenuFor(null); setEditing(t); }}
+                      className="flex min-h-11 w-full items-center gap-2 rounded-lg px-2 text-left text-sm font-semibold text-slate-700 hover:bg-slate-100">
+                      <Pencil size={15} /> Edit teacher
+                    </button>
+                    <button type="button" role="menuitem"
+                      onClick={() => { setMenuFor(null); setArchiving(t); setReason(""); }}
+                      className="flex min-h-11 w-full items-center gap-2 rounded-lg px-2 text-left text-sm font-semibold text-slate-700 hover:bg-slate-100">
+                      <Archive size={15} /> Archive
+                    </button>
+                  </div>
+                )}
               </div>
-              <span className={`text-xs font-bold rounded-full px-2 py-1 shrink-0 ${t.status === "active" ? "text-emerald-700 bg-emerald-50" : "text-slate-500 bg-slate-100"}`}>
-                {t.status === "active" ? "On duty" : "Off duty"}
-              </span>
-            </div>
-            <div className="flex gap-2 mt-3">
-              <button onClick={() => setEditing(t)} className="flex min-h-12 flex-1 items-center justify-center gap-1 rounded-xl bg-slate-100 text-sm font-bold text-slate-700"><Pencil size={14} /> Edit</button>
-              <button onClick={() => setDeleting(t)} className="flex min-h-12 flex-1 items-center justify-center gap-1 rounded-xl bg-blush-100 text-sm font-bold text-blush-700"><Trash2 size={14} /> Delete</button>
-            </div>
-          </div>
-        ))}
-      </div>
+            </li>
+          ))}
+        </ul>
+      )}
       {shown.length === 0 && roster.length > 0 && <p className="text-center text-sm text-slate-500 py-8">No teachers match those filters.</p>}
       {roster.length === 0 && <p className="text-center text-sm text-slate-500 py-8">No teachers yet. Add one to get started.</p>}
       {editing && <TeacherForm initial={editing === "new" ? null : editing} onClose={() => setEditing(null)} />}
-      {deleting && (
-        <ConfirmModal title="Delete teacher?" danger confirmLabel="Delete" onClose={() => setDeleting(null)} onConfirm={() => void deleteTeacher(deleting.id)}
-          message={`${deleting.name} (${deleting.section}) will be removed from the roster and signed out. Past incident records are kept.`} />
+      {archiving && (
+        <ConfirmModal title="Archive teacher?" confirmLabel="Archive teacher" onClose={() => setArchiving(null)}
+          onConfirm={() => void archiveTeacher(archiving.id, reason.trim() || undefined)}
+          message={`${archiving.name} (${archiving.section}) is archived: they leave the live roster and cannot sign in. Their tickets and headcount records stay, and an Admin can restore the account later. Nothing is deleted.`}>
+          <label className="mt-3 block text-xs font-semibold text-slate-600">Reason (optional)
+            <input value={reason} maxLength={200} onChange={(e) => setReason(e.target.value)}
+              placeholder="Left the school, on leave…"
+              className="mt-1 min-h-12 w-full rounded-xl border border-slate-300 px-3 text-base font-normal outline-none focus:border-brand-500" />
+          </label>
+        </ConfirmModal>
       )}
-    </div>
+    </PageFlow>
   );
 }
