@@ -15,7 +15,8 @@
     "start": "node server/index.js",
     "test": "node --test test/*.test.mjs",
     "typecheck": "tsc --noEmit",
-    "seed:dev": "node scripts/seed-dev.mjs"
+    "seed:dev": "node scripts/seed-dev.mjs",
+    "seed:history": "node scripts/seed-history.mjs"
   },
   "dependencies": {
     "lucide-react": "^0.545.0",

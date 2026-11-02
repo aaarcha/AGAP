@@ -35,6 +35,13 @@ export interface OrgResponse {
   orgLabel: string;
   status: "en_route" | "on_site" | "resolved";
   ackAt: number;
+  /** Same instant as ackAt, kept as the spec'd track field names. */
+  acknowledgedAt?: number;
+  enRouteAt?: number;
+  /** The acting account id. */
+  by?: string | null;
+  /** Headline ETA in minutes for this org. */
+  etaMinutes?: number | null;
   onSiteAt: number | null;
   resolvedAt: number | null;
   byName?: string;
@@ -77,6 +84,8 @@ export interface Incident {
   timeSensitivity?: number;
   reporterName?: string;
   reporterId?: string;
+  /** Everyone who reported this (merged) ticket — sent to teachers for the My Reports relation label. */
+  reporterIds?: string[];
   acknowledgedBy?: string | null;
   /** Which org first acknowledged (the headline status names it). */
   acknowledgedByOrg?: ResponderOrg | null;

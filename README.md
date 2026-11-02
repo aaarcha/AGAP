@@ -9,7 +9,7 @@ Principal, Parent/PTA and Barangay/CDRRMO devices within about a second.
 | Role | What they do |
 |---|---|
 | Teacher | 3-tap report (sent immediately; "Cancel this alert" on the last-report panel undoes a mistake), headcount prompt for group-scope alerts, edit own profile/room, personal history and account |
-| Principal | Command queue, can also report, Safety (hazard/drill/headcount), official History (permanent delete), teacher roster, About and Account |
+| Principal | Command queue, can also report, Analytics (post-incident breakdowns); the rail is **Command · Report · Analytics · More**, where More holds Safety (hazard/drill switches), the Headcount status feed, the official Incidents & Records (browser, drills and archives), the teacher roster, About and Account |
 | Parent/PTA | Sees only alerts for their child's section (plus whole-school alerts); "All clear" when closed; advisory in English/Filipino; one Contact School button |
 | Barangay Sinalhan · CDRRMO | One account per organization (never shared): priority dispatch queue — Acknowledge → On-Site → Resolve / False alarm. Both orgs respond to the same ticket independently, each with its own ETA and transport; History |
 
@@ -19,6 +19,7 @@ npm install
 npm test                 # API tests (roles, scoping, merging, offline replay, SSE…) + the Select component test
 npm run dev:all          # starts BOTH the API (:3000) and the app (:5173) in one terminal
 # (or separately: npm run dev:server  and  npm run dev -- --host)
+npm run seed:history     # dev only: sample resolved/archived incidents and drill logs
 # or production-style:
 npm run build && npm start   # http://localhost:3000
 ```
@@ -62,14 +63,16 @@ live updates over Server-Sent Events with polling fallback, browser notification
 * Time Sensitivity is fixed at 3 (as in the prototype).
 
 ## History, archive, hide and purge
-Every resolved, false-alarm or cancelled incident moves to **History** for teachers, principals, parents and responders (the responder rail reads **Queue · Escalation · History · Account** — their queue stays open tickets only, closed work lives on History), with full details (urgency reasons in plain words, timeline, who acknowledged/closed). Scoring math is not shown to teachers or parents. **Nothing is ever deleted through the UI or the API — no route accepts HTTP `DELETE`.**
+Every resolved, false-alarm or cancelled incident moves to **History** for teachers, parents and responders (the responder rail reads **Queue · Escalation · History · Account** — their queue stays open tickets only, closed work lives on History), with full details (urgency reasons in plain words, timeline, who acknowledged/closed). The Principal's official record is **More → Incidents & Records** — three tabs (Real Incidents, Drill Records, System Archives) with a Records → School Year → Month → Category → Zone browser and reporter-by-role detail; past drill logs are read-only there, so Safety only carries the drill/hazard switches. The post-incident breakdown charts live on their own **Analytics** rail tab. Scoring math is not shown to teachers or parents. **Nothing is ever deleted through the UI or the API — no route accepts HTTP `DELETE`.**
+* **Per-organization response** — Barangay Sinalhan and CDRRMO each keep their own track (`incident.responses`): the responder's "Your response" card, its stepper and the single next-action button follow only that org, "Other responders" is read-only below it, and the status line names who is furthest ("On site · Barangay Sinalhan") or who closed the ticket ("Resolved by …"). The acting org always comes from the signed-in account — never from the request — each track's timestamps are written once, ticket-level stamps stay the earliest across orgs, and an org may only resolve after its own on-site step. Principal, Teacher and Parent keep the shared ticket-level stepper.
+* **My Reports visibility** — a teacher sees a ticket when they are one of its reporters, when its linked section is their class, or when it is whole-school; rows are labelled "You reported", "You also reported" or "Reported in your class" (never another teacher's name). Drill tickets go only to the teachers who took part, the archive follows the same rule, and hiding stays per user.
 * **HIDE** (Teacher for their own reports, Parent for closed alerts) — a per-user "remove from my list": reversible from the **Hidden** chip, the record itself is unchanged and stays visible to everyone else. Responders have **no hide and no delete**; they can only filter closed tickets out of their queue.
-* **ARCHIVE** (Principal) — organization-wide: one ticket, or **Archive all resolved** (with an optional reason). A sweep runs on server start and then hourly (`ASPIRE_ARCHIVE_AFTER_DAYS`, placeholder) and writes one audit entry per run. Archived tickets leave `/api/state` for **every** role and live behind `GET /api/incidents/archive` (paginated, limit 50): Principal/Admin see all, a Responder every archived ticket, a Teacher only their own reports, a Parent gets 403. Restore puts a ticket back. Archived records have a **dedicated page** — Principal: **History → View archive**, Responder: **History → View archive**, Super Admin: **Users → Records & Archives → Open archive**, Teacher: **My Reports → Archived** — all read-only; a Parent never sees archived tickets.
+* **ARCHIVE** (Principal) — organization-wide, from **More → Incidents & Records → Real Incidents**: the archive icon on any resolved record moves just that ticket, and the **Archive all resolved** action at the top of the tab moves every resolved report at once (active and ongoing tickets are never touched). A sweep also runs on server start and then hourly (`ASPIRE_ARCHIVE_AFTER_DAYS`, placeholder) and writes one audit entry per run. Archived tickets leave `/api/state` for **every** role and live behind `GET /api/incidents/archive` (paginated, limit 50): Principal/Admin see all, a Responder every archived ticket, a Teacher the same rule as the live list (reporter, their linked section or the whole school), a Parent gets 403. **Restore** on an archived row puts a ticket back in Real Incidents. Archived records live in **System Archives**, which is split into two dedicated archives — **Archived tickets** and **Archived accounts** (Admin only); Responder: **History → View archive**, Teacher: **My Reports → Archived**. A Parent never sees archived tickets.
 * **Accounts** — Admin can archive/restore an account (archived = sessions revoked, sign-in blocked with the generic "Invalid email or password.", hidden from rosters; restore forces a password change). The Principal can archive a teacher from the roster, which archives that account. Self-archive and archiving the last active Super Admin are refused.
-* **PURGE** (Admin, typed confirmation) — erases/anonymises personal data once the record is archived **and** past retention, keeping ids, roles and statistics. Eligibility counters live in the **Records & Archives** card on the Users tab; the periods themselves (placeholders, set by the school's data protection contact via the `ASPIRE_RETENTION_*` env vars, see `server/retention.js`) live under **About ASPIRE → Retention and purge rules**. Data requests (restrict / erase) are processed from the account detail and need a reference and a reason.
+* **PURGE** (Admin, typed confirmation) — erases/anonymises personal data of an **archived** record, keeping ids, roles and statistics. The purge icon on an archived ticket is enabled as soon as the record is archived (a typed `PURGE` + a reason are the gate); already-purged rows are not offered again. The placeholder retention periods themselves (set by the school's data protection contact via the `ASPIRE_RETENTION_*` env vars, see `server/retention.js`) are reported as guidance under **About ASPIRE → Retention and purge rules**. Data requests (restrict / erase) are processed from the account detail and need a reference and a reason.
 
 ## Super Admin console
-The rail reads **Users · Audit · Year · System Settings · Profile**. The default landing (Users) is a dashboard — Total users, Active responders, Recent security events (last 24 h) — followed by the interactive user roster and the read-only **Records & Archives** counters. The retention policy table is deliberately *not* on the landing: it sits in **About ASPIRE → Retention and purge rules** (expandable), which every role can read.
+The rail reads **Users · Analytics · System Settings · More**. School year, the audit log, Incidents & Records and Account are entries inside **More**, not rail tabs. The default landing (Users) is the interactive user roster whose compact dashboard — Total users, Active responders, Recent security events (last 24 h) — is three equal cards directly under the search and filter row. **More** is a plain list of row links (no duplicate archive widget). The retention policy table is deliberately *not* on the landing: it sits in **About ASPIRE → Retention and purge rules** (expandable), which every role can read.
 * `/api/admin/reset` stays POST-only behind `ALLOW_DEMO_RESET`, is refused whenever `NODE_ENV=production`, and is never surfaced in the UI.
 * Reporters can cancel their own alert until a responder is on site, unless other people also reported it.
 
@@ -88,9 +91,11 @@ Date fields use the shared `src/components/DatePicker.tsx` — never a native `<
 day and emptying clears it — or open the calendar (popover at ≥ 640px, bottom sheet below), where
 the header walks day → month → year grids (and picks walk back out), so nobody arrow-clicks through
 a year, a month or a decade.
-Record lists (every role's History, the Super Admin audit log) share the period chips + From/To
-range in `src/components/DateRange.tsx`, backed by the pure helpers in `src/lib/filters.ts`
-(`DateRangeState`, `setPeriod`, `setDateBound`, `inDateRange`).
+Record lists (every role's History, the Super Admin audit log, Analytics) choose their period from
+one **Period** dropdown inside the Filters sheet — Any time, Today, Last 7 days, Last 30 days, This
+school year, Custom range (which reveals the From/To pickers) — backed by the pure helpers in
+`src/lib/filters.ts` (`DateRangeState`, `setPeriod`, `setDateBound`, `inDateRange`). The period counts
+as an active filter on the Filters badge and in the results summary; there is no chip row anywhere.
 
 ## Branding
 The product name is **ASPIRE**, set in one place: `src/lib/brand.ts`
@@ -100,14 +105,14 @@ Palette tokens live in `src/index.css` (`@theme`): brand blue `#425B9A`, sky `#7
 ## Priority-rule features (added on top of AHP–SAW)
 | # | Feature | Where |
 |---|---|---|
-| 1 | **Pupil headcount verification** – group-scope reports only (classroom or whole school); aggregate counts (e.g. 27/28) compared with today's registry; a mismatch forces Critical | Teacher headcount card, Principal cards/Safety, Parent section count |
-| 2 | **Hazard mode** – Principal switches on a flood/typhoon state; Location Risk +2 for ground-floor / low-lying zones, open tickets re-scored live | Principal → Safety |
+| 1 | **Pupil headcount verification** – group-scope reports only (classroom or whole school); aggregate counts (e.g. 27/28) compared with today's registry; a mismatch forces Critical | Teacher headcount card, Principal More → Headcount status, Parent section count |
+| 2 | **Hazard mode** – Principal switches on a flood/typhoon state; Location Risk +2 for ground-floor / low-lying zones, open tickets re-scored live | Principal → More → Safety |
 | 3 | **Time-based escalation** – unacknowledged ticket escalates to Barangay Sinalhan (Time Sensitivity +1) then CDRRMO (+2) | automatic |
 | 4 | **Critical override (non-compensatory)** – Severity 5 or a headcount mismatch is always CRITICAL | automatic |
-| 5 | **Drill mode** – tickets tagged DRILL, parents not alarmed, passive metrics (time to report/acknowledge/on-site/headcount, taps per report) saved per drill | Principal → Safety |
+| 5 | **Drill mode** – tickets tagged DRILL, parents not alarmed, passive metrics (time to report/acknowledge/on-site/headcount, taps per report) saved per drill | Principal → More → Safety (logs in Incidents & Records) |
 | 7 | **English / Filipino advisory templates** for parents (with copy button) | Parent view |
 | 8 | **Responder ETA** by transport mode + **approach-route status** (passable / flooded / blocked), report→on-site metric | Responder acknowledge + route control; Principal sees route status read-only in Details |
 
-Not built (listed as future work): #6 post-incident analytics / weight recalibration dashboard, #9 nearest-facility escalation map
-(needs verified facility locations). All thresholds, boosts and speeds are illustrative until the expert panel validates them.
+Not built (listed as future work): #9 nearest-facility escalation map (needs verified facility locations).
+All thresholds, boosts and speeds are illustrative until the expert panel validates them.
 Remember to update your objectives, Table 14, the HIPO diagrams and the SFD/DFD for anything you keep in scope.

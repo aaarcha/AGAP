@@ -244,8 +244,12 @@ const openGroupMenu = (label) => {
   const trigger = panel().querySelector(`[data-group-trigger][aria-label^="${label}:"]`);
   assert.ok(trigger, `the "${label}" dropdown exists in the panel`);
   fireEvent.click(trigger);
-  const menu = panel().querySelector(`[role="listbox"][aria-label="${label}"]`);
+  // The menu is portalled to document.body, so the panel's scroll box can never clip it.
+  const menu = document.querySelector(`[data-group-menu][aria-label="${label}"]`);
   assert.ok(menu, `the "${label}" menu opened`);
+  assert.equal(panel().contains(menu), false, "the menu is portalled out of the panel");
+  assert.ok(menu.className.includes("overflow-y-auto"), "it scrolls inside instead of being cut off");
+  assert.ok(menu.className.includes("max-h-"), "it is capped by a max-height");
   return menu;
 };
 const optionIn = (menu, labelPrefix) => {
@@ -353,7 +357,7 @@ test("phone: the sheet holds Select dropdowns with counts, a disabled zero-count
 test("a group dropdown is multi-select and \"Any <name>\" clears it", () => {
   render(React.createElement(Demo));
   openFilters();
-  const gradeMenu = () => panel().querySelector('[role="listbox"][aria-label="Grade"]');
+  const gradeMenu = () => document.querySelector('[data-group-menu][aria-label="Grade"]');
   const trigger = () => panel().querySelector('[data-group-trigger][aria-label^="Grade"]');
   openGroupMenu("Grade");
   fireEvent.click(optionIn(gradeMenu(), "Grade 3"));
@@ -377,7 +381,7 @@ test("at >= 768 the panel is a popover, and Esc closes a dropdown before the pan
   // A dropdown opened inside the panel takes the first Esc.
   openGroupMenu("Status");
   fireEvent.keyDown(document.body, { key: "Escape" });
-  assert.equal(panel().querySelector('[role="listbox"]'), null, "the dropdown closed first");
+  assert.equal(document.querySelector("[data-group-menu]"), null, "the dropdown closed first");
   assert.ok(panel(), "the panel is still open");
 
   fireEvent.keyDown(document.body, { key: "Escape" });

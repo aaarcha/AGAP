@@ -416,23 +416,52 @@ test("the main action label and function follow the ticket status, and no earlie
   assert.equal(has("Mark as Resolved"), false, "Resolved cannot be skipped to");
   cleanup();
 
-  // EN_ROUTE: the main action is Mark as On Site.
+  // EN_ROUTE reached by the Barangay: the CDRRMO's OWN track has not started,
+  // so it still opens with its own first step.
   __resetCtx({ user: CDRRMO, incidents: [EN_ROUTE] });
   render(React.createElement(App));
   await waitFor(() => assert.ok(text().includes("Electrical fire")));
-  assert.equal(labels().some((l) => l.includes("Acknowledge")), false, "Acknowledge is gone once en route");
-  assert.equal(has("Mark as On Site"), true, "En Route offers Mark as On Site");
+  assert.equal(labels().some((l) => l.includes("Acknowledge & En Route")), true, "CDRRMO still sees its own first step");
+  assert.equal(has("Mark as On Site"), false, "its own track is not en route yet");
   assert.equal(has("Mark as Resolved"), false);
+  assert.ok(text().includes("Barangay Sinalhan"), "the other responders list names the org that moved");
   cleanup();
 
-  // ON_SITE — even for an org that has not acknowledged — never falls back to Acknowledge.
+  // The Barangay, on the same ticket, has its own en route step.
+  __resetCtx({ user: BARANGAY, incidents: [EN_ROUTE] });
+  render(React.createElement(App));
+  await waitFor(() => assert.ok(text().includes("Electrical fire")));
+  assert.equal(labels().some((l) => l.includes("Acknowledge")), false, "acknowledged orgs never see Acknowledge again");
+  assert.equal(has("Mark as On Site"), true, "En Route offers Mark as On Site");
+  cleanup();
+
+  // ON_SITE for the Barangay: the CDRRMO that is only en route still works on its own track.
   __resetCtx({ user: CDRRMO, incidents: [RESPONDED] });
   render(React.createElement(App));
   await waitFor(() => assert.ok(text().includes("Electrical fire")));
-  assert.equal(labels().some((l) => l.includes("Acknowledge")), false, "no Acknowledge fallback on an on-site ticket");
-  assert.equal(has("Mark as On Site"), false, "On Site is already done");
-  assert.equal(has("Mark as Resolved"), true, "On Site offers Mark as Resolved");
-  assert.ok(labels().some((l) => l.includes("Cancel — false alarm")));
+  assert.equal(labels().some((l) => l.includes("Acknowledge")), false, "its own track is already en route");
+  assert.equal(has("Mark as On Site"), true, "the CDRRMO advances its own track to on site");
+  assert.equal(has("Mark as Resolved"), false, "not before its own on-site step");
+  cleanup();
+
+  // A responder whose org never acknowledged, while the other org is on site.
+  const otherOnSite = incident({
+    status: "ON_SITE",
+    acknowledgedBy: "Barangay Sinalhan", acknowledgedByOrg: "barangay",
+    responses: {
+      barangay: {
+        org: "barangay", orgLabel: "Barangay Sinalhan", status: "on_site",
+        ackAt: NOW - 5 * MIN, onSiteAt: NOW - 2 * MIN, resolvedAt: null,
+        mode: "motorcycle", distanceKm: 1, routeStatus: "passable", blocked: false, minutes: null, startedAt: null, arriveBy: null,
+      },
+      cdrrmo: null,
+    },
+  });
+  __resetCtx({ user: CDRRMO, incidents: [otherOnSite] });
+  render(React.createElement(App));
+  await waitFor(() => assert.ok(text().includes("Electrical fire")));
+  assert.equal(labels().some((l) => l.includes("Acknowledge & En Route")), true, "still its own first step, never someone else's");
+  assert.ok(text().includes("On site since"), "the other org's state is read-only below");
   cleanup();
 
   // ON_SITE for the org that actually arrived: same single closing action.
@@ -490,9 +519,24 @@ test("the main action label and function follow the ticket status, and no earlie
   __resetCtx({ user: CDRRMO, incidents: [incident()] });
   const live = render(React.createElement(IncidentCard, { inc: incident(), showActions: true }));
   assert.ok(labels().some((l) => l.includes("Acknowledge & En Route")), "Sent offers the acknowledgement");
+  // The other org's progress never drives this responder's button: its own
+  // track is only en route, so the next step is On Site.
   live.rerender(React.createElement(IncidentCard, { inc: RESPONDED, showActions: true }));
-  await waitFor(() => assert.equal(has("Mark as Resolved"), true, "the label follows the new status"));
+  await waitFor(() => assert.equal(has("Mark as On Site"), true, "the label follows the viewer's own track"));
+  assert.equal(has("Mark as Resolved"), false, "not before its own on-site step");
   assert.equal(labels().some((l) => l.includes("Acknowledge")), false, "it never falls back to Acknowledge");
+
+  // Once its own org arrives, the same card swaps to the closing action.
+  const cdrrmoOnSite = { ...RESPONDED, responses: {
+    ...RESPONDED.responses,
+    cdrrmo: {
+      org: "cdrrmo", orgLabel: "CDRRMO", status: "on_site",
+      ackAt: NOW - 4 * MIN, onSiteAt: NOW - MIN, resolvedAt: null,
+      mode: "vehicle", distanceKm: 3, routeStatus: "passable", blocked: false, minutes: null, startedAt: null, arriveBy: null,
+    },
+  } };
+  live.rerender(React.createElement(IncidentCard, { inc: cdrrmoOnSite, showActions: true }));
+  await waitFor(() => assert.equal(has("Mark as Resolved"), true, "its own on-site step unlocks the close"));
 });
 
 test("the responder sees closed work on History and can open the archive", async () => {

@@ -35,6 +35,8 @@ export type SelectProps = {
   className?: string;
   /** Lets a call site match the label style of the fields beside it. */
   labelClassName?: string;
+  /** Extra classes on the trigger (e.g. left padding for a leading icon). */
+  triggerClassName?: string;
 };
 
 const MENU_MAX = 256; // 16rem
@@ -54,6 +56,7 @@ export function Select({
   ariaLabel,
   className = "",
   labelClassName = "text-xs font-semibold text-slate-600",
+  triggerClassName = "",
 }: SelectProps) {
   const baseId = useId();
   const triggerId = `${baseId}-trigger`;
@@ -128,6 +131,19 @@ export function Select({
     },
     [close, onChange],
   );
+
+  // Open on the chosen option, never at a cut-off top: scroll it into view.
+  useEffect(() => {
+    if (!open) return;
+    const id = window.setTimeout(() => {
+      const list = listRef.current;
+      const chosen = list?.querySelector<HTMLElement>('[aria-selected="true"]');
+      if (!list || !chosen) return;
+      list.scrollTop = Math.max(0, chosen.offsetTop - 12);
+      chosen.scrollIntoView?.({ block: "nearest" });
+    }, 0);
+    return () => window.clearTimeout(id);
+  }, [open]);
 
   // Focus: on the popover the trigger keeps focus (aria-activedescendant drives
   // the list) unless there is a search field; the phone sheet is a modal dialog,
@@ -369,7 +385,7 @@ export function Select({
         disabled={disabled}
         onClick={() => (open ? close() : openMenu())}
         onKeyDown={onTriggerKey}
-        className={`flex min-h-12 w-full items-center gap-2 rounded-xl border bg-white px-3 text-left text-sm outline-none transition-colors focus-visible:border-brand-500 focus-visible:ring-2 focus-visible:ring-brand-200 disabled:cursor-not-allowed disabled:bg-slate-50 disabled:text-slate-500 motion-reduce:transition-none ${
+        className={`flex min-h-12 w-full items-center gap-2 rounded-xl border bg-white px-3 text-left text-sm outline-none transition-colors focus-visible:border-brand-500 focus-visible:ring-2 focus-visible:ring-brand-200 disabled:cursor-not-allowed disabled:bg-slate-50 disabled:text-slate-500 motion-reduce:transition-none ${triggerClassName} ${
           error ? "border-blush-700" : "border-slate-300"
         }`}
       >
@@ -393,7 +409,7 @@ export function Select({
         createPortal(
           <div
             ref={menuRef}
-            className="select-pop fixed z-[60] flex flex-col overflow-hidden rounded-xl border border-slate-200 bg-white shadow-xl"
+            className="select-pop fixed z-[80] flex flex-col overflow-hidden rounded-xl border border-slate-200 bg-white shadow-xl"
             style={
               pos
                 ? { left: pos.left, top: pos.top, width: pos.width, maxHeight: pos.maxHeight }
@@ -401,7 +417,7 @@ export function Select({
             }
           >
             {searchable && searchField}
-            {optionList("min-h-0 flex-1 p-1")}
+            {optionList("min-h-0 flex-1 overflow-y-auto max-h-[70dvh] p-1")}
           </div>,
           document.body,
         )}
@@ -411,7 +427,7 @@ export function Select({
       {open && !desktop && typeof document !== "undefined" &&
         createPortal(
           <div
-            className="fixed inset-0 z-[60] flex items-end bg-black/55"
+            className="fixed inset-0 z-[80] flex items-end bg-black/55"
             onMouseDown={(e) => e.target === e.currentTarget && close()}
           >
             <div
@@ -419,7 +435,7 @@ export function Select({
               role="dialog"
               aria-modal="true"
               aria-label={label ?? ariaLabel ?? "Choose an option"}
-              className="select-pop flex max-h-[80dvh] w-full flex-col overflow-hidden rounded-t-2xl bg-white shadow-2xl"
+              className="select-pop flex max-h-[85dvh] w-full flex-col overflow-hidden rounded-t-2xl bg-white shadow-2xl"
             >
               <div className="flex shrink-0 items-center justify-between border-b border-slate-100 px-4 py-3">
                 <h2 className="min-w-0 truncate text-base font-bold text-slate-800">{label ?? ariaLabel ?? "Choose an option"}</h2>
@@ -428,7 +444,7 @@ export function Select({
                 </button>
               </div>
               {searchable && searchField}
-              {optionList("min-h-0 flex-1 p-2 pb-[max(0.5rem,env(safe-area-inset-bottom))]")}
+              {optionList("min-h-0 flex-1 overflow-y-auto max-h-[70dvh] p-2 pb-[max(0.5rem,env(safe-area-inset-bottom))]")}
             </div>
           </div>,
           document.body,

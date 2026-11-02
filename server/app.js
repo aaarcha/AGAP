@@ -9,6 +9,7 @@ import crypto from "node:crypto";
 import zlib from "node:zlib";
 import * as D from "../shared/domain.js";
 import * as C from "../shared/campus.js";
+import * as R from "../shared/records.js";
 import { createStore } from "./store.js";
 import { createConfigService, ConfigError } from "./config.js";
 import { createRetention, archiveExpired, incidentExpired, accountExpired, drillExpired } from "./retention.js";
@@ -106,6 +107,16 @@ export function createApp(opts = {}) {
   // ---------------------------------------------------------------- helpers
   const clean = (v, max) => String(v ?? "").replace(/\s+/g, " ").trim().slice(0, max);
   const sections = () => [...new Set(store.db.roster.map((r) => r.section).filter(Boolean))];
+
+  // Bookkeeping timeline entries (archive, restore, hide, purge, anonymise, data
+  // request) are INTERNAL: only the Principal and the System Admin receive them.
+  // Older files are tagged by action name in store.normalize().
+  const INTERNAL_LOG_ACTIONS = new Set([
+    "archived", "auto_archived", "restored", "hidden", "unhidden", "purged", "anonymized", "data_request",
+  ]);
+  const isInternalLog = (l) => Boolean(l && l.internal) || INTERNAL_LOG_ACTIONS.has(String(l && l.action));
+  const operationalLog = (i) => (Array.isArray(i.log) ? i.log : []).filter((l) => !isInternalLog(l));
+  const keepsInternal = (user) => user.role === "principal" || user.role === "super_admin";
 
   const SESSION_TTL_MS = sessionDays * 24 * 3600 * 1000;
 
@@ -494,7 +505,11 @@ export function createApp(opts = {}) {
   function canSee(i, user) {
     if (user.role === "super_admin") return false; // console-only role: accounts + audit, never incident data
     if (user.role === "principal" || user.role === "responder") return true;
-    if (user.role === "teacher") return i.reporterIds.includes(user.id) || i.linkedSection === user.section || i.linkedSection === "ALL";
+    if (user.role === "teacher") {
+      // Drill tickets stay with the teachers who took part, never the whole section.
+      if (i.drill) return i.reporterIds.includes(user.id);
+      return i.reporterIds.includes(user.id) || i.linkedSection === user.section || i.linkedSection === "ALL";
+    }
     if (i.drill) return false; // parents are not alarmed by drills
     return i.linkedSection === user.section || i.linkedSection === "ALL";
   }
@@ -545,6 +560,95 @@ export function createApp(opts = {}) {
       toHeadcountMs: i.firstHeadcountAt ? i.firstHeadcountAt - i.createdAt : null,
       toResolveMs: i.resolvedAt ? i.resolvedAt - i.createdAt : null,
       interactions: i.interactions,
+    };
+  }
+
+  // ---------------------------------------------------- records & analytics
+  // The records screen is read-only for the Principal and the Admin. Its rows
+  // never carry a reporter name or id — only the role label.
+  const REPORTER_ROLE_LABEL = {
+    teacher: "Teacher",
+    principal: "Principal",
+    super_admin: "Admin",
+    responder: "Responder",
+    parent: "Parent/PTA",
+  };
+
+  function reporterRoleLabel(id) {
+    if (store.db.roster.some((r) => r.id === id)) return "Teacher";
+    const acc = accountById(id);
+    return (acc && REPORTER_ROLE_LABEL[acc.role]) || "Unknown";
+  }
+
+  /** One anonymised record row: no reporter name, id, email or password data. */
+  function recordEntry(i) {
+    const log = Array.isArray(i.log) ? i.log : [];
+    return {
+      id: i.id,
+      category: i.category,
+      categoryLabel: i.categoryLabel,
+      subLabel: i.subLabel,
+      room: i.room,
+      zone: R.zoneOf(i.room),
+      tier: R.recordTier(i),
+      createdAt: i.createdAt,
+      resolvedAt: i.resolvedAt ?? null,
+      status: i.status,
+      outcome: i.outcome,
+      drill: Boolean(i.drill),
+      populationLabel: i.populationLabel ?? null,
+      confirmedBy: i.confirmedBy ?? 1,
+      reporterRole: i.anonymizedAt ? "Anonymised" : reporterRoleLabel(i.reporterId),
+      escalationLevel: i.escalationLevel ?? 0,
+      escalated: (i.escalationLevel ?? 0) > 0 || log.some((l) => l.action === "escalated"),
+      ackMs: i.enRouteAt ? i.enRouteAt - i.createdAt : null,
+      onSiteMs: i.onSiteAt ? i.onSiteAt - i.createdAt : null,
+      timeOfDay: R.timeBucket(i.createdAt),
+      // The hazard log is the only historical evidence that Hazard Mode applied
+      // to this ticket; a later OFF entry must not erase that fact.
+      hazardMode: log.some((l) => l.action === "hazard" && !/\bOFF\b/.test(String(l.note ?? ""))),
+      headcounts: (i.headcounts ?? []).map((h) => ({ section: h.section, expected: h.expected, present: h.present, at: h.at })),
+      timeline: log.map((l) => ({ at: l.at, action: l.action, role: l.role, note: l.note ?? "" })),
+      archivedAt: i.archivedAt ?? null,
+      archivedAuto: Boolean(i.archivedAuto),
+      archiveReason: i.archiveReason ?? null,
+      anonymized: Boolean(i.anonymizedAt),
+      // Read-only detail on the records screen: how the place was set and each
+      // responder organization's own progress (never a person's name).
+      locationSetBy: i.locationSetBy || "saved_room",
+      locationNote: i.locationNote || null,
+      responses: publicResponses(i),
+      // An Admin may purge any archived record they still hold; the typed
+      // confirmation and a reason are the gate (the retention dates are only
+      // reported as guidance). An already anonymised record is not offered again.
+      purgeEligible: Boolean(i.archivedAt) && !i.anonymizedAt,
+      readOnly: true,
+    };
+  }
+
+  function drillEntry(d) {
+    return {
+      id: d.id,
+      label: d.label,
+      startedAt: d.startedAt,
+      endedAt: d.endedAt,
+      incidents: d.incidents,
+      avgToReportMs: d.avgToReportMs ?? null,
+      avgToAckMs: d.avgToAckMs ?? null,
+      avgToOnSiteMs: d.avgToOnSiteMs ?? null,
+      avgToHeadcountMs: d.avgToHeadcountMs ?? null,
+      avgInteractions: d.avgInteractions ?? null,
+      rows: Array.isArray(d.rows)
+        ? d.rows.map((r) => ({
+            id: r.id,
+            subLabel: r.subLabel,
+            toReportMs: r.toReportMs ?? null,
+            toAckMs: r.toAckMs ?? null,
+            toOnSiteMs: r.toOnSiteMs ?? null,
+            toHeadcountMs: r.toHeadcountMs ?? null,
+            interactions: r.interactions ?? 0,
+          }))
+        : [],
     };
   }
 
@@ -600,6 +704,8 @@ export function createApp(opts = {}) {
       drill: i.drill,
       reporterName: i.reporterName,
       reporterId: i.reporterId,
+      // A teacher only needs their own reporter list to label the relation on a row.
+      reporterIds: role === "teacher" ? [...(i.reporterIds ?? [])] : undefined,
       acknowledgedBy: i.acknowledgedBy,
       // Which org first acknowledged (the headline status names it) and every
       // org's own response, ETA included. Legacy rows have no responses yet.
@@ -607,7 +713,8 @@ export function createApp(opts = {}) {
       responses: publicResponses(i),
       resolvedBy: i.resolvedBy,
       resolvedByOrg: i.resolvedByOrg ?? null,
-      log: i.log,
+      // The operational timeline only — archive bookkeeping stays internal.
+      log: keepsInternal(user) ? i.log : operationalLog(i),
       metrics: metricsOf(i),
       canCancel: canCancel(i, user),
       // Configuration version that scored this ticket (weights themselves never ship).
@@ -760,14 +867,35 @@ export function createApp(opts = {}) {
     }
     const lowLying = D.isLowLying({ locationKind: kind, areaId: body.areaId, savedRoom: lowLyingRoom });
 
-    // Which parents see it: the reporter's section, everyone for whole floor/school.
+    // Canonical place identity for merging: a classroom uses its legacy room
+    // string, a chosen common area uses "area:<id>" (the display string embeds
+    // the reporter's own saved room), and an unverified place is per-reporter so
+    // it never merges.
+    const isClassroomPlace = kind === "saved" || kind === "room";
+    const locationKey =
+      kind === "area" ? `area:${clean(body.areaId, 40)}`
+        : kind === "unverified" ? `unverified:${reporter.id}`
+          : room;
+
+    // Which class/parents this ticket belongs to:
+    //  1. Whole Floor/School → everyone ("ALL").
+    //  2. A classroom place → the section of the active teacher whose default
+    //     room is that room, else the reporter's own section.
+    //  3. A common area / unverified place with Individual or Classroom → the
+    //     class chosen in the report (the reporter's own is preselected; the
+    //     Principal has none and must choose).
+    const chosenSection = clean(body.section, 60);
     let linkedSection;
     if (pop.id === "wholeschool") linkedSection = "ALL";
-    else if (reporter.section) linkedSection = reporter.section;
-    else {
-      const s = clean(body.section, 60);
-      if (!sections().includes(s)) throw bad("Choose which section is affected.", "section_required");
-      linkedSection = s;
+    else if (isClassroomPlace) {
+      const owner = store.db.roster.find((r) => r.status === "active" && r.room === room);
+      linkedSection = owner?.section || reporter.section || (sections().includes(chosenSection) ? chosenSection : "");
+    } else if (sections().includes(chosenSection)) {
+      linkedSection = chosenSection;
+    } else if (reporter.section) {
+      linkedSection = reporter.section;
+    } else {
+      throw bad("Which class is affected? Choose the class before sending.", "section_required");
     }
 
     const t = now();
@@ -780,7 +908,8 @@ export function createApp(opts = {}) {
         i.status !== "RESOLVED" &&
         Boolean(i.drill) === Boolean(drillMode.active) &&
         i.category === cat.categoryId &&
-        i.room === room &&
+        i.locationKey === locationKey &&
+        kind !== "unverified" &&
         (i.linkedSection === linkedSection || i.linkedSection === "ALL" || linkedSection === "ALL") &&
         t - i.createdAt < D.MERGE_WINDOW_MS,
     );
@@ -848,6 +977,7 @@ export function createApp(opts = {}) {
       enRouteAt: null,
       onSiteAt: null,
       room,
+      locationKey,
       populationId: pop.id,
       populationLabel: pop.label,
       reporterId: reporter.id,
@@ -913,8 +1043,13 @@ export function createApp(opts = {}) {
     if (!inc) throw new HttpError(404, "not_found", "Incident not found.");
     if (inc.status === "RESOLVED") {
       if (action === "seen") return { incident: inc, changed: false };
+      if (action === "resolve" && inc.resolvedByOrg)
+        throw new HttpError(409, "already_resolved", `Already resolved by ${D.orgLabel(inc.resolvedByOrg)}`);
       throw new HttpError(409, "already_resolved", "This incident is already closed.");
     }
+    // The acting organization ALWAYS comes from the authenticated account.
+    if (user.role === "responder" && !D.orgById(user.org))
+      throw new HttpError(409, "org_unassigned", "Your organization is not assigned. Ask the System Administrator.");
     const t = now();
     // Timestamps are audit facts: the first write wins and no later click or API
     // call may move them, so the recorded durations stay true.
@@ -951,10 +1086,12 @@ export function createApp(opts = {}) {
         note = r.blocked ? `Acknowledged — ${mode.label}, ${km} km, route BLOCKED (no ETA)` : `Acknowledged — ${mode.label}, ${km} km, ETA ${r.minutes} min (route ${route})`;
       }
       if (org) {
+        const etaFields = eta ? etaView(eta) : { mode: null, distanceKm: null, routeStatus: null, blocked: false, minutes: null, startedAt: null, arriveBy: null };
         rs[org] = {
           org, orgLabel: D.orgLabel(org), status: "en_route",
-          ackAt: t, onSiteAt: null, resolvedAt: null, byName: user.name,
-          ...(eta ? etaView(eta) : { mode: null, distanceKm: null, routeStatus: null, blocked: false, minutes: null, startedAt: null, arriveBy: null }),
+          ackAt: t, acknowledgedAt: t, enRouteAt: t, onSiteAt: null, resolvedAt: null,
+          byName: user.name, by: user.id, etaMinutes: etaFields.minutes,
+          ...etaFields,
         };
       }
       inc.enRouteAt = stamp("enRouteAt");
@@ -974,13 +1111,16 @@ export function createApp(opts = {}) {
       if (inc.status === "SENT" || inc.status === "SEEN") {
         throw new HttpError(409, "out_of_order", "Acknowledge this ticket before marking on site.");
       }
+      if (org && !mine) throw new HttpError(409, "out_of_order", "Acknowledge this ticket before marking on site.");
       if (org ? mine?.status === "on_site" : inc.status === "ON_SITE") return { incident: inc, changed: false };
       if (org) {
         rs[org] = {
+          ...mine,
           org, orgLabel: D.orgLabel(org), status: "on_site",
-          ackAt: mine?.ackAt ?? t, onSiteAt: t, resolvedAt: null, byName: user.name,
+          ackAt: mine.ackAt, acknowledgedAt: mine.acknowledgedAt ?? mine.ackAt, enRouteAt: mine.enRouteAt ?? mine.ackAt,
+          onSiteAt: t, resolvedAt: null, byName: user.name, by: user.id,
           // The org has arrived: its own countdown stops.
-          ...etaView({ ...(mine ?? {}), blocked: false, minutes: null, arriveBy: null }),
+          ...etaView({ ...mine, blocked: false, minutes: null, arriveBy: null }), etaMinutes: null,
         };
       }
       inc.onSiteAt = stamp("onSiteAt");
@@ -992,11 +1132,16 @@ export function createApp(opts = {}) {
     } else if (action === "resolve") {
       // One resolution closes the ticket for everyone; the other org's timeline stays.
       const falseAlarm = body.outcome === "false_alarm";
+      // An org may only resolve once its OWN track reached on site.
+      if (org && (!mine || mine.status !== "on_site"))
+        throw new HttpError(409, "out_of_order", "Mark your own response on site before resolving this ticket.");
       if (org) {
         rs[org] = {
+          ...mine,
           org, orgLabel: D.orgLabel(org), status: "resolved",
-          ackAt: mine?.ackAt ?? t, onSiteAt: mine?.onSiteAt ?? null, resolvedAt: t, byName: user.name,
-          ...etaView({ ...(mine ?? {}), blocked: false, minutes: null, arriveBy: null }),
+          ackAt: mine.ackAt, acknowledgedAt: mine.acknowledgedAt ?? mine.ackAt, enRouteAt: mine.enRouteAt ?? mine.ackAt,
+          onSiteAt: mine.onSiteAt, resolvedAt: t, byName: user.name, by: user.id,
+          ...etaView({ ...mine, blocked: false, minutes: null, arriveBy: null }), etaMinutes: null,
         };
       }
       inc.status = "RESOLVED";
@@ -1332,6 +1477,12 @@ export function createApp(opts = {}) {
       const visible = inc.hiddenBy || [];
       if (hide && !visible.includes(user.id)) inc.hiddenBy = [...visible, user.id];
       if (!hide) inc.hiddenBy = visible.filter((x) => x !== user.id);
+      // Per-user bookkeeping — internal, never part of anyone's timeline.
+      inc.log.push({
+        at: now(), by: user.name, role: user.role, internal: true,
+        action: hide ? "hidden" : "unhidden",
+        note: hide ? "Removed from their own list" : "Restored to their own list",
+      });
       store.save();
       audit(hide ? "incident_hidden" : "incident_unhidden", {
         by: account.id, role: user.role, org: orgOf(account), target: inc.id, req,
@@ -1604,9 +1755,8 @@ export function createApp(opts = {}) {
         if (targets.some((i) => !i)) throw new HttpError(404, "not_found", "One or more records were not found.");
         const notArchived = targets.filter((i) => !i.archivedAt);
         if (notArchived.length) throw bad("Only archived records can be purged. Archive them first.", "not_eligible");
-        const tooYoung = targets.filter((i) => !incidentExpired(i, t, retention.incidentDays));
-        if (tooYoung.length)
-          throw new HttpError(409, "not_eligible", `${tooYoung.length} record(s) are still inside their ${retention.incidentDays}-day retention period.`);
+        const alreadyPurged = targets.filter((i) => i.anonymizedAt);
+        if (alreadyPurged.length) throw new HttpError(409, "not_eligible", "That record was already purged; its personal data is gone.");
       }
       if (!targets.length) throw bad("Nothing is eligible for a purge yet.", "not_eligible");
       for (const i of targets) anonymizeIncident(i);
@@ -1763,6 +1913,51 @@ export function createApp(opts = {}) {
       return send(res, 200, { active: saved, versions: config.list(), openTickets: openRealTickets() });
     }
 
+    // ---- Incident records (Principal + Admin, read-only)
+    // One anonymised payload powers the three tabs: real incidents (resolved +
+    // archived, non-drill), drill records, and the system archive. Analytics are
+    // aggregated server-side for the chosen period; no personal data is returned.
+    if (p === "/api/records" && m === "GET") {
+      need(user, "principal", "super_admin");
+      const period = R.resolvePeriod({
+        period: url.searchParams.get("period") || "sy",
+        from: url.searchParams.get("from") || "",
+        to: url.searchParams.get("to") || "",
+        now: now(),
+        schoolYearStartedAt: store.db.schoolYear?.startedAt ?? null,
+      });
+      const real = store.db.incidents
+        .filter((i) => !i.drill && i.status === "RESOLVED")
+        .map(recordEntry)
+        .sort((a, b) => b.createdAt - a.createdAt);
+      const archived = store.db.incidents
+        .filter((i) => i.archivedAt)
+        .map(recordEntry)
+        .sort((a, b) => (b.archivedAt || 0) - (a.archivedAt || 0));
+      const dm = store.db.modes.drill;
+      const accounts = user.role === "super_admin"
+        ? store.db.accounts
+            .filter((a) => a.status === "archived" || a.status === "purged")
+            .map((a) => publicAccount(a))
+            .sort((a, b) => (b.archivedAt || 0) - (a.archivedAt || 0))
+        : [];
+      return send(res, 200, {
+        period,
+        incidents: real,
+        analytics: R.summarizeRecords(real, period),
+        drills: {
+          ongoing: dm.active
+            ? { id: dm.id, label: dm.label, startedAt: dm.startedAt, active: true }
+            : null,
+          // Drill scheduling is not part of the drill-mode data model yet; the
+          // section exists so a future scheduled drill can appear there.
+          scheduled: [],
+          past: store.db.drills.slice().reverse().map(drillEntry),
+        },
+        archives: { incidents: archived, accounts },
+      });
+    }
+
     if (p === "/api/state" && m === "GET") return send(res, 200, stateFor(user));
 
     if (p === "/api/incidents" && m === "POST") {
@@ -1831,9 +2026,10 @@ export function createApp(opts = {}) {
       return {
         ...view,
         reporterRole: archiveRoleLabel(i.reporterId),
-        archivedAt: i.archivedAt,
-        archivedAuto: Boolean(i.archivedAuto),
-        archiveReason: i.archiveReason ?? null,
+        // Archive metadata is internal: only the Principal and the Admin see it.
+        ...(keepsInternal(forUser)
+          ? { archivedAt: i.archivedAt, archivedAuto: Boolean(i.archivedAuto), archiveReason: i.archiveReason ?? null }
+          : {}),
         anonymizedAt: i.anonymizedAt ?? null,
         readOnly: true,
         hidden: isHiddenFor(i, forUser),
@@ -1856,7 +2052,7 @@ export function createApp(opts = {}) {
         inc.archivedBy = account.id;
         inc.archiveReason = reason || null;
         inc.archivedAuto = false;
-        inc.log.push({ at: t, by: user.name, role: user.role, action: "archived", note: reason ? `Archived — ${reason}` : "Archived" });
+        inc.log.push({ at: t, by: user.name, role: user.role, action: "archived", internal: true, note: reason ? `Archived — ${reason}` : "Archived" });
       }
       if (targets.length) {
         store.save();
@@ -1885,7 +2081,7 @@ export function createApp(opts = {}) {
         inc.archivedBy = account.id;
         inc.archiveReason = reason || null;
         inc.archivedAuto = false;
-        inc.log.push({ at: t, by: user.name, role: user.role, action: "archived", note: reason ? `Archived — ${reason}` : "Archived" });
+        inc.log.push({ at: t, by: user.name, role: user.role, action: "archived", internal: true, note: reason ? `Archived — ${reason}` : "Archived" });
         store.save();
         audit("incident_archived", {
           by: account.id, role: user.role, org: orgOf(account), target: inc.id,
@@ -1901,7 +2097,7 @@ export function createApp(opts = {}) {
       inc.archivedBy = null;
       inc.archiveReason = null;
       inc.archivedAuto = false;
-      inc.log.push({ at: t, by: user.name, role: user.role, action: "restored", note: reason ? `Restored to live view — ${reason}` : "Restored to live view" });
+      inc.log.push({ at: t, by: user.name, role: user.role, action: "restored", internal: true, note: reason ? `Restored to live view — ${reason}` : "Restored to live view" });
       store.save();
       audit("incident_restored", {
         by: account.id, role: user.role, org: orgOf(account), target: inc.id,
@@ -1920,7 +2116,7 @@ export function createApp(opts = {}) {
       const limit = Math.min(50, Math.max(1, Number(url.searchParams.get("limit")) || 50));
       const page = Math.max(1, Number(url.searchParams.get("page")) || 1);
       let items = store.db.incidents.filter((i) => i.archivedAt);
-      if (user.role === "teacher") items = items.filter((i) => i.reporterIds.includes(user.id));
+      if (user.role === "teacher") items = items.filter((i) => canSee(i, user));
       items = [...items].sort((a, b) => (b.archivedAt || 0) - (a.archivedAt || 0));
       const total = items.length;
       const start = (page - 1) * limit;

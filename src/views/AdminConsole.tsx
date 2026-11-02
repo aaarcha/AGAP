@@ -1,13 +1,13 @@
 import { useState, useEffect, useMemo, type ReactNode } from "react";
 import {
   Users, ClipboardList, Calendar, Plus, RefreshCw, Unlock, UserX, UserCheck, Key, Eye, EyeOff, Copy, Check, AlertCircle,
-  SlidersHorizontal, Search, X, History, Pencil, RotateCcw, Save, Trash2, FileWarning, Archive, ExternalLink, Radio, ShieldCheck,
+  SlidersHorizontal, Search, X, History, Pencil, RotateCcw, Save, Trash2, FileWarning, Archive, Radio, ShieldCheck, User, ChevronRight,
 } from "lucide-react";
 import { api } from "../lib/api";
-import type { AccountRecord, AuditEntry, ConfigPayload, ConfigVersion, RetentionInfo, SchoolYear, TempCredential } from "../lib/types";
+import type { AccountRecord, AuditEntry, ConfigPayload, ConfigVersion, SchoolYear, TempCredential } from "../lib/types";
 import { Modal, ConfirmModal } from "../components/Modal";
 import { dateTime } from "../lib/format";
-import { Header, StatusBanner } from "../components/Chrome";
+import { BackBarFor, Header, StatusBanner } from "../components/Chrome";
 import { RoleNav } from "../components/RoleNav";
 import { ADMIN_TABS, type AdminTab } from "../lib/navigation";
 import { MasterDetail } from "../components/MasterDetail";
@@ -15,17 +15,18 @@ import { BoundedPane, PageFlow } from "../components/PageShell";
 import { Select } from "../components/Select";
 import { FilterBar } from "../components/FilterBar";
 import { DatePicker } from "../components/DatePicker";
-import DateRangeBar from "../components/DateRange";
+import { PeriodControl } from "../components/PeriodControl";
 import {
   activeFilterCount, activeFilterEntries, clearGroupFilters, facetCounts, filterItems,
   inDateRange, initialDateRange, initialFilterState, isGroupSelected, matchesQuery,
-  selectedValues, setCategory, setQuery, setSort, sortItems, toggleGroupValue,
+  periodLabel, selectedValues, setCategory, setQuery, setSort, sortItems, toggleGroupValue,
   useFilterState, type DateRangeState, type FilterSpec,
 } from "../lib/filters";
 import { SECTION_GRADES, gradeCode, gradeLabel, composeSection, parseSection } from "../../shared/section.js";
 import { RESPONDER_ORGS, SCHOOL } from "../../shared/domain.js";
 import AccountView from "./AccountView";
-import ArchivePage from "../components/ArchivePage";
+import IncidentsRecords from "./IncidentsRecords";
+import AnalyticsView from "./AnalyticsView";
 
 const card = "rounded-2xl border border-slate-200 bg-white p-4";
 const h2 = "flex items-center gap-1.5 text-xs font-bold uppercase tracking-wide text-slate-500";
@@ -35,12 +36,21 @@ const btnPrimary = `${btn} bg-brand-600 text-white`;
 const btnSecondary = `${btn} bg-slate-100 text-slate-700`;
 const btnDanger = `${btn} bg-blush-100 text-blush-700`;
 
+/** Sub-screens of More — entries in the menu, never tabs of their own. */
+type MoreScreen = "menu" | "year" | "audit" | "records" | "account";
+
+const MORE_ITEMS: { id: Exclude<MoreScreen, "menu">; label: string; hint: string; icon: typeof Users }[] = [
+  { id: "year", label: "School year", hint: "Rollover and temporary credentials", icon: Calendar },
+  { id: "audit", label: "Audit log", hint: "Read-only security and admin trail", icon: ClipboardList },
+  { id: "records", label: "Incidents & Records", hint: "Records browser, drill records and archives", icon: Archive },
+  { id: "account", label: "Account", hint: "Password, About and sign out", icon: User },
+];
+
 export default function AdminConsole() {
   const [tab, setTab] = useState<AdminTab>("accounts");
   const [accounts, setAccounts] = useState<AccountRecord[]>([]);
   const [auditEntries, setAuditEntries] = useState<AuditEntry[]>([]);
-  const [retention, setRetention] = useState<RetentionInfo | null>(null);
-  // Period chips + custom From/To over the audit records, kept for the session.
+  // The audit log's Period dropdown, kept for the session.
   const [auditRange, setAuditRange] = useFilterState<DateRangeState>("admin-audit-range", initialDateRange);
   const [schoolYear, setSchoolYear] = useState<SchoolYear | null>(null);
   const [loading, setLoading] = useState(true);
@@ -55,11 +65,9 @@ export default function AdminConsole() {
   const [editTarget, setEditTarget] = useState<AccountRecord | null>(null);
   const [purgeTarget, setPurgeTarget] = useState<AccountRecord | null>(null);
   const [requestTarget, setRequestTarget] = useState<AccountRecord | null>(null);
-  // Sub-screen of the Users tab: the dedicated archived-records page.
-  const [archive, setArchive] = useState(false);
-  // "View in Users" from the Accounts archive tab: apply the Archived filter
-  // and (if known) open that account.
-  const [focusArchived, setFocusArchived] = useState<string | null>(null);
+  // The More page's own entries (School year, Audit, Incidents & Records,
+  // Account) render one at a time inside the More tab.
+  const [moreScreen, setMoreScreen] = useState<MoreScreen>("menu");
   const [rolloverConfirm, setRolloverConfirm] = useState(false);
   const [rolloverResult, setRolloverResult] = useState<TempCredential[] | null>(null);
 
@@ -69,9 +77,9 @@ export default function AdminConsole() {
 
   function guardedSetTab(next: AdminTab) {
     if (tab === "config" && next !== "config" && configDirty) { setLeaveTo(next); return; }
-    // The archive is a sub-screen of Users, not a tab: leaving Users closes it so
-    // it cannot stay rendered underneath (or after) another page.
-    if (next !== "accounts") { setArchive(false); setFocusArchived(null); }
+    // A More sub-screen belongs to More: leaving the tab closes it so it never
+    // stays rendered under another page.
+    if (next !== "more") setMoreScreen("menu");
     setConfigDirty(false);
     setTab(next);
   }
@@ -79,32 +87,29 @@ export default function AdminConsole() {
   useEffect(() => {
     void loadData();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tab]);
+  }, [tab, moreScreen]);
 
-  // Audit records inside the chosen period — the DateRangeBar above the table.
+  // Audit records inside the chosen period — the Period dropdown in the Filters sheet.
   const auditShown = useMemo(
     () => auditEntries.filter((entry) => inDateRange(entry.at, auditRange, Date.now())),
     [auditEntries, auditRange],
   );
 
   async function loadData() {
-    if (tab === "account") { setLoading(false); return; }
+    const needsData = tab === "accounts" || (tab === "more" && (moreScreen === "audit" || moreScreen === "year"));
+    if (!needsData) { setLoading(false); return; }
     setLoading(true);
     setError("");
     try {
       if (tab === "accounts") {
         const r = await api<{ accounts: AccountRecord[] }>("GET", "/api/admin/accounts");
         setAccounts(r.accounts);
-        const ret = await api<RetentionInfo>("GET", "/api/admin/retention");
-        setRetention(ret && ret.counts && ret.periods ? ret : null);
-      } else if (tab === "audit") {
+      } else if (moreScreen === "audit") {
         const r = await api<{ entries: AuditEntry[] }>("GET", "/api/admin/audit");
         setAuditEntries(r.entries);
-      } else if (tab === "schoolyear") {
+      } else if (moreScreen === "year") {
         const r = await api<SchoolYear>("GET", "/api/admin/school-year");
         setSchoolYear(r);
-      } else {
-        setLoading(false);
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load data");
@@ -171,7 +176,7 @@ export default function AdminConsole() {
     <div className="flex h-dvh overflow-hidden bg-cream">
       <RoleNav role="super_admin" tab={tab} setTab={guardedSetTab} />
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-        <Header title="Super Admin" subtitle="Users, audit and system settings" />
+        <Header title="Super Admin" subtitle="Users, analytics and system settings" />
         <StatusBanner />
         <main className="scroll-area min-h-0 flex-1 pb-24 lg:pb-0">
           {error && (
@@ -182,39 +187,75 @@ export default function AdminConsole() {
           )}
           {loading && <div className="py-8 text-center text-slate-500">Loading…</div>}
 
-          {tab === "accounts" && !loading && !archive && (
-            /* FLOW page: the whole page scrolls with the wheel. One bounded
-               MasterDetail section (clamped) sits between the metric cards and
-               the Records & Archives card. */
+          {tab === "accounts" && !loading && (
+            /* FLOW page: the whole page scrolls with the wheel. The compact
+               metric cards sit inside the roster header, under search + filters. */
             <PageFlow className="space-y-4">
-              <AdminDashboard accounts={accounts} />
-
               <section aria-label="Users">
                 <div className="mb-2 flex items-center justify-between gap-3">
                   <h2 className={h2}><Users size={14} /> Users ({accounts.length})</h2>
                   <button onClick={() => setShowProvision(true)} className={btnPrimary}><Plus size={15} /> Provision</button>
                 </div>
                 {/* Bounded at >= 1024 so the list and detail panes scroll
-                    internally; below that the list opens a slide-over. */}
-                <BoundedPane label="User roster">
-                  <AccountsPane accounts={accounts} onUnlock={handleUnlock} onActivate={handleActivate}
+                    internally; below that the list opens a slide-over. */}                  <BoundedPane label="User roster">
+                  <AccountsPane accounts={accounts} summary={<AdminDashboard accounts={accounts} />}
+                    onUnlock={handleUnlock} onActivate={handleActivate}
                     onReset={setResetTarget} onDeactivate={setDeactivateTarget} onRestore={handleRestore}
                     onPurge={setPurgeTarget} onRequest={setRequestTarget} onEdit={setEditTarget}
-                    focusArchived={focusArchived} onFocusHandled={() => setFocusArchived(null)} />
+                    />
                 </BoundedPane>
               </section>
-
-              <RecordsArchivesCard data={retention} onOpenArchive={() => setArchive(true)} />
             </PageFlow>
           )}
 
-          {tab === "audit" && !loading && (
+          {tab === "analytics" && <AnalyticsView />}
+
+          {tab === "more" && moreScreen === "menu" && (
+            <PageFlow width="max-w-md" className="space-y-3">
+              <div>
+                <h1 className="text-lg font-black tracking-tight text-brand-900">More</h1>
+                <p className="mt-1 text-xs text-slate-500">School year, audit, records and your account.</p>
+              </div>
+              <div className="space-y-2">
+                {MORE_ITEMS.map((it) => (
+                  <button key={it.id} type="button" onClick={() => setMoreScreen(it.id)}
+                    className="flex min-h-16 w-full items-center gap-3 rounded-2xl border border-slate-200 bg-white px-4 text-left">
+                    <it.icon size={20} className="shrink-0 text-brand-600" />
+                    <span className="min-w-0 flex-1">
+                      <span className="block text-sm font-bold text-slate-800">{it.label}</span>
+                      <span className="block text-xs text-slate-500">{it.hint}</span>
+                    </span>
+                    <ChevronRight size={18} className="shrink-0 text-slate-400" />
+                  </button>
+                ))}
+              </div>
+            </PageFlow>
+          )}
+
+          {tab === "more" && moreScreen === "records" && (
+            <>
+              <BackBarFor title="Incidents & Records" backLabel="More" onBack={() => setMoreScreen("menu")} />
+              <IncidentsRecords showAccounts />
+            </>
+          )}
+
+          {tab === "more" && moreScreen === "audit" && !loading && (
+            <>
+            <BackBarFor title="Audit log" backLabel="More" onBack={() => setMoreScreen("menu")} />
             <PageFlow className="space-y-3">
-              <h2 className={h2}><ClipboardList size={14} /> Audit log (read-only)</h2>
-              <DateRangeBar value={auditRange} onChange={setAuditRange} ariaLabel="Audit date range" />
-              <p className="-mt-1 text-xs font-bold text-slate-600" aria-live="polite">
-                Entries {auditShown.length} of {auditEntries.length}
-              </p>
+              {/* Page header toolbar: title + count on the left, the period
+                  control right-aligned. No row holds only a period control. */}
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="min-w-0">
+                  <h2 className={h2}><ClipboardList size={14} /> Audit log (read-only)</h2>
+                  <p className="mt-1 text-xs text-slate-500" aria-live="polite">
+                    {auditShown.length} event{auditShown.length === 1 ? "" : "s"} · {periodLabel(auditRange)}
+                  </p>
+                </div>
+                <div data-audit-toolbar className="flex w-full flex-wrap items-center justify-end gap-2 sm:w-auto">
+                  <PeriodControl value={auditRange} onChange={setAuditRange} className="flex-1 sm:w-56 sm:flex-none" />
+                </div>
+              </div>
               <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white">
                 <div className="overflow-x-auto">
                   <table className="w-full text-sm">
@@ -245,9 +286,12 @@ export default function AdminConsole() {
                 <p className="py-8 text-center text-slate-500">No entries in that date range.</p>
               )}
             </PageFlow>
+            </>
           )}
 
-          {tab === "schoolyear" && !loading && (
+          {tab === "more" && moreScreen === "year" && !loading && (
+            <>
+            <BackBarFor title="School year" backLabel="More" onBack={() => setMoreScreen("menu")} />
             <PageFlow className="space-y-3">
               <h2 className={h2}><Calendar size={14} /> School year</h2>
               <div className={card}>
@@ -263,19 +307,11 @@ export default function AdminConsole() {
                 </div>
               </div>
             </PageFlow>
+            </>
           )}
 
           {tab === "config" && <ConfigTab onDirtyChange={setConfigDirty} />}
-          {tab === "account" && <AccountView />}
-          {tab === "accounts" && archive && (
-            <ArchivePage
-              title="Archived records"
-              backLabel="Users"
-              accounts={accounts}
-              onViewInUsers={(id) => { setArchive(false); setFocusArchived(id); }}
-              onBack={() => setArchive(false)}
-            />
-          )}
+          {tab === "more" && moreScreen === "account" && <AccountView onBack={() => setMoreScreen("menu")} />}
         </main>
 
       </div>
@@ -354,51 +390,20 @@ function AdminDashboard({ accounts }: { accounts: AccountRecord[] }) {
     { label: "Active responders", value: String(responders), hint: "Barangay Sinalhan + CDRRMO", icon: Radio },
     { label: "Recent security events", value: recent === null ? "—" : String(recent), hint: "last 24 hours", icon: ShieldCheck },
   ];
-  // Three separate cards, one column on phones — same shape as the Principal's
-  // stat cards, not a thin strip.
+  // Three compact tiles, always side by side (never 2 + 1 with an empty gap),
+  // sized off the Principal view's stat styling.
   return (
-    <div data-metric-cards className="grid gap-3 sm:grid-cols-3">
+    <div data-metric-cards className="grid grid-cols-3 gap-1.5">
       {cards.map((c) => (
-        <div key={c.label} data-metric-card className="rounded-2xl border border-slate-200 bg-white p-4">
-          <p className="flex items-center gap-1.5 text-xs font-bold uppercase tracking-wide text-slate-500">
-            <c.icon size={14} aria-hidden /> {c.label}
+        <div key={c.label} data-metric-card className="min-w-0 rounded-2xl border border-slate-200 bg-white px-1.5 py-2 text-center">
+          <p className="font-mono text-lg font-black leading-none tabular-nums text-slate-900">{c.value}</p>
+          <p className="mt-1 text-[10px] font-bold uppercase leading-tight tracking-wide text-slate-500" title={c.label}>
+            <c.icon size={11} aria-hidden className="mr-0.5 inline align-[-1px]" />{c.label}
           </p>
-          <p className="mt-2 text-3xl font-black tabular-nums text-slate-900">{c.value}</p>
-          <p className="mt-1 text-xs text-slate-400">{c.hint}</p>
+          <p className="mt-0.5 truncate text-[9px] text-slate-400" title={c.hint}>{c.hint}</p>
         </div>
       ))}
     </div>
-  );
-}
-
-/** Read-only data-governance counters — the policy itself lives in About ASPIRE. */
-function RecordsArchivesCard({ data, onOpenArchive }: { data: RetentionInfo | null; onOpenArchive: () => void }) {
-  if (!data) return null;
-  const counters: [string, number][] = [
-    ["Archived tickets", data.counts.archivedIncidents],
-    ["Tickets eligible for purge", data.counts.eligibleIncidents],
-    ["Tickets already anonymised", data.counts.anonymizedIncidents],
-    ["Archived accounts", data.counts.archivedAccounts],
-    ["Accounts eligible for purge", data.counts.eligibleAccounts],
-    ["Expired drill records", data.counts.expiredDrills],
-  ];
-  return (
-    <section className={`${card} mt-1`} aria-label="Records and archives">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <h3 className={h2}><Archive size={14} /> Records &amp; Archives</h3>
-        <button onClick={onOpenArchive} className={btnSecondary}>
-          <ExternalLink size={15} /> Open archive
-        </button>
-      </div>
-      <dl className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-6">
-        {counters.map(([k, v]) => (
-          <div key={k} className="rounded-xl bg-slate-50 px-3 py-2">
-            <dd className="font-mono text-2xl font-black tabular-nums text-slate-800">{v}</dd>
-            <dt className="mt-0.5 text-[11px] font-bold uppercase tracking-wide text-slate-500">{k}</dt>
-          </div>
-        ))}
-      </dl>
-    </section>
   );
 }
 
@@ -802,30 +807,20 @@ function AccountRow({ acc, active }: { acc: AccountRecord; active: boolean }) {
   );
 }
 
-function AccountsPane({ accounts, onUnlock, onActivate, onReset, onDeactivate, onRestore, onPurge, onRequest, onEdit, focusArchived, onFocusHandled }: {
+function AccountsPane({ accounts, onUnlock, onActivate, onReset, onDeactivate, onRestore, onPurge, onRequest, onEdit, summary }: {
   accounts: AccountRecord[];
+  /** Compact dashboard tiles, rendered under search + filters (never above them). */
+  summary?: ReactNode;
   onUnlock: (a: AccountRecord) => void; onActivate: (a: AccountRecord) => void;
   onReset: (a: AccountRecord) => void; onDeactivate: (a: AccountRecord) => void;
   onRestore: (a: AccountRecord) => void;
   onPurge: (a: AccountRecord) => void;
   onRequest: (a: AccountRecord) => void;
   onEdit: (a: AccountRecord) => void;
-  /** "View in Users" from the archive: apply the Archived filter once. */
-  focusArchived?: string | null;
-  onFocusHandled?: () => void;
 }) {
   // One state for search, the role row, the sheet groups and the sort menu —
   // kept per screen for the session.
   const [state, setState] = useFilterState("admin-accounts", () => initialFilterState({ sort: "name" }));
-
-  // Arriving from the archive's Accounts tab: show archived accounts. The
-  // account id is used to select it once the filter is applied.
-  useEffect(() => {
-    if (!focusArchived) return;
-    setState((s) => ({ ...s, groups: { ...s.groups, status: ["archived"] } }));
-    onFocusHandled?.();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [focusArchived]);
 
   // Sections are known from every account, so an empty section stays selectable.
   const sectionOptions = [...new Set(accounts.map((a) => a.section).filter((s): s is string => Boolean(s)))].sort();
@@ -860,6 +855,7 @@ function AccountsPane({ accounts, onUnlock, onActivate, onReset, onDeactivate, o
   });
 
   const listHeader = (
+    <div className="space-y-2">
     <FilterBar
       search={{
         value: state.query,
@@ -920,6 +916,8 @@ function AccountsPane({ accounts, onUnlock, onActivate, onReset, onDeactivate, o
       onClearAll={() => setState((s) => clearGroupFilters(s))}
       results={{ label: "Users", shown: shown.length, total: accounts.length }}
     />
+    {summary}
+    </div>
   );
 
   return (

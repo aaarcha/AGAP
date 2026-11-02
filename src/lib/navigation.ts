@@ -1,13 +1,12 @@
 import type { ElementType } from "react";
 import {
+  Activity,
   Bell,
   BookOpen,
-  Calendar,
   ClipboardList,
   History as HistoryIcon,
   Menu,
   Radio,
-  ShieldAlert,
   Siren,
   SlidersHorizontal,
   User,
@@ -30,12 +29,13 @@ export const PARENT_TABS: NavTab<ParentTab>[] = [
   { id: "account", label: "Account", icon: User },
 ];
 
-export type PrincipalTab = "command" | "report" | "safety" | "history" | "more";
+// Analytics has its own tab; Safety, headcount, the official record and
+// Incidents & Records live under More, so the rail stays focused on live work.
+export type PrincipalTab = "command" | "report" | "analytics" | "more";
 export const PRINCIPAL_TABS: NavTab<PrincipalTab>[] = [
   { id: "command", label: "Command", icon: ClipboardList },
   { id: "report", label: "Report", icon: Siren },
-  { id: "safety", label: "Safety", icon: ShieldAlert },
-  { id: "history", label: "History", icon: HistoryIcon },
+  { id: "analytics", label: "Analytics", icon: Activity },
   { id: "more", label: "More", icon: Menu },
 ];
 
@@ -50,11 +50,12 @@ export const RESPONDER_TABS: NavTab<ResponderTab>[] = [
   { id: "account", label: "Account", icon: User },
 ];
 
-export type AdminTab = "accounts" | "audit" | "schoolyear" | "config" | "account";
+// A clean four-tab set. Year, Audit, Incidents & Records and Account are
+// entries inside More, not tabs of their own.
+export type AdminTab = "accounts" | "analytics" | "config" | "more";
 export const ADMIN_TABS: NavTab<AdminTab>[] = [
   { id: "accounts", label: "Users", icon: Users },
-  { id: "audit", label: "Audit", icon: ClipboardList },
-  { id: "schoolyear", label: "Year", icon: Calendar },
+  { id: "analytics", label: "Analytics", icon: Activity },
   { id: "config", label: "System Settings", icon: SlidersHorizontal },
-  { id: "account", label: "Profile", icon: User },
+  { id: "more", label: "More", icon: Menu },
 ];

@@ -100,6 +100,7 @@ function SendPanel({ sel, popLabel, ct, needSection, section, setSection, sectio
   canSend: boolean;
   onSend: () => void;
 }) {
+  const sectionLabel = popLabel && /individual/i.test(popLabel) ? "Which class is the pupil in?" : "Which class is affected?";
   return (
     <section
       className="space-y-3 rounded-2xl border border-slate-200 bg-white p-3"
@@ -127,7 +128,7 @@ function SendPanel({ sel, popLabel, ct, needSection, section, setSection, sectio
       {needSection && (
         <div>
           <Select
-            label="Which section is affected?"
+            label={sectionLabel}
             value={section}
             onChange={setSection}
             placeholder="Choose a section…"
@@ -212,8 +213,7 @@ export default function ReportView({ onOpenProfile }: { onOpenProfile?: () => vo
 
   const pop = POPULATIONS.find((p) => p.id === popId) ?? null;
 
-  const needSection =
-    !isTeacher && pop && pop.id !== "wholeschool";
+  // The class question is derived from the chosen POPULATION and LOCATION below.
 
   const match = useMemo(() => searchCatalog(query), [query]);
   const hasQuery = query.trim().length >= 2;
@@ -541,6 +541,15 @@ export default function ReportView({ onOpenProfile }: { onOpenProfile?: () => vo
     proceed(location.loc);
   }
 
+  // Ask "Which class is affected?" ONLY for a common area or an unverified place,
+  // and only for Individual Pupil / Classroom. Never for Whole School, never for
+  // a classroom location. The reporter's own class is preselected.
+  const locKind = location.loc.locationKind;
+  const needSection = Boolean(pop && pop.id !== "wholeschool" && (locKind === "area" || locKind === "unverified"));
+  useEffect(() => {
+    if (needSection && !section && user!.section) setSection(user!.section);
+  }, [needSection, section, user]);
+
   const ct = sel ? catTheme(sel.catId) : catTheme("other");
 
   // FLOW page: no fixed height and no overflow — <main> carries the scroll.
@@ -783,7 +792,7 @@ export default function ReportView({ onOpenProfile }: { onOpenProfile?: () => vo
                 {moreOpen && (
                   <div className="mt-1">
                     <Select
-                      label="Which section is affected?"
+                      label={pop && /individual/i.test(pop.label) ? "Which class is the pupil in?" : "Which class is affected?"}
                       value={section}
                       onChange={setSection}
                       placeholder="Choose a section…"

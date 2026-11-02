@@ -6,9 +6,72 @@ import { STATUS_LABEL, STATUS_ORDER, agencyFor, bandFor, orgLabel } from "../../
 import { useApp } from "../lib/store";
 import { BAND_STYLE, catTheme } from "../lib/theme";
 import { clockTime, elapsed, escalationLabel, locationSetByLabel, plainOverride } from "../lib/format";
-import type { Incident, OrgResponse, Status } from "../lib/types";
+import type { Incident, OrgResponse, ResponderOrg, Status } from "../lib/types";
 import { ConfirmModal } from "./Modal";
 import { AckModal, EtaLine, HeadcountPanel, ResponseLines, RuleBadges } from "./Rules";
+
+/** The org that reached the furthest stage on a ticket (the overall headline). */
+function furthestOrg(inc: Incident): string | null {
+  const rows = Object.entries(inc.responses ?? {}).filter(([, r]) => Boolean(r)) as [string, OrgResponse][];
+  const pick = (status: string) => rows.find(([, r]) => r.status === status);
+  const hit = pick("resolved") ?? pick("on_site") ?? pick("en_route");
+  return hit ? hit[1].orgLabel || orgLabel(hit[0]) : null;
+}
+
+/** The viewer's own organization track: acknowledge → on site → resolved. */
+function OrgStepper({ track }: { track: OrgResponse | null }) {
+  const reached = !track ? 0 : track.status === "resolved" ? 2 : track.status === "on_site" ? 1 : 0;
+  const steps = ["Acknowledge & En Route", "On Site", "Resolved"];
+  return (
+    <ol aria-label="Your organization's response" className="flex items-start gap-1">
+      {steps.map((label, i) => {
+        const state = i < reached ? "done" : i === reached ? (track ? "active" : "upcoming") : "upcoming";
+        return (
+          <li key={label} data-org-step={label} data-state={state} className="flex min-w-0 flex-1 flex-col items-center">
+            <div className="flex w-full items-center" aria-hidden>
+              <span className={`h-0.5 flex-1 ${i === 0 ? "bg-transparent" : i <= reached && track ? "bg-emerald-500" : "border-t-2 border-dashed border-slate-300"}`} />
+              <span className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[10px] font-bold ${
+                state === "done" ? "bg-emerald-600 text-white" : state === "active" ? "bg-brand-600 text-white ring-4 ring-brand-100" : "border-2 border-dashed border-slate-300 bg-white text-slate-400"
+              }`}>{state === "done" ? <Check size={13} strokeWidth={3} /> : i + 1}</span>
+              <span className={`h-0.5 flex-1 ${i === steps.length - 1 ? "bg-transparent" : i < reached ? "bg-emerald-500" : "border-t-2 border-dashed border-slate-300"}`} />
+            </div>
+            <span className={`mt-1 w-full text-center text-[10px] uppercase tracking-wide ${
+              state === "done" ? "font-bold text-emerald-700" : state === "active" ? "font-extrabold text-brand-800" : "font-medium text-slate-400"
+            }`}>{label}</span>
+          </li>
+        );
+      })}
+    </ol>
+  );
+}
+
+/** Read-only lines for every other organization on this ticket. */
+function OtherResponders({ inc, myOrg }: { inc: Incident; myOrg: ResponderOrg | null }) {
+  const { now } = useApp();
+  const ids = (["barangay", "cdrrmo"] as ResponderOrg[]).filter((id) => id !== myOrg);
+  return (
+    <section data-other-responders aria-label="Other responders" className="rounded-xl bg-slate-50 p-2">
+      <p className="text-[11px] font-bold uppercase tracking-wide text-slate-500">Other responders</p>
+      <ul className="mt-1 space-y-1">
+        {ids.map((id) => {
+          const r = inc.responses?.[id] ?? null;
+          let detail: string;
+          if (!r) detail = "Not yet responding";
+          else if (r.status === "resolved") detail = `Resolved at ${clockTime(r.resolvedAt ?? r.ackAt)}`;
+          else if (r.status === "on_site") detail = `On site since ${elapsed(r.onSiteAt ?? r.ackAt, now)}`;
+          else if (r.blocked) detail = "En route — route blocked";
+          else detail = r.minutes == null ? "En route" : `En route · ETA ~${Math.max(0, Math.ceil(((r.arriveBy ?? now) - now) / 60000))} min`;
+          return (
+            <li key={id} data-other-org={id} className="flex flex-wrap items-baseline gap-x-2 text-xs text-slate-600">
+              <span className="font-bold text-slate-800">{orgLabel(id)}</span>
+              <span>{detail}</span>
+            </li>
+          );
+        })}
+      </ul>
+    </section>
+  );
+}
 
 /** "CDRRMO" when an org has acted — the shared status names who is coming. */
 const actingOrg = (inc: Pick<Incident, "acknowledgedByOrg" | "acknowledgedBy">) =>
@@ -107,7 +170,10 @@ const ACTION_LABEL: Record<string, string> = {
 };
 
 export function IncidentCard({ inc, showActions, showLog, defaultExpanded = false }: { inc: Incident; showActions?: boolean; showLog?: boolean; defaultExpanded?: boolean }) {
-  const { now, modes, act, markSeen } = useApp();
+  const { now, modes, act, markSeen, user } = useApp();
+  const isResponder = user?.role === "responder";
+  const myOrg = (user?.org ?? null) as ResponderOrg | null;
+  const myTrack = myOrg ? inc.responses?.[myOrg] ?? null : null;
   const ct = catTheme(inc.category);
   const closed = inc.status === "RESOLVED";
   const band = bandFor(inc.score, inc.status, inc.overrideReasons);
@@ -121,12 +187,20 @@ export function IncidentCard({ inc, showActions, showLog, defaultExpanded = fals
   // a status pushed in from the server can never leave a stale label behind:
   // SENT/SEEN → Acknowledge & En Route, EN_ROUTE → Mark as On Site,
   // ON_SITE → Mark as Resolved, RESOLVED → no button (a disabled badge instead).
-  const nextStep: "ack" | "onsite" | "resolve" | null = closed
-    ? null
-    : inc.status === "SENT" || inc.status === "SEEN" ? "ack"
-      : inc.status === "EN_ROUTE" ? "onsite"
-        : inc.status === "ON_SITE" ? "resolve"
-          : null;
+  // A responder's next step comes from their OWN track, never the shared
+  // ticket status: the CDRRMO must still acknowledge after the Barangay is on site.
+  const nextStep: "ack" | "onsite" | "resolve" | null = isResponder
+    ? closed || myTrack?.status === "resolved"
+      ? null
+      : !myTrack ? "ack"
+        : myTrack.status === "en_route" ? "onsite"
+          : "resolve"
+    : closed
+      ? null
+      : inc.status === "SENT" || inc.status === "SEEN" ? "ack"
+        : inc.status === "EN_ROUTE" ? "onsite"
+          : inc.status === "ON_SITE" ? "resolve"
+            : null;
 
   // First time a principal/responder sees a "Sent" ticket, tell the server it was seen.
   useEffect(() => { if (showActions && inc.status === "SENT") markSeen(inc.id); }, [showActions, inc.id, inc.status, markSeen]);
@@ -173,18 +247,37 @@ export function IncidentCard({ inc, showActions, showLog, defaultExpanded = fals
       <div className="space-y-2 p-3">
         <div className="flex items-start justify-between gap-2">
           <h3 className="min-w-0 text-base font-bold leading-tight text-slate-800">{inc.subLabel}</h3>
-          <span className="shrink-0 text-[11px] font-bold uppercase tracking-wide text-slate-500">{STATUS_LABEL[inc.status]}</span>
+          <span data-overall-status className="shrink-0 text-right text-[11px] font-bold uppercase tracking-wide text-slate-500">
+            {STATUS_LABEL[inc.status]}{furthestOrg(inc) ? ` · ${furthestOrg(inc)}` : ""}
+          </span>
         </div>
+        {closed && inc.resolvedByOrg ? (
+          <p data-resolved-by className="text-xs font-bold text-emerald-700">
+            Resolved by {orgLabel(inc.resolvedByOrg)} at {clockTime(inc.resolvedAt ?? inc.createdAt)}
+          </p>
+        ) : null}
         <p className="text-xs text-slate-500">{inc.reporterName ? `${inc.reporterName} · ` : ""}{elapsed(inc.createdAt, now)} · {clockTime(inc.createdAt)}</p>
         <p className="text-sm text-slate-600">📍 {inc.room}</p>
         <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Location set by {locationSetByLabel(inc)}</p>
         <p className="text-xs font-semibold" style={{ color: ct.color }}>Recommended: {agencyFor(inc.category)}</p>
         <RuleBadges inc={inc} />
-        <StatusStepper inc={inc} />
+        {isResponder ? (
+          <section data-your-response aria-label="Your response" className="rounded-xl border border-brand-100 bg-brand-50/60 p-2">
+            <p className="text-[11px] font-bold uppercase tracking-wide text-brand-800">
+              Your response{myOrg ? ` · ${orgLabel(myOrg)}` : ""}
+            </p>
+            {myOrg ? <OrgStepper track={myTrack} /> : (
+              <p className="mt-1 text-xs font-semibold text-blush-700">Your organization is not assigned. Ask the System Administrator.</p>
+            )}
+          </section>
+        ) : (
+          <StatusStepper inc={inc} />
+        )}
         <WaitingLine inc={inc} />
+        {isResponder && <OtherResponders inc={inc} myOrg={myOrg} />}
         {showActions && <HeadcountPanel inc={inc} />}
 
-        {showActions && nextStep && (
+        {showActions && nextStep && (isResponder ? Boolean(myOrg) : true) && (
           <div className="space-y-2 pt-1">
             {nextStep === "ack" && (
               <MobileAckButton disabled={busy} onClick={() => setAckOpen(true)} gradient={ct.gradient} />

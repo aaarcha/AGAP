@@ -4,6 +4,12 @@
 import fs from "node:fs";
 import path from "node:path";
 import { parseSection } from "../shared/section.js";
+import { NON_CLASSROOM_AREAS } from "../shared/domain.js";
+
+// Timeline entries that are bookkeeping rather than the operational record.
+const INTERNAL_LOG_ACTIONS = new Set([
+  "archived", "auto_archived", "restored", "hidden", "unhidden", "purged", "anonymized", "data_request",
+]);
 
 export const SEED_ROSTER = [
   { id: "t1", name: "Ms. Reyes", section: "Grade 3 - Sec A", room: "Bldg A | Flr 2 | Rm 204", gps: "14.312, 121.115", status: "active", registry: 28 },
@@ -101,6 +107,54 @@ export function normalize(d) {
     i.archivedAuto ??= false;
     // Set by an Admin purge: personal data erased, anonymous statistics kept.
     i.anonymizedAt ??= null;
+    // Reporter list: older files only stored the first reporter.
+    i.reporterIds = Array.isArray(i.reporterIds) ? i.reporterIds : i.reporterId ? [i.reporterId] : [];
+    // Canonical place identity for the merge rule (see the create-incident code):
+    // classroom → its legacy room string, common area → "area:<id>", unverified →
+    // per reporter so it never merges. Older tickets only stored the display room.
+    if (!i.locationKey) {
+      if (i.locationKind === "area") {
+        const text = String(i.room ?? "");
+        const area = NON_CLASSROOM_AREAS.find((a) => text.toLowerCase().startsWith(a.label.toLowerCase()));
+        i.locationKey = `area:${area ? area.id : text}`;
+      } else if (i.locationKind === "unverified") {
+        i.locationKey = `unverified:${i.reporterId || i.reporterIds[0] || "unknown"}`;
+      } else {
+        i.locationKey = String(i.room ?? "");
+      }
+    }
+    // Bookkeeping log entries are internal; older files only kept the action name.
+    for (const l of Array.isArray(i.log) ? i.log : []) {
+      if (INTERNAL_LOG_ACTIONS.has(String(l.action))) l.internal = true;
+    }
+    // Per-organization response tracks. Older tickets carried ONE shared
+    // acknowledgedBy/resolvedBy label, so backfill the org it names (both names
+    // meant the old shared inbox — those become the barangay track) and copy the
+    // existing timestamps into it. Ticket-level timestamps stay untouched.
+    if (!i.responses || typeof i.responses !== "object") i.responses = {};
+    for (const id of ["barangay", "cdrrmo"]) if (!(id in i.responses)) i.responses[id] = null;
+    if (!i.responses.barangay && !i.responses.cdrrmo) {
+      const labels = `${i.acknowledgedBy ?? ""} ${i.resolvedBy ?? ""}`;
+      const cdrrmo = /cdrrmo/i.test(labels);
+      const barangay = /barangay|brgy/i.test(labels);
+      const org = cdrrmo && barangay ? "barangay" : cdrrmo ? "cdrrmo" : barangay ? "barangay" : null;
+      if (org) {
+        const ackAt = i.enRouteAt ?? i.seenAt ?? i.createdAt;
+        const resolvedAt = i.status === "RESOLVED" ? i.resolvedAt ?? null : null;
+        i.responses[org] = {
+          org,
+          orgLabel: org === "cdrrmo" ? "CDRRMO" : "Barangay Sinalhan",
+          status: resolvedAt ? "resolved" : i.onSiteAt ? "on_site" : "en_route",
+          ackAt, acknowledgedAt: ackAt, enRouteAt: ackAt,
+          onSiteAt: i.onSiteAt ?? null, resolvedAt,
+          byName: null, by: null,
+          mode: i.eta?.mode ?? null, distanceKm: i.eta?.distanceKm ?? null,
+          routeStatus: i.eta?.routeStatus ?? null, blocked: Boolean(i.eta?.blocked),
+          minutes: i.eta?.minutes ?? null, etaMinutes: i.eta?.minutes ?? null,
+          startedAt: i.eta?.startedAt ?? null, arriveBy: i.eta?.arriveBy ?? null,
+        };
+      }
+    }
   }
   return d;
 }

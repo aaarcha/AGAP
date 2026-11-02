@@ -1,14 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode, type RefObject } from "react";
-import { ArrowLeft, Building2, ChevronRight, MapPin, User, Users } from "lucide-react";
+import { Activity, ArrowLeft, Building2, ChevronRight, FolderTree, MapPin, ShieldAlert, User, Users } from "lucide-react";
 import { useApp } from "../lib/store";
 import { startOfToday } from "../lib/format";
-import HistorySection from "../components/History";
-import ArchivePage from "../components/ArchivePage";
 import { BoundedPane, PageFlow } from "../components/PageShell";
 import ReportView from "./ReportView";
 import RosterPanel from "./RosterPanel";
 import SafetyView from "./SafetyView";
+import HeadcountView from "./HeadcountView";
 import AccountView from "./AccountView";
+import IncidentsRecords from "./IncidentsRecords";
+import AnalyticsView from "./AnalyticsView";
 import { QueueRow } from "./ResponderView";
 import { IncidentCard } from "../components/Incident";
 import { SchoolMap, type RoomMarker } from "../components/SchoolMap";
@@ -438,8 +439,8 @@ export function Command() {
   if (!wide) {
     return (
       <PageFlow className="space-y-3">
-        {stats}
         {filterBar}
+        {stats}
         <Segmented
           label="Command view"
           value={phonePane}
@@ -478,8 +479,8 @@ export function Command() {
 
   return (
     <PageFlow className="space-y-3">
-      {stats}
       {filterBar}
+      {stats}
       <BoundedPane label="Incident command">
         <CommandPanes
           queue={
@@ -534,8 +535,11 @@ function BackBar({ title, onBack }: { title: string; onBack: () => void }) {
 }
 
 function More() {
-  const [screen, setScreen] = useState<"menu" | "roster" | "account">("menu");
+  const [screen, setScreen] = useState<"menu" | "safety" | "headcount" | "records" | "roster" | "account">("menu");
   const items = [
+    { id: "safety" as const, label: "Safety", hint: "Hazard mode and drill mode switches", icon: ShieldAlert },
+    { id: "headcount" as const, label: "Headcount status", hint: "Live accountability per open incident", icon: Activity },
+    { id: "records" as const, label: "Incidents & Records", hint: "Records browser, drill records and archives", icon: FolderTree },
     { id: "roster" as const, label: "Teacher roster", hint: "Sections, rooms and registries", icon: Users },
     { id: "account" as const, label: "Account", hint: "Password, About and sign out", icon: User },
   ];
@@ -545,13 +549,16 @@ function More() {
       <div>{node}</div>
     </div>
   );
-  // Only "roster" keeps the shell: AccountView carries its own single back bar,
-  // so wrapping it here would render two. About lives inside Account > About
-  // ASPIRE, like every other role.
+  // Only the sub-screens keep the shell: AccountView carries its own single
+  // back bar, so wrapping it here would render two. About lives inside
+  // Account > About ASPIRE, like every other role.
+  if (screen === "safety") return shell("Safety", <SafetyView />);
+  if (screen === "headcount") return shell("Headcount status", <HeadcountView />);
+  if (screen === "records") return shell("Incidents & Records", <IncidentsRecords />);
   if (screen === "roster") return shell("Teacher roster", <RosterPanel />);
   if (screen === "account") return <AccountView onBack={() => setScreen("menu")} />;
   return (
-    <PageFlow width="max-w-md" className="space-y-2">
+    <PageFlow width="max-w-md" className="mx-auto space-y-2">
       {items.map((it) => (
         <button key={it.id} onClick={() => setScreen(it.id)}
           className="flex min-h-16 w-full items-center gap-3 rounded-2xl border border-slate-200 bg-white px-4 text-left">
@@ -567,24 +574,12 @@ function More() {
   );
 }
 
-/** History tab: the live record, plus the dedicated archived-records page. */
-function HistoryTab() {
-  const [archive, setArchive] = useState(false);
-  if (archive) return <ArchivePage title="Archived records" backLabel="History" onBack={() => setArchive(false)} />;
-  return (
-    <PageFlow width="max-w-3xl">
-      <HistorySection title="Incident history (official record)" onOpenArchive={() => setArchive(true)} />
-    </PageFlow>
-  );
-}
-
 export default function PrincipalView({ tab }: { tab: PrincipalTab }) {
   return (
     <>
       {tab === "command" && <Command />}
       {tab === "report" && <ReportView />}
-      {tab === "safety" && <SafetyView />}
-      {tab === "history" && <HistoryTab />}
+      {tab === "analytics" && <AnalyticsView />}
       {tab === "more" && <More />}
     </>
   );

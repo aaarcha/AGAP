@@ -27,6 +27,12 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import { createPortal } from "react-dom";
 import { ArrowDownUp, Check, ChevronDown, ChevronLeft, ChevronRight, LayoutGrid, List, SlidersHorizontal, X } from "lucide-react";
 import { useMediaQuery } from "../lib/hooks";
+import {
+  PERIOD_OPTIONS, periodLabel, setDateBound, setPeriod,
+  type DateRangeState, type PeriodId,
+} from "../lib/filters";
+import { Select } from "./Select";
+import { DatePicker } from "./DatePicker";
 
 export type ChipOption = {
   value: string;
@@ -72,6 +78,10 @@ export type FilterBarProps = {
     title?: string;
   };
   sort?: { value: string; options: { value: string; label: string }[]; onChange: (v: string) => void; ariaLabel?: string };
+  /** The one Period dropdown, inside the Filters sheet. */
+  period?: { value: DateRangeState; onChange: (next: DateRangeState) => void };
+  /** Text used for the period in the active summary (defaults to its label). */
+  periodSummary?: string;
   /** Legacy extra chip rows — converted into Select dropdowns in the panel. */
   chipRows?: ChipRowProps[];
   /** Legacy removable chips — now summarised in the results header. */
@@ -252,6 +262,8 @@ export function FilterBar({
   quickChips,
   filters,
   sort,
+  period,
+  periodSummary,
   chipRows,
   onClearAll,
   results,
@@ -279,14 +291,17 @@ export function FilterBar({
   // Quick toggles normally mirror a group value, so they only add a summary
   // entry on screens that have no dropdowns (e.g. Teacher My Reports).
   const extraToggles = groupLabels.length > 0 ? [] : quick.filter((q) => q.active).map((q) => q.label);
-  const summary = [categoryLabel, ...groupLabels, ...extraToggles].filter(Boolean);
-  const activeCount = groupLabels.length + extraToggles.length;
+  const periodName = period
+    ? periodSummary ?? (period.value.period === "all" ? "" : periodLabel(period.value))
+    : "";
+  const summary = [categoryLabel, ...groupLabels, ...extraToggles, periodName].filter(Boolean);
+  const activeCount = groupLabels.length + extraToggles.length + (periodName ? 1 : 0);
   const filtersActive = activeCount > 0;
 
   const shown = filters?.shown ?? results.shown;
   const total = filters?.total ?? results.total;
   const panelTitle = filters?.title ?? "Filters";
-  const canOpenPanel = Boolean(filters) || quick.length > 0;
+  const canOpenPanel = Boolean(filters) || quick.length > 0 || Boolean(period);
   const sortLabel = sort ? sort.options.find((o) => o.value === sort.value)?.label ?? sort.value : "";
 
   // Arrows only when the single row really overflows (never mid-scroll guess).
@@ -319,6 +334,9 @@ export function FilterBar({
   const resetAll = () => {
     // Group selections (which back most quick toggles) are the caller's to
     // clear; without any groups, Reset just turns the toggles off.
+    if (period && period.value.period !== "all") {
+      period.onChange({ ...period.value, period: "all", from: "", to: "" });
+    }
     if (filters) {
       filters.onReset();
       return;
@@ -479,6 +497,7 @@ export function FilterBar({
           title={panelTitle}
           groups={groups}
           quick={quick}
+          period={period}
           shown={shown}
           total={total}
           onReset={resetAll}
@@ -496,6 +515,7 @@ export function FilterBar({
           <FiltersBody
             groups={groups}
             quick={quick}
+            period={period}
             shown={shown}
             total={total}
             onReset={resetAll}
@@ -529,7 +549,7 @@ export function FilterBar({
       {/* Results header: count, the active-filter summary, the view toggle. */}
       <div className="flex items-center justify-between gap-2">
         <div aria-live="polite" aria-atomic="true" className="min-w-0">
-          <p className="truncate text-xs font-bold text-slate-600">
+          <p className="break-words text-xs font-bold text-slate-600">
             <span data-results>{results.label} {results.shown} of {results.total}</span>
             {summary.length > 0 && (
               <span data-filter-summary className="font-semibold text-slate-500"> · {summary.join(" · ")}</span>
@@ -567,6 +587,7 @@ export function FilterBar({
 function FiltersBody({
   groups,
   quick,
+  period,
   shown,
   total,
   onReset,
@@ -574,6 +595,7 @@ function FiltersBody({
 }: {
   groups: FilterGroupProps[];
   quick: NonNullable<FilterBarProps["quickChips"]>;
+  period?: FilterBarProps["period"];
   shown: number;
   total: number;
   onReset: () => void;
@@ -601,6 +623,8 @@ function FiltersBody({
   return (
     <div className="space-y-3">
       <p className="text-xs font-bold uppercase tracking-wide text-slate-500">Showing {shown} of {total}</p>
+
+      {period && <PeriodGroup value={period.value} onChange={period.onChange} />}
 
       {quick.length > 0 && (
         <div className="space-y-1">
@@ -653,26 +677,122 @@ function FiltersBody({
   );
 }
 
-/** One group as a dropdown: "Any <name>", then "Label (count)" options. */
+/**
+ * One group as a dropdown: "Any <name>", then "Label (count)" options.
+ *
+ * The menu is ALWAYS portalled out of the sheet/dialog that opened it — a
+ * bottom picker sheet on phones, an anchored popover at >= 640px — so a
+ * scrolling parent can never clip the first option.
+ */
 function GroupSelect({ group, open, onOpenChange }: { group: FilterGroupProps; open: boolean; onOpenChange: (open: boolean) => void }) {
   const triggerRef = useRef<HTMLButtonElement>(null);
-  // Flip the menu above the trigger when the sheet leaves no room below it.
-  const [placeUp, setPlaceUp] = useState(false);
-  useEffect(() => {
-    if (!open) return;
-    const el = triggerRef.current;
-    if (!el) return;
-    const r = el.getBoundingClientRect();
-    const below = window.innerHeight - r.bottom;
-    setPlaceUp(below < 300 && r.top > below);
-  }, [open]);
+  const menuRef = useRef<HTMLUListElement>(null);
+  const desktop = useMediaQuery("screen and (min-width: 640px)");
+  const [pos, setPos] = useState<{ left: number; top: number; width: number; maxHeight: number } | null>(null);
 
   const selectedLabels = group.options.filter((o) => group.selected.includes(o.value)).map((o) => o.label);
   const anyLabel = `Any ${group.label.toLowerCase()}`;
   const triggerLabel = selectedLabels.length === 0 ? anyLabel : selectedLabels.length === 1 ? selectedLabels[0] : `${selectedLabels.length} selected`;
 
+  // Anchor the popover under the trigger and flip it above when there is no room.
+  useEffect(() => {
+    if (!open || !desktop) {
+      setPos(null);
+      return;
+    }
+    const place = () => {
+      const trigger = triggerRef.current;
+      if (!trigger) return;
+      const r = trigger.getBoundingClientRect();
+      const gap = 6;
+      const roomBelow = window.innerHeight - r.bottom - gap - 8;
+      const roomAbove = r.top - gap - 8;
+      const natural = Math.min(menuRef.current?.scrollHeight ?? 256, 320);
+      const flip = natural > roomBelow && roomAbove > roomBelow;
+      const maxHeight = Math.max(140, Math.min(320, flip ? roomAbove : roomBelow));
+      const width = Math.max(180, r.width);
+      const left = Math.max(8, Math.min(r.left, window.innerWidth - width - 8));
+      const top = flip ? Math.max(8, r.top - gap - Math.min(natural, maxHeight)) : r.bottom + gap;
+      setPos({ left, top, width, maxHeight });
+    };
+    place();
+    window.addEventListener("resize", place);
+    window.addEventListener("scroll", place, true);
+    return () => {
+      window.removeEventListener("resize", place);
+      window.removeEventListener("scroll", place, true);
+    };
+  }, [open, desktop, group.options.length]);
+
+  // Open on the chosen option and scroll it into view — never a cut-off top.
+  useEffect(() => {
+    if (!open) return;
+    const id = window.setTimeout(() => {
+      const menu = menuRef.current;
+      const chosen = menu?.querySelector<HTMLElement>('[aria-selected="true"]');
+      if (!menu || !chosen) return;
+      menu.scrollTop = Math.max(0, chosen.offsetTop - 12);
+      chosen.scrollIntoView?.({ block: "nearest" });
+    }, 0);
+    return () => window.clearTimeout(id);
+  }, [open]);
+
+  const optionNodes = (
+    <>
+      <li>
+        <button
+          type="button"
+          role="option"
+          aria-selected={group.selected.length === 0}
+          onClick={() => {
+            for (const v of [...group.selected]) group.onToggle(group.id, v);
+            onOpenChange(false);
+          }}
+          className="flex min-h-12 w-full items-center gap-2 px-3 text-left text-sm text-slate-700 hover:bg-brand-50"
+        >
+          <span className="min-w-0 flex-1 break-words">{anyLabel}</span>
+          {group.selected.length === 0 && <Check size={16} className="shrink-0 text-brand-600" aria-hidden />}
+        </button>
+      </li>
+      {group.options.map((o) => {
+        const on = group.selected.includes(o.value);
+        return (
+          <li key={o.value}>
+            <button
+              type="button"
+              role="option"
+              aria-selected={on}
+              aria-pressed={on}
+              disabled={o.disabled}
+              onClick={() => group.onToggle(group.id, o.value)}
+              className={`flex min-h-12 w-full items-center gap-2 px-3 text-left text-sm ${o.disabled ? "cursor-not-allowed text-slate-300" : "text-slate-700 hover:bg-brand-50"}`}
+            >
+              <span className="min-w-0 flex-1 break-words">
+                {o.label}{" "}
+                {o.count !== undefined && <span className={`font-mono text-xs ${o.disabled ? "text-slate-300" : "text-slate-400"}`}>({o.count})</span>}
+              </span>
+              {on && <Check size={16} className="shrink-0 text-brand-600" aria-hidden />}
+            </button>
+          </li>
+        );
+      })}
+    </>
+  );
+
+  const list = (extra: string) => (
+    <ul
+      ref={menuRef}
+      data-group-menu
+      role="listbox"
+      aria-label={group.label}
+      className={`list-none overflow-y-auto max-h-[70dvh] ${extra}`}
+    >
+      {optionNodes}
+    </ul>
+  );
+
   return (
-    <div className="relative">
+    <div>
       <button
         ref={triggerRef}
         type="button"
@@ -690,52 +810,51 @@ function GroupSelect({ group, open, onOpenChange }: { group: FilterGroupProps; o
         <ChevronDown size={16} aria-hidden className={`shrink-0 text-slate-400 transition-transform ${open ? "rotate-180" : ""}`} />
       </button>
 
-      {open && (
-        <ul
-          data-group-menu
-          role="listbox"
-          aria-label={group.label}
-          className={`absolute inset-x-0 z-[80] max-h-64 overflow-y-auto rounded-xl border border-slate-200 bg-white py-1 shadow-xl ${placeUp ? "bottom-full mb-1" : "top-full mt-1"}`}
-        >
-          <li>
-            <button
-              type="button"
-              role="option"
-              aria-selected={group.selected.length === 0}
-              onClick={() => {
-                for (const v of [...group.selected]) group.onToggle(group.id, v);
-                onOpenChange(false);
-              }}
-              className="flex min-h-12 w-full items-center gap-2 px-3 text-left text-sm text-slate-700 hover:bg-brand-50"
+      {/* Desktop: anchored popover, portalled so no parent can clip it. */}
+      {open && desktop && typeof document !== "undefined" &&
+        createPortal(
+          <div
+            className="fixed z-[80] flex flex-col overflow-hidden rounded-xl border border-slate-200 bg-white shadow-xl"
+            style={
+              pos
+                ? { left: pos.left, top: pos.top, width: pos.width, maxHeight: pos.maxHeight }
+                : { left: -9999, top: -9999, width: 240, maxHeight: 320 }
+            }
+          >
+            {list("min-h-0 flex-1 py-1")}
+          </div>,
+          document.body,
+        )}
+
+      {/* Phones: a bottom picker sheet, always with a title and a Close button. */}
+      {open && !desktop && typeof document !== "undefined" &&
+        createPortal(
+          <div
+            className="fixed inset-0 z-[80] flex items-end bg-black/55"
+            onMouseDown={(e) => e.target === e.currentTarget && onOpenChange(false)}
+          >
+            <div
+              role="dialog"
+              aria-modal="true"
+              aria-label={group.label}
+              className="flex max-h-[85dvh] w-full flex-col overflow-hidden rounded-t-2xl bg-white shadow-2xl"
             >
-              <span className="min-w-0 flex-1 truncate">{anyLabel}</span>
-              {group.selected.length === 0 && <Check size={16} className="shrink-0 text-brand-600" aria-hidden />}
-            </button>
-          </li>
-          {group.options.map((o) => {
-            const on = group.selected.includes(o.value);
-            return (
-              <li key={o.value}>
+              <div className="flex shrink-0 items-center justify-between border-b border-slate-100 px-4 py-3">
+                <h2 className="text-base font-bold text-slate-800">{group.label}</h2>
                 <button
                   type="button"
-                  role="option"
-                  aria-selected={on}
-                  aria-pressed={on}
-                  disabled={o.disabled}
-                  onClick={() => group.onToggle(group.id, o.value)}
-                  className={`flex min-h-12 w-full items-center gap-2 px-3 text-left text-sm ${o.disabled ? "cursor-not-allowed text-slate-300" : "text-slate-700 hover:bg-brand-50"}`}
+                  aria-label="Close"
+                  onClick={() => onOpenChange(false)}
+                  className="-mr-2 flex h-12 w-12 items-center justify-center rounded-lg hover:bg-slate-100"
                 >
-                  <span className="min-w-0 flex-1 truncate">
-                    {o.label}{" "}
-                    {o.count !== undefined && <span className={`font-mono text-xs ${o.disabled ? "text-slate-300" : "text-slate-400"}`}>({o.count})</span>}
-                  </span>
-                  {on && <Check size={16} className="shrink-0 text-brand-600" aria-hidden />}
+                  <X size={20} className="text-slate-500" aria-hidden />
                 </button>
-              </li>
-            );
-          })}
-        </ul>
-      )}
+              </div>
+              {list("min-h-0 flex-1 p-2 pb-[max(0.75rem,env(safe-area-inset-bottom))]")}
+            </div>
+          </div>,
+          document.body,
+        )}
     </div>
   );
 }
@@ -745,6 +864,7 @@ function FiltersSheet({
   title,
   groups,
   quick,
+  period,
   shown,
   total,
   onReset,
@@ -753,6 +873,7 @@ function FiltersSheet({
   title: string;
   groups: FilterGroupProps[];
   quick: NonNullable<FilterBarProps["quickChips"]>;
+  period?: FilterBarProps["period"];
   shown: number;
   total: number;
   onReset: () => void;
@@ -788,10 +909,31 @@ function FiltersSheet({
             <X size={20} className="text-slate-500" />
           </button>
         </div>
-        <FiltersBody groups={groups} quick={quick} shown={shown} total={total} onReset={onReset} onDone={onClose} />
+        <FiltersBody groups={groups} quick={quick} period={period} shown={shown} total={total} onReset={onReset} onDone={onClose} />
       </div>
     </div>,
     document.body,
+  );
+}
+
+/** The Period dropdown: one preset value, Custom reveals the From/To range. */
+function PeriodGroup({ value, onChange }: { value: DateRangeState; onChange: (next: DateRangeState) => void }) {
+  return (
+    <div data-period-group className="space-y-2">
+      <Select
+        label="Period"
+        ariaLabel="Period"
+        value={value.period}
+        onChange={(v) => onChange(setPeriod(value, v as PeriodId))}
+        options={PERIOD_OPTIONS.map((o) => ({ value: o.value, label: o.label }))}
+      />
+      {value.period === "custom" && (
+        <div className="flex flex-wrap items-end gap-2">
+          <DatePicker className="w-40" label="From" value={value.from} onChange={(v) => onChange(setDateBound(value, "from", v))} clearable />
+          <DatePicker className="w-40" label="To" value={value.to} onChange={(v) => onChange(setDateBound(value, "to", v))} clearable />
+        </div>
+      )}
+    </div>
   );
 }
 

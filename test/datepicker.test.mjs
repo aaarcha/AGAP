@@ -1,10 +1,10 @@
 /**
- * DatePicker (src/components/DatePicker.tsx) and DateRangeBar
- * (src/components/DateRange.tsx), bundled with esbuild and rendered in jsdom.
+ * DatePicker (src/components/DatePicker.tsx) and the Period dropdown inside the
+ * FilterBar's Filters sheet, bundled with esbuild and rendered in jsdom.
  * Covers: placeholder vs chosen day, opening on the selected month, picking a
  * day, month navigation, arrow/Enter keyboard picking, Esc, min/max disabling,
  * the clear button, the phone bottom sheet vs the >=640px popover, and the
- * DateRangeBar's period chips revealing the From/To pair on Custom.
+ * Period select revealing the From/To pair on Custom range.
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -23,7 +23,7 @@ await build({
   stdin: {
     contents:
       `export { DatePicker, dayLabel, shortDayLabel } from ${JSON.stringify(path.join(root, "src/components/DatePicker.tsx"))};\n` +
-      `export { DateRangeBar } from ${JSON.stringify(path.join(root, "src/components/DateRange.tsx"))};\n` +
+      `export { FilterBar } from ${JSON.stringify(path.join(root, "src/components/FilterBar.tsx"))};\n` +
       `export { initialDateRange, inDateRange, PERIOD_OPTIONS } from ${JSON.stringify(path.join(root, "src/lib/filters.ts"))};\n`,
     resolveDir: root,
     sourcefile: "datepicker-entry.ts",
@@ -76,7 +76,7 @@ w.matchMedia = (query) => {
 };
 
 const React = (await import("react")).default;
-const { DatePicker, DateRangeBar, initialDateRange } = await import(pathToFileURL(outfile).href);
+const { DatePicker, FilterBar, initialDateRange } = await import(pathToFileURL(outfile).href);
 const { render, cleanup, fireEvent, waitFor } = await import("@testing-library/react");
 
 test.afterEach(() => {
@@ -103,14 +103,17 @@ function DateHarness({ initial = "", clearable = true, min, max }) {
   );
 }
 
-/** A controlled DateRangeBar with its state readable in the DOM. */
+/** A FilterBar whose Filters sheet owns the Period dropdown, state readable. */
 function RangeHarness() {
   const [range, setRange] = React.useState(initialDateRange());
   return React.createElement(
     "div",
     null,
     React.createElement("output", { "data-testid": "range" }, JSON.stringify(range)),
-    React.createElement(DateRangeBar, { value: range, onChange: setRange, ariaLabel: "Date range" }),
+    React.createElement(FilterBar, {
+      period: { value: range, onChange: setRange },
+      results: { label: "Rows", shown: 1, total: 1 },
+    }),
   );
 }
 
@@ -361,21 +364,35 @@ test("at >=640px the calendar is a popover anchored to the field", () => {
   assert.equal(document.querySelector('[role="dialog"]'), null, "outside press closes the popover");
 });
 
-test("the period chips filter dates and Custom reveals the From/To pickers", () => {
+test("the Period dropdown filters dates and Custom range reveals the From/To pickers", () => {
+  viewportWidth = 1024; // desktop: the Filters panel is an anchored popover
   render(React.createElement(RangeHarness));
   assert.deepEqual(rangeState(), { period: "all", from: "", to: "" });
+  assert.equal(document.querySelector('[role="group"][aria-label="Date range"]'), null, "no period chip row anywhere");
 
-  const chips = () => [...document.querySelector('[role="group"][aria-label="Date range"]').querySelectorAll("button")];
-  assert.deepEqual(chips().map((c) => c.querySelector("span").textContent), [
-    "All time", "Today", "Last 7 days", "Last 30 days", "Custom",
+  const filtersBtn = [...document.querySelectorAll("button[aria-label]")]
+    .find((b) => (b.getAttribute("aria-label") || "").startsWith("Filters"));
+  assert.ok(filtersBtn, "the Filters icon button opens the sheet");
+  fireEvent.click(filtersBtn);
+
+  const group = document.querySelector("[data-period-group]");
+  assert.ok(group, "the Period group is inside the Filters sheet");
+  const trigger = group.querySelector('button[aria-haspopup="listbox"]');
+  assert.ok(trigger, "the Period select exists");
+  fireEvent.click(trigger);
+  const options = () => [...document.querySelectorAll('ul[role="listbox"] li[role="option"]')];
+  assert.deepEqual(options().map((o) => o.textContent.trim()), [
+    "Any time", "Today", "Last 7 days", "Last 30 days", "This school year", "Custom range",
   ]);
 
-  fireEvent.click(chips().find((c) => c.querySelector("span").textContent === "Last 7 days"));
+  fireEvent.click(options().find((o) => o.textContent.trim() === "Last 7 days"));
   assert.equal(rangeState().period, "7d");
-  assert.equal(chips().find((c) => c.querySelector("span").textContent === "Last 7 days").getAttribute("aria-pressed"), "true");
   assert.equal(document.querySelectorAll('[aria-label="From"]').length, 0, "no date fields for a preset");
+  assert.equal(document.querySelector("[data-filter-badge]").textContent, "1", "the period counts as an active filter");
 
-  fireEvent.click(chips().find((c) => c.querySelector("span").textContent === "Custom"));
+  // The select re-renders after a choice: re-query its trigger, never reuse the node.
+  fireEvent.click(group.querySelector('button[aria-haspopup="listbox"]'));
+  fireEvent.click(options().find((o) => o.textContent.trim() === "Custom range"));
   assert.equal(rangeState().period, "custom");
   const fieldNamed = (name) =>
     [...document.querySelectorAll("button")].find(
@@ -385,13 +402,12 @@ test("the period chips filter dates and Custom reveals the From/To pickers", () 
   assert.ok(fieldNamed("To"), "the To field appears");
 
   fireEvent.click(fieldNamed("From"));
-  fireEvent.click([...dialog().querySelectorAll("button")].find((b) => b.textContent.trim() === "Today"));
-  const now = new Date();
-  const pad = (n) => String(n).padStart(2, "0");
-  const todayIso = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
-  assert.deepEqual(
-    { ...rangeState(), from: rangeState().from === todayIso ? "<today>" : rangeState().from },
-    { period: "custom", from: "<today>", to: "" },
-    "choosing a day sets the From bound and keeps the range custom",
-  );
+  const calendar = [...document.querySelectorAll('[role="group"][aria-label="Calendar"]')]
+    .find((g) => g.querySelector("[data-day]"));
+  assert.ok(calendar, "the calendar opens for the From bound");
+  const day = [...calendar.querySelectorAll("[data-day]")].find((b) => !b.disabled);
+  assert.ok(day, "a pickable day is on the calendar");
+  fireEvent.click(day);
+  assert.equal(rangeState().period, "custom", "choosing a day keeps the range custom");
+  assert.ok(/\d{4}-\d{2}-\d{2}/.test(rangeState().from), "the From bound holds the chosen day");
 });

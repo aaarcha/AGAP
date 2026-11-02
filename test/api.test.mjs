@@ -195,21 +195,33 @@ test("acknowledge → on site → resolve syncs to every role and resets the par
   assert.deepEqual(log, ["reported", "seen", "en_route", "on_site", "resolved"]);
 
   const fa = (await s.call("POST", "/api/incidents", { token: teacher, body: report({ categoryId: "medical", subId: "heatstroke" }) })).json.incident;
+  // A responder closes a false alarm only after their OWN track reached on site.
+  assert.equal((await s.call("POST", `/api/incidents/${fa.id}/resolve`, { token: responder, body: { outcome: "false_alarm" } })).status, 409, "resolve before own on site is refused");
+  await s.call("POST", `/api/incidents/${fa.id}/ack`, { token: responder, body: { mode: "walking", distanceKm: 1 } });
+  await s.call("POST", `/api/incidents/${fa.id}/onsite`, { token: responder });
   const cancelled = await s.call("POST", `/api/incidents/${fa.id}/resolve`, { token: responder, body: { outcome: "false_alarm" } });
   assert.equal(cancelled.json.incident.outcome, "false_alarm");
   await s.close();
 });
 
-test("principal can report, must pick a section unless whole-school", async () => {
+test("principal reports a classroom without a class; a common area with Individual needs one", async () => {
   const s = await boot();
   const principal = await s.login("principal");
   const parent = await s.login("parent", "Grade 5 - Sec A");
-  const noSection = await s.call("POST", "/api/incidents", { token: principal, body: report({ populationId: "individual" }) });
+
+  // A classroom place resolves its class from the room (never a question).
+  const inRoom = await s.call("POST", "/api/incidents", { token: principal, body: report({ populationId: "individual" }) });
+  assert.equal(inRoom.status, 201);
+
+  // A common area + Individual: the Principal has no class of their own to fall back on.
+  const noSection = await s.call("POST", "/api/incidents", { token: principal, body: report({ populationId: "individual", locationKind: "area", areaId: "canteen" }) });
   assert.equal(noSection.status, 400);
   assert.equal(noSection.json.error, "section_required");
-  const ok = await s.call("POST", "/api/incidents", { token: principal, body: report({ populationId: "individual", section: "Grade 5 - Sec A" }) });
+
+  const ok = await s.call("POST", "/api/incidents", { token: principal, body: report({ populationId: "individual", locationKind: "area", areaId: "canteen", section: "Grade 5 - Sec A" }) });
   assert.equal(ok.status, 201);
-  assert.equal((await s.call("GET", "/api/state", { token: parent })).json.incidents.length, 1);
+  assert.equal(ok.json.incident.linkedSection, "Grade 5 - Sec A");
+  assert.equal((await s.call("GET", "/api/state", { token: parent })).json.incidents.length, 1, "that class's parents see it");
   await s.close();
 });
 
@@ -1529,5 +1541,66 @@ test("status steps only move forward and every step timestamp is locked after it
     [seen.seenAt, ack.enRouteAt, onsite.onSiteAt, done.resolvedAt],
     "no later call moved a single step timestamp",
   );
+  await s.close();
+});
+
+// ---------------------------------------------------------------- incident records
+test("records: Principal and Admin get anonymised, aggregated history; other roles are refused", async () => {
+  const s = await boot();
+  const teacher = await s.login("teacher", "t1");
+  const responder = await s.login("responder");
+  const principal = await s.login("principal");
+  const parent = await s.login("parent", "Grade 3 - Sec A");
+  const admin = await s.loginSuper();
+
+  const a = (await s.call("POST", "/api/incidents", { token: teacher, body: report() })).json.incident;
+  await s.call("POST", `/api/incidents/${a.id}/ack`, { token: responder, body: { mode: "walking", distanceKm: 1 } });
+  await s.call("POST", `/api/incidents/${a.id}/onsite`, { token: responder });
+  await s.call("POST", `/api/incidents/${a.id}/resolve`, { token: responder, body: {} });
+
+  const b = (await s.call("POST", "/api/incidents", {
+    token: teacher,
+    body: report({ categoryId: "medical", subId: "heatstroke", populationId: "individual" }),
+  })).json.incident;
+  await s.call("POST", `/api/incidents/${b.id}/resolve`, { token: principal, body: {} });
+  await s.call("POST", `/api/incidents/${b.id}/archive`, { token: principal, body: { reason: "Duplicate" } });
+
+  // Responders never reach the records screen.
+  for (const [name, tok] of [["teacher", teacher], ["responder", responder], ["parent", parent]]) {
+    assert.equal((await s.call("GET", "/api/records", { token: tok })).status, 403, `${name} is refused`);
+  }
+
+  const res = await s.call("GET", "/api/records?period=sy", { token: principal });
+  assert.equal(res.status, 200, JSON.stringify(res.json));
+  assert.equal(res.json.period.id, "sy");
+  assert.equal(res.json.incidents.length, 2, "the explorer keeps resolved + archived real incidents");
+  assert.equal(res.json.analytics.total, 2, "analytics cover the selected school year");
+  assert.equal(res.json.archives.incidents.length, 1, "archived tickets live in the archive tab");
+  assert.equal(res.json.archives.accounts.length, 0, "the Principal never receives account records");
+
+  for (const row of res.json.incidents) {
+    assert.equal(row.reporterName, undefined, "no reporter name");
+    assert.equal(row.reporterId, undefined, "no reporter id");
+    assert.equal(row.reporterRole, "Teacher", "the reporter is a role label");
+    assert.equal(row.readOnly, true);
+    assert.ok(row.zone.label, "every record has a spatial zone");
+  }
+  assert.ok(res.json.analytics.avgAckMs > 0, "average time-to-acknowledge is computed");
+  assert.ok(res.json.analytics.avgOnSiteMs > 0, "average time-to-on-site is computed");
+  assert.equal(res.json.analytics.times.length, 4, "all four time-of-day buckets are returned");
+  assert.ok(res.json.analytics.zones.length >= 1);
+  assert.ok(res.json.analytics.hazards.length >= 1);
+  assert.deepEqual(Object.keys(res.json.analytics.tiers), ["CRITICAL", "HIGH", "MODERATE"]);
+  assert.ok(!JSON.stringify(res.json).includes("Ms. Reyes"), "the payload carries no personal name");
+
+  const adminRes = await s.call("GET", "/api/records", { token: admin });
+  assert.equal(adminRes.status, 200, "the Admin has read-only access");
+  assert.ok(Array.isArray(adminRes.json.archives.accounts), "the Admin receives archived accounts");
+
+  const empty = await s.call("GET", "/api/records?period=custom&from=2000-01-01&to=2000-01-02", { token: principal });
+  assert.equal(empty.json.analytics.total, 0, "a custom period outside the data has no analytics");
+  assert.equal(empty.json.incidents.length, 2, "the browser itself still lists every record");
+
+  assert.equal((await s.call("POST", "/api/records", { token: principal, body: {} })).status, 404, "there is no write route");
   await s.close();
 });

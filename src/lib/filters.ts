@@ -7,6 +7,7 @@
  * The logic functions are pure so test/filters.test.mjs can pin them down.
  */
 import { useCallback, useState } from "react";
+import { schoolYearStart } from "../../shared/records.js";
 
 export interface FilterState {
   /** Free-text search box contents. */
@@ -192,18 +193,34 @@ export function useFilterState<T>(key: string, initial: T | (() => T)): [T, (nex
 // Period presets for the record lists (incident History for every role, and
 // the Super Admin audit log). Pure so test/date-range.test.mjs can pin them.
 
-export type PeriodId = "all" | "today" | "7d" | "30d" | "custom";
+export type PeriodId = "all" | "today" | "7d" | "30d" | "sy" | "custom";
 
 /** `from`/`to` are local calendar days ("YYYY-MM-DD"); "" means open-ended. */
 export type DateRangeState = { period: PeriodId; from: string; to: string };
 
 export const PERIOD_OPTIONS: { value: PeriodId; label: string }[] = [
-  { value: "all", label: "All time" },
+  { value: "all", label: "Any time" },
   { value: "today", label: "Today" },
   { value: "7d", label: "Last 7 days" },
   { value: "30d", label: "Last 30 days" },
-  { value: "custom", label: "Custom" },
+  { value: "sy", label: "This school year" },
+  { value: "custom", label: "Custom range" },
 ];
+
+/** What the active-filter summary and the Filters badge call this period. */
+export function periodLabel(range: DateRangeState): string {
+  if (range.period !== "custom") {
+    return PERIOD_OPTIONS.find((o) => o.value === range.period)?.label ?? "Any time";
+  }
+  const fmt = (iso: string) => {
+    const d = parseDay(iso);
+    return d ? d.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" }) : "";
+  };
+  const from = fmt(range.from);
+  const to = fmt(range.to);
+  if (from && to) return `${from} – ${to}`;
+  return from ? `From ${from}` : to ? `Until ${to}` : "Custom range";
+}
 
 export function initialDateRange(): DateRangeState {
   return { period: "all", from: "", to: "" };
@@ -277,6 +294,8 @@ export function inDateRange(ts: number, range: DateRangeState, now: number): boo
       return ts >= now - 7 * DAY_MS;
     case "30d":
       return ts >= now - 30 * DAY_MS;
+    case "sy":
+      return ts >= schoolYearStart(now);
     case "custom": {
       const from = range.from ? parseDay(range.from) : null;
       const to = range.to ? parseDay(range.to) : null;

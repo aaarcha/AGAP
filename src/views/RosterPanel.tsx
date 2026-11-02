@@ -13,6 +13,8 @@ import { SECTION_GRADES, gradeCode, gradeLabel, parseSection, composeSection } f
 
 const GRADE_OPTIONS = SECTION_GRADES.map((label) => ({ value: gradeCode(label) ?? "", label }));
 const GRADE_CODES = GRADE_OPTIONS.map((g) => g.value);
+/** The school's section set — the same fixed list the Admin console assigns. */
+const SECTION_OPTIONS = ["A", "B", "C"];
 
 /** Structured grade, falling back to the stored section string. */
 const gradeOf = (t: RosterEntry) => t.grade || parseSection(t.section).grade || "";
@@ -46,6 +48,8 @@ function TeacherForm({ initial, onClose }: { initial: RosterEntry | null; onClos
   const [grade, setGrade] = useState(parsed.grade);
   const [sec, setSec] = useState(parsed.sectionName || rawSection);
   const [room, setRoom] = useState(initial?.room ?? "");
+  // A teacher already on a section outside the set keeps it selectable.
+  const sectionChoices = sec && !SECTION_OPTIONS.includes(sec) ? [sec, ...SECTION_OPTIONS] : SECTION_OPTIONS;
   const [registry, setRegistry] = useState(String(initial?.registry ?? 30));
   const [status, setStatus] = useState<"active" | "inactive">(initial?.status ?? "active");
   const [err, setErr] = useState("");
@@ -58,7 +62,7 @@ function TeacherForm({ initial, onClose }: { initial: RosterEntry | null; onClos
   // A section change moves linked parent accounts (server side) — ask first.
   function submit() {
     if (!grade) { setErr("Pick a grade."); return; }
-    if (!sec.trim()) { setErr("Enter your section (for example, A)."); return; }
+    if (!sec.trim()) { setErr("Pick a section."); return; }
     if (initial && composed !== initial.section) { setConfirmSection(true); return; }
     void save();
   }
@@ -86,10 +90,9 @@ function TeacherForm({ initial, onClose }: { initial: RosterEntry | null; onClos
         ))}
         <Select label="Grade" value={grade} onChange={(v) => { setGrade(v); setErr(""); }}
           options={GRADE_OPTIONS} placeholder="Pick a grade" />
-        <label className="block text-xs font-semibold text-slate-600">Section
-          <input value={sec} maxLength={20} onChange={(e) => { setSec(e.target.value); setErr(""); }} placeholder="Sec A"
-            className="mt-1 min-h-12 w-full rounded-xl border border-slate-300 px-3 text-base font-normal outline-none focus:border-brand-500" />
-        </label>
+        <Select label="Section" value={sec} onChange={(v) => { setSec(v); setErr(""); }}
+          placeholder="Pick a section"
+          options={sectionChoices.map((s) => ({ value: s, label: s }))} />
         <Select label="Status" value={status} onChange={(v) => setStatus(v as "active" | "inactive")}
           options={[
             { value: "active", label: "On duty (can sign in and report)" },

@@ -68,9 +68,9 @@ test.afterEach(() => cleanup());
 const ROLES = {
   teacher: { tab: "report", labels: ["Report", "My Reports", "Account"] },
   parent: { tab: "alerts", labels: ["Alerts", "Account"] },
-  principal: { tab: "command", labels: ["Command", "Report", "Safety", "History", "More"] },
+  principal: { tab: "command", labels: ["Command", "Report", "Analytics", "More"] },
   responder: { tab: "queue", labels: ["Queue", "Escalation", "History", "Account"] },
-  super_admin: { tab: "accounts", labels: ["Users", "Audit", "Year", "System Settings", "Profile"] },
+  super_admin: { tab: "accounts", labels: ["Users", "Analytics", "System Settings", "More"] },
 };
 
 const renderedLabels = () =>

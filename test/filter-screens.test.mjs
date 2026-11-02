@@ -179,6 +179,28 @@ function chipButtons(groupLabel) {
   return [...g.querySelectorAll("button")];
 }
 
+/**
+ * Choose one value in the Period dropdown inside the Filters sheet.
+ * `scope` picks which FilterBar to open when a screen has more than one.
+ */
+function pickPeriod(label, scope) {
+  const root = scope ? document.querySelector(scope) : document;
+  assert.ok(root, `scope "${scope}" is on screen`);
+  const btn = [...root.querySelectorAll("button[aria-label]")]
+    .find((x) => (x.getAttribute("aria-label") || "").startsWith("Filters"));
+  assert.ok(btn, "the Filters icon button is on screen");
+  fireEvent.click(btn);
+  const g = document.querySelector("[data-period-group]");
+  assert.ok(g, "the Period group is inside the Filters sheet");
+  const trigger = g.querySelector('button[aria-haspopup="listbox"]');
+  assert.ok(trigger, "the Period dropdown exists");
+  fireEvent.click(trigger);
+  const opt = [...document.querySelectorAll('ul[role="listbox"] li[role="option"]')]
+    .find((b) => (b.textContent || "").trim().startsWith(label));
+  assert.ok(opt, `period "${label}" is offered`);
+  fireEvent.click(opt);
+}
+
 function chipButton(groupLabel, labelText) {
   const btn = chipButtons(groupLabel).find((b) => b.querySelector("span")?.textContent === labelText);
   assert.ok(btn, `chip "${labelText}" exists in row "${groupLabel}"`);
@@ -275,19 +297,55 @@ test("My Reports: status chips filter the teacher's own open reports", async () 
     incidents: [
       inc("m1", { reporterId: "t1", status: "SENT", subLabel: "Fever in Grade 3" }),
       inc("m2", { reporterId: "t1", status: "SEEN", subLabel: "Broken arm" }),
-      inc("m3", { reporterId: "t2", status: "SENT", subLabel: "Someone else's report" }),
+      // T2 reported it, but it is in this teacher's class: it belongs in the list too.
+      inc("m3", { reporterId: "t2", reporterIds: ["t2"], status: "SENT", subLabel: "Someone else's report" }),
       inc("m4", { reporterId: "t1", status: "RESOLVED", subLabel: "Already closed" }),
+      // Another teacher's ticket from a different class: never shown.
+      inc("m5", { reporterId: "t2", reporterIds: ["t2"], linkedSection: "Grade 5 - Sec B", status: "SENT", subLabel: "Other class report" }),
     ],
   });
   render(React.createElement(App));
 
   clickRail("My Reports");
-  assert.equal(resultsText(), "Reports 2 of 2");
+  assert.equal(resultsText(), "Reports 3 of 3", "own reports plus the class-linked one");
+  assert.ok(document.body.textContent.includes("Reported in your class"), "the relation label explains why it is here");
+  assert.ok(!document.body.textContent.includes("Other class report"), "another section's ticket stays out");
 
   clickChip("Status", "Seen");
-  assert.equal(resultsText(), "Reports 1 of 2");
+  assert.equal(resultsText(), "Reports 1 of 3");
   assert.ok(document.body.textContent.includes("Broken arm"), "only the SEEN report is listed");
   assert.ok(!document.body.textContent.includes("Fever in Grade 3"), "the SENT report is filtered out");
+});
+
+test("the Urgency dropdown is portalled out of the filters panel with every option in order", async () => {
+  __resetCtx({ user: USERS.principal, incidents: [inc("u1", { subLabel: "Smoke in the lab" })] });
+  render(React.createElement(App));
+
+  clickRail("More");
+  clickButton("Incidents & Records");
+  await waitFor(() => assert.ok(document.body.textContent.includes("Real Incidents"), "the records view opened"));
+
+  fireEvent.click(document.querySelector('button[aria-haspopup="dialog"][aria-label="Filters"]'));
+  const panel = await waitFor(() => {
+    const p = document.querySelector('[role="dialog"][aria-label="Record filters"]');
+    assert.ok(p, "the filters panel opened");
+    return p;
+  });
+  const trigger = await waitFor(() => {
+    const t = document.querySelector('[data-group-trigger][aria-label^="Urgency:"]');
+    assert.ok(t, "the Urgency dropdown is in the panel");
+    return t;
+  });
+  fireEvent.click(trigger);
+
+  const list = document.querySelector("[data-group-menu]");
+  assert.ok(list, "the group menu rendered");
+  assert.equal(panel.contains(list), false, "the menu is portalled, so the panel cannot clip it");
+  assert.match(list.className, /overflow-y-auto/);
+  assert.match(list.className, /max-h-/);
+
+  const options = [...list.querySelectorAll('[role="option"]')].map((o) => (o.textContent ?? "").trim().split(" (")[0]);
+  assert.deepEqual(options, ["Any urgency", "CRITICAL", "HIGH", "MODERATE"]);
 });
 
 test("Command queue: the Drill and Escalated toggles in the Filters panel narrow the queue", async () => {
@@ -381,7 +439,7 @@ test("Admin accounts: the role row and the Locked toggle filter the list", async
   assert.equal(resultsText(), "Users 4 of 4");
 });
 
-test("My Reports: the period chips filter the record history", async () => {
+test("My Reports: the Period dropdown filters the record history", async () => {
   __resetCtx({
     user: USERS.teacher,
     incidents: [
@@ -399,31 +457,53 @@ test("My Reports: the period chips filter the record history", async () => {
   assert.equal(hist().querySelectorAll("li").length, 2, "both records are listed");
   assert.match(hist().querySelector("h2").textContent, /\(2\)/, "the header counts both");
 
-  clickChip("History date range", "Today");
+  pickPeriod("Today", 'section[aria-label="Report history"]');
+  closeFilters();
   assert.equal(hist().querySelectorAll("li").length, 1, "only today's record stays");
   assert.ok(hist().textContent.includes("Closed today"));
   assert.ok(!hist().textContent.includes("Closed last week"), "older record is filtered out");
   assert.match(hist().querySelector("h2").textContent, /1 of 2/, "the header shows shown of total");
 
-  clickChip("History date range", "All time");
-  assert.equal(hist().querySelectorAll("li").length, 2, "All time brings both back");
+  pickPeriod("Any time", 'section[aria-label="Report history"]');
+  closeFilters();
+  assert.equal(hist().querySelectorAll("li").length, 2, "Any time brings both back");
 });
 
-test("Admin audit: the period chips filter the records", async () => {
+test("Admin audit: the period control sits in the header toolbar and filters the records", async () => {
   __resetCtx({ user: USERS.super_admin });
   render(React.createElement(App));
 
-  clickRail("Audit");
-  await waitFor(() => assert.equal(resultsText(), "Entries 3 of 3"));
+  clickRail("More");
+  await waitFor(() => assert.ok(document.body.textContent.includes("Audit log")));
+  clickButton("Audit log");
+  await waitFor(() => assert.ok(document.body.textContent.includes("3 events")));
 
-  clickChip("Audit date range", "Last 7 days");
-  assert.equal(resultsText(), "Entries 1 of 3", "only the recent entry is in range");
+  // The control belongs to the page header toolbar, not a row of its own.
+  const control = document.querySelector("[data-period-control]");
+  assert.ok(control, "the period control is on the page");
+  const toolbar = control.closest("[data-audit-toolbar]");
+  assert.ok(toolbar, "it sits in the header toolbar");
+  assert.equal(document.querySelectorAll("[data-period-control]").length, 1, "exactly one period control");
+  const header = toolbar.parentElement;
+  for (const cls of ["flex", "flex-wrap", "items-center", "justify-between"]) {
+    assert.ok(header.className.split(/\s+/).includes(cls), `the header toolbar is ${cls}`);
+  }
+
+  const pick = (label) => {
+    fireEvent.click(control.querySelector('button[aria-haspopup="listbox"]'));
+    const opt = [...document.querySelectorAll('[role="option"]')].find((o) => (o.textContent || "").trim().startsWith(label));
+    assert.ok(opt, `option "${label}" exists`);
+    fireEvent.click(opt);
+  };
+
+  pick("Last 7 days");
+  assert.ok(document.body.textContent.includes("1 event"), "only the recent entry is in range");
   assert.ok(document.body.textContent.includes("login"));
   assert.ok(!document.body.textContent.includes("config.save"), "the 40-day-old entry is filtered out");
 
-  clickChip("Audit date range", "Last 30 days");
-  assert.equal(resultsText(), "Entries 2 of 3");
+  pick("Last 30 days");
+  assert.ok(document.body.textContent.includes("2 events"));
 
-  clickChip("Audit date range", "All time");
-  assert.equal(resultsText(), "Entries 3 of 3");
+  pick("Any time");
+  assert.ok(document.body.textContent.includes("3 events"));
 });

@@ -1,7 +1,7 @@
 /**
  * Super Admin layout: the landing is a dashboard + user roster (the retention
- * policy table moved to About ASPIRE), the Records & Archives card carries the
- * counters, and archived records have their own dedicated page.
+ * policy table moved to About ASPIRE), More is a plain menu of row links, and
+ * the consolidated Incidents & Records view owns the archives.
  *
  * Same harness as back-bar.test.mjs / filter-screens.test.mjs: the full App is
  * compiled with esbuild with src/lib/store.tsx swapped for the fake context in
@@ -82,6 +82,9 @@ w.matchMedia = (query) => {
 /* --------------------------------------------------------------- fixtures */
 const NOW = Date.now();
 const HOUR = 3_600_000;
+const REC_DATE = new Date(NOW - 10 * HOUR);
+const REC_MONTH = new Intl.DateTimeFormat("en-PH", { month: "long", year: "numeric" }).format(REC_DATE);
+const REC_SY = `SY ${REC_DATE.getMonth() >= 5 ? REC_DATE.getFullYear() : REC_DATE.getFullYear() - 1}-${(REC_DATE.getMonth() >= 5 ? REC_DATE.getFullYear() : REC_DATE.getFullYear() - 1) + 1}`;
 
 const ACCOUNTS = [
   { id: "a1", email: "reyes@school.test", role: "teacher", name: "Ms. Reyes", section: "Grade 3 - Sec A", grade: "3",
@@ -123,6 +126,33 @@ const ARCHIVE = {
   total: 1, limit: 50, page: 1, pages: 1,
 };
 
+const RECORD = (over = {}) => ({
+  id: "INC-rec", category: "fire", categoryLabel: "Fire", subLabel: "Electrical fire",
+  room: "Bldg A | Flr 2 | Rm 204",
+  zone: { id: "bldg-a-f2-rm-204", label: "Building A · Flr 2 · Rm 204", building: "Building A", floor: "Floor 2", area: "Rm 204" },
+  tier: "HIGH", createdAt: NOW - 10 * HOUR, resolvedAt: NOW - 9 * HOUR, status: "RESOLVED",
+  outcome: "resolved", drill: false, populationLabel: "Classroom / Section", confirmedBy: 1,
+  reporterRole: "Teacher", escalationLevel: 0, escalated: false, ackMs: null, onSiteMs: null,
+  timeOfDay: "class", hazardMode: false, headcounts: [], timeline: [],
+  archivedAt: null, archivedAuto: false, archiveReason: null, anonymized: false, readOnly: true,
+  ...over,
+});
+
+const RECORDS = {
+  period: { id: "sy", label: "SY 2026-2027", from: NOW - 100 * 24 * HOUR, to: NOW },
+  incidents: [RECORD()],
+  analytics: {
+    total: 1, tiers: { CRITICAL: 0, HIGH: 1, MODERATE: 0 },
+    avgAckMs: null, avgOnSiteMs: null, escalatedPct: 0, escalated: 0,
+    zones: [], times: [], hazards: [], hazardModes: [],
+  },
+  drills: { ongoing: null, scheduled: [], past: [] },
+  archives: {
+    incidents: [RECORD({ id: "INC-old", archivedAt: NOW - 8 * HOUR, archivedAuto: true })],
+    accounts: [{ ...ACCOUNTS[1], purgeEligible: true }],
+  },
+};
+
 const AUDIT = [
   { at: NOW - HOUR, action: "account_locked", by: "acc1", target: "acc2", detail: "", ip: "127.0.0.1" },
   { at: NOW - 40 * HOUR, action: "login_success", by: "acc1", target: "acc1", detail: "", ip: "127.0.0.1" },
@@ -155,6 +185,7 @@ globalThis.fetch = async (url, init = {}) => {
   if (u.includes("/api/admin/accounts") && method === "PUT") return jsonResponse({ ok: true, account: ACCOUNTS[3], changed: ["org"] });
   if (u.includes("/api/admin/accounts")) return jsonResponse({ accounts: ACCOUNTS });
   if (u.includes("/api/admin/retention")) return jsonResponse(RETENTION);
+  if (u.includes("/api/records")) return jsonResponse(RECORDS);
   if (u.includes("/api/incidents/archive")) return jsonResponse(ARCHIVE);
   if (u.includes("/api/admin/audit")) return jsonResponse({ entries: AUDIT, total: AUDIT.length });
   return jsonResponse({});
@@ -193,6 +224,14 @@ function clickButton(label) {
   return btn;
 }
 
+/** Click a folder card in the records browser (not a filter chip of the same name). */
+function clickFolder(label) {
+  const btn = [...document.querySelectorAll("[data-folder-label]")]
+    .find((b) => b.getAttribute("data-folder-label") === label);
+  assert.ok(btn, `folder "${label}" exists`);
+  fireEvent.click(btn);
+}
+
 /** The archive page's back bar names its destination ("Users", "History"). */
 function clickBack(label) {
   const btn = document.querySelector('[data-testid="back-bar"] button');
@@ -226,76 +265,81 @@ test("the Super Admin landing is a dashboard + user roster, never the retention 
   // renamed rail
   assert.ok(text().includes("System Settings"), "Configuration is now System Settings");
 
-  // order: metric cards → user roster → Records & Archives card.
+  // order: search + filters → metric cards → user roster.
   const plain = text();
   assert.ok(plain.indexOf("Total users") < plain.indexOf("Ms. Reyes"), "the metric cards come before the roster");
-  assert.ok(plain.indexOf("Ms. Reyes") < plain.indexOf("Records & Archives"), "the Records & Archives card comes AFTER the roster");
-  assert.ok(plain.indexOf("Ms. Reyes") < plain.indexOf("Open archive"), "Open archive sits in that card, below the roster");
+  assert.equal(plain.includes("Records & Archives"), false, "no archive widget anywhere on Users or More");
+  assert.equal(plain.includes("Open archive"), false, "the redundant Open archive button is gone");
 
   // the raw retention policy table is NOT the default view
   assert.equal(text().includes("Placeholder periods"), false, "no retention policy table on the landing");
   assert.equal(text().includes("Close → archive"), false, "no period table on the landing");
   assert.equal(text().includes("Ticket retention (after archive)"), false);
 
-  // …but the counters are, in their own card
-  assert.ok(text().includes("Records & Archives"), "the Records & Archives card is present");
-  await waitFor(() => assert.ok(text().includes("12"), "the archived-tickets counter rendered"));
-  assert.ok(text().includes("Tickets eligible for purge"));
-  assert.ok(text().includes("Accounts eligible for purge"));
-  assert.ok(text().includes("Expired drill records"));
-  await new Promise((r) => setTimeout(r, 0));
-  assert.ok(fetched.some((u) => u.includes("/api/admin/retention")), "counters come from the retention endpoint");
+  // …and the leftover Records & Archives widget is gone from More: the
+  // Incidents & Records row is the single entry point.
+  clickRail("More");
+  await waitFor(() => assert.ok(text().includes("School year"), "the More menu rendered"));
+  assert.equal(text().includes("Records & Archives"), false, "the leftover archive widget was removed from More");
+  assert.equal(text().includes("Tickets eligible for purge"), false, "no stray archive counters on More");
+  assert.ok(text().includes("Incidents & Records"), "the row link to the consolidated view stays");
   assert.equal(fetched.some((u) => u.includes("/api/incidents/archive")), false, "the archive page is not fetched until opened");
 });
 
-test("Records & Archives → Open archive opens the dedicated, read-only archive page", async () => {
+test("More → Incidents & Records opens the consolidated, read-only records view", async () => {
   __resetCtx({ user: USERS.super_admin });
   render(React.createElement(App));
 
-  await waitFor(() => assert.ok(text().includes("Records & Archives")));
-  clickButton("Open archive");
+  await waitFor(() => assert.ok(text().includes("Total users")));
+  clickRail("More");
+  await waitFor(() => assert.ok(text().includes("Incidents & Records")));
+  clickButton("Incidents & Records");
 
-  await waitFor(() => assert.ok(text().includes("Archived records"), "the dedicated page opens"));
+  await waitFor(() => assert.ok(text().includes("Real Incidents"), "the consolidated records view opened"));
+  assert.ok(fetched.some((u) => u.includes("/api/records")), "the records endpoint loads the view");
+
+  clickButton("System Archives");
+  await waitFor(() => assert.ok(text().includes("Archived tickets"), "the archive tab is shown"));
   assert.ok(text().includes("Electrical fire"), "the archived record is listed");
   assert.ok(text().includes("reported by Teacher"), "the reporter is a role label, not a name");
-  assert.ok(text().includes("retention sweep"), "the automatic archive is marked");
-  assert.ok(text().includes("Read-only"), "records on this page are read-only");
-  assert.ok(text().includes("can be deleted") || text().includes("cannot be deleted"), "the page says nothing can be deleted here");
-  assert.ok(fetched.some((u) => u.includes("/api/incidents/archive")), "the page loads from the archive endpoint");
+  assert.ok(text().includes("Read-only"), "archived records are read-only");
 
-  // back returns to the Users landing; the bar names that destination
-  clickBack("Users");
-  await waitFor(() => assert.ok(text().includes("Users (4)"), "back on the Users landing"));
+  // back returns to More; the bar names that destination
+  clickBack("More");
+  await waitFor(() => assert.ok(text().includes("School year"), "back on the More menu"));
 });
 
-test("leaving Users while the archive is open closes it instead of leaving it on another tab", async () => {
+test("leaving More while the records view is open closes it instead of leaving it on another tab", async () => {
   __resetCtx({ user: USERS.super_admin });
   render(React.createElement(App));
-  await waitFor(() => assert.ok(text().includes("Records & Archives")));
+  await waitFor(() => assert.ok(text().includes("Total users")));
 
-  clickButton("Open archive");
-  await waitFor(() => assert.ok(text().includes("Archived records"), "the archive opened"));
+  clickRail("More");
+  clickButton("Incidents & Records");
+  await waitFor(() => assert.ok(text().includes("Real Incidents"), "the records view opened"));
 
-  clickRail("Profile");
-  await waitFor(() => assert.ok(text().includes("Change password") && text().includes("About ASPIRE"), "the Profile page rendered"));
-  assert.equal(text().includes("Archived records"), false, "the archive does not stay on the Profile tab");
+  clickRail("Analytics");
+  await waitFor(() => assert.ok(text().includes("Aggregated and anonymised"), "the Analytics page rendered"));
+  assert.equal(text().includes("Real Incidents"), false, "the records view does not stay on the Analytics tab");
 
-  // Returning to Users shows the landing, not the old archive sub-screen.
-  clickRail("Users");
-  await waitFor(() => assert.ok(text().includes("Users (4)"), "back on the Users landing"));
-  assert.equal(text().includes("Archived records"), false, "the archive was closed by leaving Users");
+  // Returning to More shows the menu, not the old sub-screen.
+  clickRail("More");
+  await waitFor(() => assert.ok(text().includes("School year"), "back on the More menu"));
+  assert.equal(text().includes("Real Incidents"), false, "the records view was closed by leaving More");
 });
 
 test("About ASPIRE holds the expandable retention & purge rules, off the landing", async () => {
   __resetCtx({ user: USERS.super_admin });
   render(React.createElement(App));
 
-  await waitFor(() => assert.ok(text().includes("Records & Archives")));
+  await waitFor(() => assert.ok(text().includes("Total users")));
   const rulesOnLanding = [...document.querySelectorAll("summary")]
     .some((s) => (s.textContent || "").includes("Retention and purge rules"));
   assert.equal(rulesOnLanding, false, "the rules section is not on the landing");
 
-  clickRail("Profile");
+  clickRail("More");
+  await waitFor(() => assert.ok(text().includes("School year")));
+  clickButton("Account");
   await waitFor(() => assert.ok(text().includes("About ASPIRE")));
   clickButton("About ASPIRE");
 
@@ -307,20 +351,90 @@ test("About ASPIRE holds the expandable retention & purge rules, off the landing
   assert.ok(text().includes("typed confirmation"), "the purge rule is spelled out");
 });
 
-test("Principal: History → View archive opens the same dedicated archive page", async () => {
+test("Principal: Analytics is its own tab, with the post-incident breakdowns", async () => {
   __resetCtx({ user: USERS.principal, incidents: [] });
   render(React.createElement(App));
 
-  clickRail("History");
-  await waitFor(() => assert.ok(text().includes("View archive"), "the principal's entry point is on History"));
+  clickRail("Analytics");
+  await waitFor(() => assert.ok(text().includes("Aggregated and anonymised"), "the Analytics page opened"));
+  await waitFor(() => assert.ok(text().includes("Total incidents"), "the metrics rendered"));
+  assert.ok(text().includes("Spatial zone"), "spatial-zone chart present");
+  assert.ok(text().includes("Time of day"), "time-of-day chart present");
+  assert.ok(text().includes("Hazard type"), "hazard-type chart present");
+  assert.ok(fetched.some((u) => u.includes("/api/records")), "analytics loads from the records endpoint");
+});
 
-  clickButton("View archive");
-  await waitFor(() => assert.ok(text().includes("Archived records"), "the dedicated page opens"));
+test("Principal: More → Incidents & Records opens the read-only three-tab view", async () => {
+  __resetCtx({ user: USERS.principal, incidents: [] });
+  render(React.createElement(App));
+
+  clickRail("More");
+  await waitFor(() => assert.ok(text().includes("Incidents & Records"), "the More entry exists"));
+  clickButton("Incidents & Records");
+
+  await waitFor(() => assert.ok(text().includes("Real Incidents"), "the records view opened on Real Incidents"));
+  assert.ok(text().includes("Drill Records"));
+  assert.ok(text().includes("System Archives"));
+  assert.ok(fetched.some((u) => u.includes("/api/records")), "the read-only records endpoint loads the view");
+
+  clickButton("System Archives");
+  await waitFor(() => assert.ok(text().includes("Archived tickets"), "the archive tab is shown"));
   assert.ok(text().includes("Electrical fire"));
-  assert.ok(fetched.some((u) => u.includes("/api/incidents/archive")));
+  assert.ok(text().includes("reported by Teacher"), "the reporter is a role label, not a name");
+  assert.ok(text().includes("Read-only"), "archived records are read-only");
 
-  clickBack("History");
-  await waitFor(() => assert.ok(text().includes("Incident history"), "back on the History tab"));
+  clickBack("More");
+  await waitFor(() => assert.ok(text().includes("Teacher roster"), "back on the More menu"));
+});
+
+test("Principal: the records explorer drills Records → School Year → Month → Category → Zone", async () => {
+  __resetCtx({ user: USERS.principal, incidents: [] });
+  render(React.createElement(App));
+
+  clickRail("More");
+  await waitFor(() => assert.ok(text().includes("Incidents & Records")));
+  clickButton("Incidents & Records");
+  await waitFor(() => assert.ok(text().includes("Real Incidents"), "the records view opened on Real Incidents"));
+  assert.equal(text().includes("Spatial zone"), false, "the heavy charts are not on the records page");
+
+  clickFolder(REC_SY);
+  await waitFor(() => assert.ok(text().includes(REC_MONTH), "the school year opens its months"));
+  clickFolder(REC_MONTH);
+  await waitFor(() => assert.ok(text().includes("Fire"), "the month opens its categories"));
+  clickFolder("Fire");
+  await waitFor(() => assert.ok(text().includes("Building A · Flr 2 · Rm 204"), "the category opens its zones"));
+  clickFolder("Building A · Flr 2 · Rm 204");
+  await waitFor(() => assert.ok(text().includes("Electrical fire"), "the zone lists its records"));
+
+  // The first record is selected into the detail pane (master-detail).
+  await waitFor(() => assert.ok(document.querySelector("[data-record-detail]"), "the read-only detail opens"));
+  assert.ok(text().includes("Reported by"), "the detail labels the reporter by role");
+  assert.ok(text().includes("Teacher"));
+  assert.equal(text().includes("Ms. Reyes"), false, "no personal name in the record detail");
+});
+
+test("Admin: More → Incidents & Records is read-only, accounts included", async () => {
+  __resetCtx({ user: USERS.super_admin });
+  render(React.createElement(App));
+
+  await waitFor(() => assert.ok(text().includes("Total users")));
+  clickRail("More");
+  await waitFor(() => assert.ok(text().includes("Incidents & Records")));
+  clickButton("Incidents & Records");
+
+  await waitFor(() => assert.ok(text().includes("Real Incidents"), "the read-only records view opened"));
+  assert.ok(fetched.some((u) => u.includes("/api/records")));
+
+  // Two dedicated archives: tickets first, accounts on their own sub-tab.
+  clickButton("System Archives");
+  await waitFor(() => assert.ok(text().includes("Archived tickets"), "the ticket archive is shown first"));
+  clickButton("Archived accounts");
+  await waitFor(() => assert.ok(text().includes("Mr. Dizon"), "the Admin sees the account archive"));
+  assert.ok(text().includes("Purge eligible"));
+  assert.ok(text().includes("Manage in Users"), "account mediation points at Users");
+
+  clickBack("More");
+  await waitFor(() => assert.ok(text().includes("School year"), "back on the More menu"));
 });
 
 test("the Super Admin can assign a responder's organization on the Users page", async () => {

@@ -155,6 +155,12 @@ function clickButton(text) {
   fireEvent.click(btn);
 }
 
+function clickBackBar() {
+  const btn = document.querySelector('[data-testid="back-bar"] button');
+  assert.ok(btn, "a back bar button exists");
+  fireEvent.click(btn);
+}
+
 const pageRoot = () => document.querySelector("[data-page]");
 
 /** The one clamp height every bounded master-detail section shares. */
@@ -213,20 +219,28 @@ test("parent: Alerts and Account are FLOW pages", async () => {
   assertFlow("parent Account");
 });
 
-test("principal: Command is a FLOW page with bounded command panes; Report, Safety, History, More, roster, Account, About are FLOW", async () => {
+test("principal: Command is a FLOW page with bounded command panes; Report, Analytics, Safety, headcount, records, More, roster, Account, About are FLOW", async () => {
   __resetCtx({ user: USERS.principal });
   render(React.createElement(App));
   assertBoundedSection("principal Command");
 
   clickRail("Report");
   assertFlow("principal Report");
-  clickRail("Safety");
-  assertFlow("principal Safety");
-  clickRail("History");
-  assertFlow("principal History");
+  clickRail("Analytics");
+  assertFlow("principal Analytics");
 
   clickRail("More");
   assertFlow("principal More menu");
+  clickButton("Safety");
+  assertFlow("principal Safety");
+  clickButton("← More");
+  clickButton("Headcount status");
+  assertFlow("principal headcount feed");
+  clickButton("← More");
+  clickButton("Incidents & Records");
+  await waitFor(() => assertFlow("principal Incidents & Records"));
+  clickButton("← More");
+  assertFlow("principal More menu (after records)");
   clickButton("Teacher roster");
   assertFlow("principal roster");
   clickButton("← More");
@@ -248,23 +262,33 @@ test("responder: Queue is a FLOW page with a bounded queue section; Escalation, 
   assertFlow("responder Account");
 });
 
-test("super admin: Users is a FLOW page with a bounded roster section; Audit, Year, System Settings and Profile are FLOW", async () => {
+test("super admin: Users is a FLOW page with a bounded roster section; Analytics, System Settings and More are FLOW, and Year/Audit/Records/Account open from More", async () => {
   __resetCtx({ user: USERS.super_admin });
   render(React.createElement(App));
   await waitFor(() => assert.ok(pageRoot(), "the Users page rendered"));
   assertBoundedSection("super admin Users");
 
-  clickRail("Audit");
-  await waitFor(() => assertFlow("super admin Audit"));
-  clickRail("Year");
-  await waitFor(() => assertFlow("super admin Year"));
+  clickRail("Analytics");
+  await waitFor(() => assertFlow("super admin Analytics"));
   clickRail("System Settings");
   await waitFor(() => assertFlow("super admin System Settings"));
-  clickRail("Profile");
-  assertFlow("super admin Profile");
+  clickRail("More");
+  await waitFor(() => assertFlow("super admin More menu"));
+
+  clickButton("School year");
+  await waitFor(() => assertFlow("super admin Year"));
+  clickBackBar();
+  clickButton("Audit log");
+  await waitFor(() => assertFlow("super admin Audit"));
+  clickBackBar();
+  clickButton("Incidents & Records");
+  await waitFor(() => assertFlow("super admin Incidents & Records"));
+  clickBackBar();
+  clickButton("Account");
+  assertFlow("super admin Account");
 });
 
-test("super admin Users: metric cards, then the roster, then the Records & Archives card", async () => {
+test("super admin Users: compact metric cards, then the roster", async () => {
   __resetCtx({ user: USERS.super_admin });
   render(React.createElement(App));
   await waitFor(() => assert.ok(pageRoot(), "the Users page rendered"));
@@ -293,18 +317,31 @@ test("super admin Users: metric cards, then the roster, then the Records & Archi
   assert.ok(has(roster, "min-h-0"), "the roster section is min-h-0");
   assert.ok((roster.textContent ?? "").includes("Ms. Reyes"), "the roster renders the first user");
 
-  // 3. The Records & Archives card comes AFTER the roster, with all six counters.
-  const archives = rootEl.querySelector('section[aria-label="Records and archives"]');
-  assert.ok(archives, "the Records & Archives card exists");
-  assert.ok(users.compareDocumentPosition(archives) & Node.DOCUMENT_POSITION_FOLLOWING, "the archive card follows the Users section");
-  assert.ok((archives.textContent ?? "").includes("Open archive"), "Open archive lives in the card header");
-  for (const label of [
-    "Archived tickets", "Tickets eligible for purge", "Tickets already anonymised",
-    "Archived accounts", "Accounts eligible for purge", "Expired drill records",
-  ]) {
-    assert.ok((archives.textContent ?? "").includes(label), `the "${label}" counter is inside the card`);
-  }
-  // …and NOT up in the metric grid.
-  assert.equal((grid.textContent ?? "").includes("Archived tickets"), false, "no archive counters in the top area");
-  assert.ok(rootEl.querySelectorAll("[data-metric-card]").length === 3, "still exactly three metric cards");
+  // 3. Three equal columns at every width — never 2 + 1 with an empty gap.
+  assert.match(grid.className, /grid-cols-3/, "the three cards share one row on phones too");
+  assert.equal(/grid-cols-2/.test(grid.className), false, "no two-column layout to break unevenly");
+
+  // 4. The cards sit UNDER search + filters, not above them.
+  const search = rootEl.querySelector('input[aria-label="Search accounts"]');
+  assert.ok(search, "the roster search box exists");
+  assert.ok(has(grid, "grid"), "the metrics keep their grid");
+  assert.ok(search.compareDocumentPosition(grid) & Node.DOCUMENT_POSITION_FOLLOWING,
+    "the metric cards come after the search + filter row");
+  assert.ok(grid.textContent.includes("Ms. Reyes") === false, "the roster itself stays under the cards");
+  const firstRosterRow = rootEl.querySelector("[data-md-item]");
+  assert.ok(firstRosterRow, "the roster rows render");
+  assert.ok(grid.compareDocumentPosition(firstRosterRow) & Node.DOCUMENT_POSITION_FOLLOWING,
+    "the roster follows the metric cards");
+  assert.equal(rootEl.querySelectorAll("[data-metric-card]").length, 3, "still exactly three metric cards");
+
+  // 5. The leftover Records & Archives widget is gone from More: one clean row
+  //    (Incidents & Records) is the only way in.
+  assert.equal(rootEl.querySelector('section[aria-label="Records and archives"]'), null,
+    "the archive card is off the Users landing");
+  clickRail("More");
+  await waitFor(() => assert.ok(pageRoot(), "the More page rendered"));
+  assert.equal(pageRoot().querySelector('section[aria-label="Records and archives"]'), null,
+    "the Records & Archives widget was removed from More");
+  assert.equal(document.body.textContent.includes("Records & Archives"), false, "no leftover archive card caption");
+  assert.ok(document.body.textContent.includes("Incidents & Records"), "the row link to the consolidated view stays");
 });

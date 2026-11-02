@@ -24,7 +24,25 @@ import PrincipalView from "./views/PrincipalView";
 import AdminConsole from "./views/AdminConsole";
 import AccountView from "./views/AccountView";
 
+/** Why this ticket is in a teacher's My Reports list — never another teacher's name. */
+function relationLabel(inc: Incident, user: { id: string; section?: string }): string | null {
+  const ids = inc.reporterIds ?? (inc.reporterId ? [inc.reporterId] : []);
+  if (ids.includes(user.id)) return ids.length > 1 || inc.confirmedBy > 1 ? "You also reported" : "You reported";
+  if (inc.linkedSection === user.section || inc.linkedSection === "ALL") return "Reported in your class";
+  return null;
+}
+
+/** A teacher's My Reports rule: reporter, their class, or the whole school. */
+function teacherSees(inc: Incident, user: { id: string; section?: string }): boolean {
+  const ids = inc.reporterIds ?? (inc.reporterId ? [inc.reporterId] : []);
+  // A drill only ever appears for the teachers who took part in it.
+  if (inc.drill) return ids.includes(user.id);
+  return ids.includes(user.id) || inc.linkedSection === user.section || inc.linkedSection === "ALL";
+}
+
 function ReportRow({ inc, active }: { inc: Incident; active: boolean }) {
+  const { user } = useApp();
+  const relation = user ? relationLabel(inc, user) : null;
   return (
     <div className={`rounded-xl border p-3 ${active ? "border-brand-600 bg-white shadow-sm" : "border-slate-200 bg-white hover:border-brand-300"}`}>
       <div className="flex items-center gap-2">
@@ -34,7 +52,10 @@ function ReportRow({ inc, active }: { inc: Incident; active: boolean }) {
         )}
       </div>
       <p className="mt-0.5 truncate text-xs text-slate-500">📍 {inc.room}</p>
-      <p className="mt-0.5 text-[11px] font-bold uppercase tracking-wide text-slate-500">{STATUS_LABEL[inc.status]}</p>
+      <p className="mt-0.5 text-[11px] font-bold uppercase tracking-wide text-slate-500">
+        {relation && <span className="mr-1 rounded-full bg-brand-50 px-1.5 py-0.5 text-brand-700">{relation}</span>}
+        {STATUS_LABEL[inc.status]}
+      </p>
     </div>
   );
 }
@@ -43,7 +64,7 @@ const REPORT_STATUSES = ["SENT", "SEEN", "EN_ROUTE", "ON_SITE"] as const;
 
 function TeacherReports() {
   const { incidents, user } = useApp();
-  const mine = incidents.filter((i) => i.reporterId === user!.id && i.status !== "RESOLVED");
+  const mine = incidents.filter((i) => i.status !== "RESOLVED" && teacherSees(i, user!));
   // Status chips + counts persist per screen for the session.
   const [state, setState] = useFilterState("teacher-reports", () => initialFilterState());
   // The chip count comes from the archive endpoint; activating it swaps in the

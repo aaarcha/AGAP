@@ -34,8 +34,19 @@ test("the default range is all time and the preset labels are stable", () => {
   assert.deepEqual(F.initialDateRange(), { period: "all", from: "", to: "" });
   assert.deepEqual(
     F.PERIOD_OPTIONS.map((p) => p.value),
-    ["all", "today", "7d", "30d", "custom"],
+    ["all", "today", "7d", "30d", "sy", "custom"],
   );
+  assert.equal(F.PERIOD_OPTIONS.find((p) => p.value === "all").label, "Any time");
+  assert.equal(F.PERIOD_OPTIONS.find((p) => p.value === "custom").label, "Custom range");
+  assert.equal(F.periodLabel({ period: "7d", from: "", to: "" }), "Last 7 days");
+  assert.equal(F.periodLabel({ period: "custom", from: "2026-10-01", to: "2026-10-07" }), "Oct 1, 2026 – Oct 7, 2026");
+});
+
+test("the school-year preset starts on June 1 of the running school year", () => {
+  const sy = F.setPeriod(F.initialDateRange(), "sy");
+  const june1 = new Date(2026, 5, 1, 0, 0, 0).getTime();
+  assert.equal(F.inDateRange(june1, sy, NOW), true, "June 1 counts");
+  assert.equal(F.inDateRange(june1 - 1, sy, NOW), false, "the previous school year does not");
 });
 
 test("parseDay/toIsoDay round-trip local days and reject impossible dates", () => {

@@ -20,7 +20,14 @@ const outfile = path.join(outDir, "select.mjs");
 
 fs.mkdirSync(outDir, { recursive: true });
 await build({
-  entryPoints: [path.join(root, "src/components/Select.tsx")],
+  stdin: {
+    contents:
+      `export { Select } from ${JSON.stringify(path.join(root, "src/components/Select.tsx"))};\n` +
+      `export { Modal } from ${JSON.stringify(path.join(root, "src/components/Modal.tsx"))};\n`,
+    resolveDir: root,
+    sourcefile: "select-entry.ts",
+    loader: "tsx",
+  },
   outfile,
   bundle: true,
   format: "esm",
@@ -65,7 +72,7 @@ globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
 const React = (await import("react")).default;
 const { useState } = await import("react");
-const { Select } = await import(pathToFileURL(outfile).href);
+const { Select, Modal } = await import(pathToFileURL(outfile).href);
 const { render, cleanup, fireEvent, act } = await import("@testing-library/react");
 
 test.afterEach(() => cleanup());
@@ -184,6 +191,56 @@ test("clicking an option selects it and outside presses close the menu", () => {
   assert.ok(listbox());
   fireEvent.pointerDown(document.body);
   assert.equal(listbox(), null);
+});
+
+const URGENCY = [
+  { value: "any", label: "Any urgency" },
+  { value: "CRITICAL", label: "CRITICAL" },
+  { value: "HIGH", label: "HIGH" },
+  { value: "MODERATE", label: "MODERATE" },
+];
+
+test("below 640px the picker is a portalled dialog that lists every option in order", () => {
+  desktop = false;
+  try {
+    render(React.createElement(Select, { label: "Urgency", value: "any", options: URGENCY, onChange: () => {} }));
+    fireEvent.click(trigger());
+
+    const sheet = document.querySelector('[role="dialog"]');
+    assert.ok(sheet, "a dialog sheet is opened");
+    assert.equal(sheet.getAttribute("aria-modal"), "true");
+    assert.ok(sheet.parentElement?.parentElement === document.body, "it is portalled straight to document.body");
+
+    const list = sheet.querySelector('[role="listbox"]');
+    assert.ok(list, "the option list is inside the sheet");
+    assert.match(list.className, /overflow-y-auto/, "the list scrolls inside the sheet");
+    assert.match(list.className, /max-h-/, "it is capped by a max-height so nothing is cut off");
+
+    // Every option, in order, including the first one — the exact clipping bug.
+    const labels = [...list.querySelectorAll('[role="option"]')].map((o) => (o.textContent || "").trim());
+    assert.deepEqual(labels, ["Any urgency", "CRITICAL", "HIGH", "MODERATE"]);
+  } finally {
+    desktop = true;
+  }
+});
+
+test("a Select opened inside a Modal still renders its menu on document.body", () => {
+  render(
+    React.createElement(
+      Modal,
+      { title: "Record filters", onClose: () => {} },
+      React.createElement(Select, { label: "Urgency", value: "any", options: URGENCY, onChange: () => {} }),
+    ),
+  );
+  fireEvent.click(trigger());
+  const list = listbox();
+  assert.ok(list, "the menu opened");
+  const menu = list.closest(".select-pop");
+  assert.ok(menu, "the menu lives in the dropdown layer");
+  assert.ok(menu.parentElement === document.body, "portalled out of the modal, not clipped by it");
+  const modal = document.querySelector('[role="dialog"]');
+  assert.ok(modal, "the modal is open");
+  assert.ok(modal.contains(list) === false, "the menu is not a child of the modal");
 });
 
 test("below 640px the menu is a bottom sheet with a title and a close button", () => {

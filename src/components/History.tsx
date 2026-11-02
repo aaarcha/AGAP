@@ -4,12 +4,21 @@ import { OUTCOME_LABEL, TRANSPORT_MODES, agencyFor } from "../../shared/domain.j
 import { useApp } from "../lib/store";
 import { catTheme } from "../lib/theme";
 import { dateTime, duration, elapsed, escalationLabel, fmtMs, plainOverride } from "../lib/format";
-import type { Incident } from "../lib/types";
+import type { Incident, User } from "../lib/types";
 import { ConfirmModal, Modal } from "./Modal";
-import DateRangeBar from "./DateRange";
+import { FilterBar } from "./FilterBar";
 import {
   inDateRange, initialDateRange, useFilterState, type DateRangeState,
 } from "../lib/filters";
+
+/** Why a teacher's My Reports list contains this ticket — never another teacher's name. */
+function relationFor(inc: Incident, user: User | null | undefined): string | null {
+  if (!user || user.role !== "teacher") return null;
+  const ids = inc.reporterIds ?? (inc.reporterId ? [inc.reporterId] : []);
+  if (ids.includes(user.id)) return ids.length > 1 || inc.confirmedBy > 1 ? "You also reported" : "You reported";
+  if (inc.linkedSection === user.section || inc.linkedSection === "ALL") return "Reported in your class";
+  return null;
+}
 
 const ACTION_LABEL: Record<string, string> = {
   reported: "Reported", headcount: "Headcount", override: "Override", hazard: "Hazard mode", route: "Route", drill_end: "Drill ended",
@@ -66,7 +75,7 @@ function useHistoryActions() {
     // Responders have no hide and no delete — only Teachers (own reports) and Parents may hide.
     canHide: role === "teacher" || role === "parent",
     canHideThis: (inc: Incident) =>
-      (role === "teacher" && inc.reporterId === user?.id) || role === "parent",
+      (role === "teacher" && (inc.reporterIds ?? [inc.reporterId ?? ""]).includes(user?.id ?? "")) || role === "parent",
     archiveIncident,
     archiveResolved,
     hideIncident,
@@ -100,7 +109,6 @@ export function IncidentDetails({ inc, onClose, hiddenView = false }: { inc: Inc
     ["Report → on site", inc.metrics?.toOnSiteMs ? fmtMs(inc.metrics.toOnSiteMs) : undefined],
     ["Time to acknowledge", inc.metrics?.toAckMs ? fmtMs(inc.metrics.toAckMs) : undefined],
     ["Taps to report", inc.drill && inc.metrics ? String(inc.metrics.interactions) : undefined],
-    ["Archived", inc.archivedAt ? dateTime(inc.archivedAt) : undefined],
   ];
 
   return (
@@ -173,13 +181,13 @@ export function IncidentDetails({ inc, onClose, hiddenView = false }: { inc: Inc
 }
 
 export default function HistorySection({ title = "Incident history", onOpenArchive }: { title?: string; onOpenArchive?: () => void }) {
-  const { incidents, now } = useApp();
+  const { incidents, now, user } = useApp();
   const { hidden, isPrincipal, canViewArchive, canHide, canHideThis, archiveIncident, archiveResolved, hideIncident } = useHistoryActions();
   const [open, setOpen] = useState<string | null>(null);
   const [archiveOne, setArchiveOne] = useState<Incident | null>(null);
   const [archiveAll, setArchiveAll] = useState(false);
   const [showHidden, setShowHidden] = useState(false);
-  // Period chips + custom From/To over the records, kept for the session.
+  // The Period dropdown (inside the Filters sheet) over the records, kept for the session.
   const [range, setRange] = useFilterState<DateRangeState>("history-range", initialDateRange);
 
   const records = useMemo(
@@ -227,7 +235,10 @@ export default function HistorySection({ title = "Incident history", onOpenArchi
 
       {records.length > 0 && !showHidden && (
         <div className="mb-2">
-          <DateRangeBar value={range} onChange={setRange} ariaLabel="History date range" />
+          <FilterBar
+            period={{ value: range, onChange: setRange }}
+            results={{ label: "Records", shown: closed.length, total: records.length }}
+          />
         </div>
       )}
 
@@ -252,7 +263,10 @@ export default function HistorySection({ title = "Incident history", onOpenArchi
                   <span className="min-w-0 flex-1">
                     <span className="block truncate text-sm font-bold text-slate-800">{i.subLabel}{i.drill ? " · Drill" : ""}</span>
                     <span className="block truncate text-xs text-slate-500">{i.room}</span>
-                    <span className="block text-xs text-slate-400">{i.resolvedAt ? `${elapsed(i.resolvedAt, now)} · ${dateTime(i.resolvedAt)}` : ""}</span>
+                    <span className="block text-xs text-slate-400">
+                      {relationFor(i, user) ? <span className="font-bold text-brand-700">{relationFor(i, user)} · </span> : null}
+                      {i.resolvedAt ? `${elapsed(i.resolvedAt, now)} · ${dateTime(i.resolvedAt)}` : ""}
+                    </span>
                   </span>
                   <span className={`shrink-0 rounded-full px-2 py-0.5 text-[11px] font-bold ${OUTCOME_STYLE[outcome]}`}>{OUTCOME_LABEL[outcome]}</span>
                 </button>

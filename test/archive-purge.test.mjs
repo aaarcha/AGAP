@@ -397,10 +397,12 @@ test("purge: refuses without confirmation or eligibility, anonymises tickets and
     const noReason = await s.call("POST", "/api/admin/incidents/purge", { token: admin, body: { ids: [inc.id], confirm: "PURGE" } });
     assert.equal(noReason.status, 400, "a reason is required");
 
-    // archived but still inside the retention period
-    const tooSoon = await s.call("POST", "/api/admin/incidents/purge", { token: admin, body: { ids: [inc.id], reason: "cleanup", confirm: "PURGE" } });
-    assert.equal(tooSoon.status, 409, "not eligible yet");
-    assert.match(tooSoon.json.message, /retention period/);
+    // An archived record is immediately purgeable by the Admin: the typed
+    // confirmation + reason are the gate, the retention dates are guidance.
+    const offered = (await s.call("GET", "/api/records?period=sy", { token: admin })).json.incidents.find((r) => r.id === inc.id);
+    assert.equal(offered.purgeEligible, true, "an archived record offers the delete straight away");
+    const unarchivable = await s.call("POST", "/api/admin/incidents/purge", { token: admin, body: { ids: [inc.id], reason: "" , confirm: "PURGE" } });
+    assert.equal(unarchivable.status, 400, "but never without a reason");
 
     // a live ticket can never be purged
     const live = (await s.call("POST", "/api/incidents", { token: teacher, body: report({ categoryId: "flood", subId: "flash_flood" }) })).json.incident;

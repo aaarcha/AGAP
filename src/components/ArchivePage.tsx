@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Archive, ChevronLeft, ChevronRight, Lock, ShieldCheck, Trash2, Users } from "lucide-react";
 import { api } from "../lib/api";
 import { dateTime } from "../lib/format";
+import { useApp } from "../lib/store";
 import { catTheme } from "../lib/theme";
 import { BackBarFor } from "./Chrome";
 import { IncidentDetails } from "./History";
@@ -61,6 +62,7 @@ export default function ArchivePage({
   /** Admin only: jump to Users with the Archived filter applied. */
   onViewInUsers?: (accountId: string) => void;
 }) {
+  const { user } = useApp();
   const [tab, setTab] = useState<ArchiveTab>("tickets");
   const [page, setPage] = useState(1);
   const [data, setData] = useState<ArchivePageData | null>(null);
@@ -102,7 +104,7 @@ export default function ArchivePage({
         <div className="rounded-2xl border border-slate-200 bg-white px-4 py-10 text-center">
           <Archive size={24} className="mx-auto text-slate-300" aria-hidden />
           <p className="mt-2 text-sm text-slate-500">No archived records yet.</p>
-          <p className="mt-1 text-xs text-slate-400">Closed tickets move here once the Principal archives them or the retention sweep runs.</p>
+          <p className="mt-1 text-xs text-slate-400">Closed tickets the school has filed away stay readable here.</p>
         </div>
       )}
 
@@ -122,9 +124,12 @@ export default function ArchivePage({
                   </span>
                   <span className="block truncate text-xs text-slate-500">{i.room}</span>
                   <span className="block text-xs text-slate-400">
-                    Archived {i.archivedAt ? dateTime(i.archivedAt) : "—"}
-                    {i.archivedAuto ? " (retention sweep)" : ""}
-                    {i.archiveReason ? ` · ${i.archiveReason}` : ""} · reported by {i.reporterRole ?? "unknown"}
+                    {user?.role === "teacher" && (i.reporterIds ?? []).length > 0 ? (
+                      <span className="font-bold text-brand-700">
+                        {(i.reporterIds ?? []).includes(user.id) ? ((i.reporterIds ?? []).length > 1 ? "You also reported · " : "You reported · ") : i.linkedSection === user.section || i.linkedSection === "ALL" ? "Reported in your class · " : ""}
+                      </span>
+                    ) : null}
+                    Archived · reported by {i.reporterRole ?? "unknown"}
                   </span>
                 </span>
                 <span className="flex shrink-0 flex-col items-end gap-1">

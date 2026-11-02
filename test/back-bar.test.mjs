@@ -80,7 +80,7 @@ globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
 const React = (await import("react")).default;
 const { App, __resetCtx } = await import(pathToFileURL(outfile).href);
-const { render, cleanup, fireEvent } = await import("@testing-library/react");
+const { render, cleanup, fireEvent, waitFor } = await import("@testing-library/react");
 
 test.afterEach(() => cleanup());
 
@@ -163,13 +163,28 @@ test("principal: every screen — including More — has at most one back bar", 
   assertAtMostOneBar("Command");
   clickRail("Report");
   assertAtMostOneBar("Report");
-  clickRail("Safety");
-  assertAtMostOneBar("Safety");
-  clickRail("History");
-  assertAtMostOneBar("History");
+
+  clickRail("Analytics");
+  assertAtMostOneBar("Analytics");
 
   clickRail("More");
   assertAtMostOneBar("More menu"); // 0: the menu is a root screen
+
+  // Safety and headcount are More entries now, each with the shell's single bar.
+  clickButton("Safety");
+  assert.equal(backBars().length, 1, "Safety: exactly one back bar (the shell's)");
+  clickBack();
+  assertAtMostOneBar("More menu (after safety)");
+
+  clickButton("Headcount status");
+  assert.equal(backBars().length, 1, "Headcount: exactly one back bar (the shell's)");
+  clickBack();
+  assertAtMostOneBar("More menu (after headcount)");
+
+  clickButton("Incidents & Records");
+  assert.equal(backBars().length, 1, "Incidents & Records: exactly one back bar (the shell's)");
+  clickBack();
+  assertAtMostOneBar("More menu (after records)");
 
   clickButton("Teacher roster");
   assert.equal(backBars().length, 1, "Teacher roster: exactly one back bar (the shell's)");
@@ -198,17 +213,37 @@ test("responder: every screen has at most one back bar", () => {
   assertAtMostOneBar("Account menu");
 });
 
-test("super admin: every screen has at most one back bar", () => {
+test("super admin: every screen has at most one back bar", async () => {
   __resetCtx({ user: USERS.super_admin });
   render(React.createElement(App));
 
   assertAtMostOneBar("Users");
-  clickRail("Audit");
-  assertAtMostOneBar("Audit");
-  clickRail("Year");
-  assertAtMostOneBar("Year");
+  clickRail("Analytics");
+  assertAtMostOneBar("Analytics");
   clickRail("System Settings");
   assertAtMostOneBar("System Settings");
-  clickRail("Profile");
-  assertAtMostOneBar("Profile menu"); // root tab, no onBack → no bar
+  clickRail("More");
+  await waitFor(() => assertAtMostOneBar("More menu")); // root tab, no bar
+
+  clickButton("Audit log");
+  await waitFor(() => assert.equal(backBars().length, 1, "Audit: exactly one back bar (the shell's)"));
+  clickBack();
+  assertAtMostOneBar("More menu (after audit)");
+
+  clickButton("School year");
+  await waitFor(() => assert.equal(backBars().length, 1, "Year: exactly one back bar (the shell's)"));
+  clickBack();
+  assertAtMostOneBar("More menu (after year)");
+
+  clickButton("Incidents & Records");
+  await waitFor(() => assert.equal(backBars().length, 1, "records: exactly one back bar (the shell's)"));
+  clickBack();
+  assertAtMostOneBar("More menu (after records)");
+
+  clickButton("Account");
+  assertAtMostOneBar("Account from More");
+  clickButton("About ASPIRE");
+  assert.equal(backBars().length, 1, "About inside Account: exactly one back bar, not two");
+  clickBack();
+  assertAtMostOneBar("Account (after about)");
 });

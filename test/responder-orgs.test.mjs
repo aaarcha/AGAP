@@ -203,6 +203,12 @@ test("one org on site does not stop the other; the first resolve closes the tick
   assert.equal(got.responses.cdrrmo.status, "en_route");
   assert.equal(got.responses.barangay.status, "on_site");
 
+  // CDRRMO cannot resolve: its OWN track has not reached on site yet.
+  const early = await s.call("POST", `/api/incidents/${inc.id}/resolve`, { token: cdrrmo, body: {} });
+  assert.equal(early.status, 409, "an org resolves only after its own on-site step");
+
+  // …and once it arrives, its resolve closes the ticket for everyone.
+  await s.call("POST", `/api/incidents/${inc.id}/onsite`, { token: cdrrmo });
   const done = await s.call("POST", `/api/incidents/${inc.id}/resolve`, { token: cdrrmo, body: {} });
   assert.equal(done.status, 200);
   got = incidentFrom(done.json);
@@ -299,6 +305,8 @@ test("responder actions are audit-logged with the acting organization", async ()
 
   await s.call("POST", `/api/incidents/${inc.id}/ack`, { token: barangay, body: { mode: "walking", distanceKm: 1 } });
   await s.call("POST", `/api/incidents/${inc.id}/onsite`, { token: barangay });
+  await s.call("POST", `/api/incidents/${inc.id}/ack`, { token: cdrrmo, body: { mode: "vehicle", distanceKm: 2 } });
+  await s.call("POST", `/api/incidents/${inc.id}/onsite`, { token: cdrrmo });
   await s.call("POST", `/api/incidents/${inc.id}/resolve`, { token: cdrrmo, body: {} });
 
   const entries = (await s.call("GET", "/api/admin/audit?limit=200", { token: admin })).json.entries
@@ -314,9 +322,9 @@ test("responder actions are audit-logged with the acting organization", async ()
   await s.close();
 });
 
-test("a responder without an organization still moves the ticket to En route when acknowledging", async () => {
+test("a responder without an organization gets 409 and nothing moves", async () => {
   const s = await boot();
-  // An account from before orgs existed: no org, so there is no per-org response record.
+  // An account from before orgs existed: no org, so there is no org to act for.
   const acc = s.app.store.db.accounts.find((a) => a.email === BARANGAY_EMAIL);
   acc.org = null;
   s.app.store.save();
@@ -325,23 +333,13 @@ test("a responder without an organization still moves the ticket to En route whe
   const responder = await s.login(BARANGAY_EMAIL);
   const inc = incidentFrom((await s.call("POST", "/api/incidents", { token: teacher, body: report() })).json);
 
-  const ack = await s.call("POST", `/api/incidents/${inc.id}/ack`, {
-    token: responder, body: { mode: "walking", distanceKm: 1 },
-  });
-  assert.equal(ack.status, 200, JSON.stringify(ack.json));
-  const got = incidentFrom(ack.json);
-  assert.equal(got.status, "EN_ROUTE", "the ticket advances even without an org response");
-  assert.ok(got.enRouteAt, "the en route timestamp is recorded");
+  for (const [action, body] of [["ack", { mode: "walking", distanceKm: 1 }], ["onsite", {}], ["resolve", {}]]) {
+    const res = await s.call("POST", `/api/incidents/${inc.id}/${action}`, { token: responder, body });
+    assert.equal(res.status, 409, `${action} needs an organization`);
+    assert.equal(res.json.message, "Your organization is not assigned. Ask the System Administrator.");
+  }
+  const got = (await s.call("GET", "/api/state", { token: teacher })).json.incidents.find((i) => i.id === inc.id);
+  assert.equal(got.status, "SENT", "nothing advanced");
   assert.equal(got.responses.barangay, null, "no org response is invented for an org-less account");
-
-  // A second acknowledgement is a no-op: the earlier step cannot be re-triggered.
-  const again = await s.call("POST", `/api/incidents/${inc.id}/ack`, { token: responder, body: {} });
-  assert.equal(again.status, 200);
-  assert.equal(again.json.changed, false);
-  assert.equal(again.json.incident.enRouteAt, got.enRouteAt, "the timestamp is locked");
-  assert.equal(
-    again.json.incident.log.filter((l) => l.action === "en_route").length, 1,
-    "one en route entry, no duplicate acknowledgements",
-  );
   await s.close();
 });

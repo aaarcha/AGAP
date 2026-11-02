@@ -84,6 +84,21 @@ export function plainOverride(reason: string): string {
   return reason.replace(/_/g, " ").toLowerCase();
 }
 
+/**
+ * Adaptive duration for the analytics cards: "59 s", "3 min 00 s",
+ * "2 h 15 min", "3 d 22 h" — a long wait never reads as "94 h 41 min".
+ */
+export function fmtDuration(ms: number | null | undefined): string {
+  if (ms === null || ms === undefined || !Number.isFinite(ms)) return "No data yet";
+  const s = Math.max(0, Math.round(ms / 1000));
+  if (s < 60) return `${s} s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m} min ${String(s % 60).padStart(2, "0")} s`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h} h ${String(m % 60).padStart(2, "0")} min`;
+  return `${Math.floor(h / 24)} d ${h % 24} h`;
+}
+
 // "45 s", "3 min 20 s", "1 h 05 min" – for response-time metrics.
 export function fmtMs(ms: number | null | undefined): string {
   if (ms === null || ms === undefined) return "—";
