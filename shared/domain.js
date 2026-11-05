@@ -1,5 +1,6 @@
 // Shared between the Node server and the React client.
 // Everything that decides an urgency score lives here so both sides agree.
+import { leadAgencyFor } from "./agencies.js";
 
 export const SCHOOL = {
   name: "Sinalhan Elementary School",
@@ -7,9 +8,13 @@ export const SCHOOL = {
   barangay: "Barangay Sinalhan",
   city: "City of Santa Rosa, Laguna",
   division: "Santa Rosa City Schools Division – District II",
+  // Set on the server from ASPIRE_SCHOOL_PHONE and exposed through /api/config.
+  phone: "",
 };
 
-// Illustrative AHP-derived weights (pending the final Expert Panel session).
+// Built-in defaults for the AHP-derived weights. The values actually used at runtime come
+// from the active admin configuration (server/config.js); this object is the seed and the
+// fallback when no valid configuration exists. Illustrative until the Expert Panel validates them.
 export const WEIGHTS = {
   severity: 0.5,
   vulnerability: 0.29,
@@ -100,14 +105,16 @@ export const STATUS_LABEL = {
 };
 
 // Integer arithmetic so band boundaries (e.g. exactly 4.00) never flip on float error.
-export function computeScore(severity, vulnerability, locationRisk, timeSensitivity) {
-  const w = WEIGHTS;
+// `weights` holds fractions (0.5 = 50 %) and defaults to the built-in seed weights, so the
+// formula and its results are unchanged when the admin configuration is untouched.
+export function computeScore(severity, vulnerability, locationRisk, timeSensitivity, weights = WEIGHTS) {
+  const w = weights || WEIGHTS;
   const total =
-    Math.round(w.severity * 100) * severity +
-    Math.round(w.vulnerability * 100) * vulnerability +
-    Math.round(w.locationRisk * 100) * locationRisk +
-    Math.round(w.timeSensitivity * 100) * timeSensitivity;
-  return total / 100;
+    Math.round(w.severity * 1000) * severity +
+    Math.round(w.vulnerability * 1000) * vulnerability +
+    Math.round(w.locationRisk * 1000) * locationRisk +
+    Math.round(w.timeSensitivity * 1000) * timeSensitivity;
+  return total / 1000;
 }
 
 export function bandFor(score, status, overrideReasons) {
@@ -150,64 +157,10 @@ export function searchCatalog(query) {
   return out;
 }
 
-// Escalation reference. `verified:false` numbers came from the original Replit build and
-// have NOT been confirmed against an official directory – confirm before go-live.
-export const ESCALATION_MATRIX = [
-  {
-    category: "fire",
-    label: "Fire / Chemical",
-    agency: "Bureau of Fire Protection – Sta. Rosa",
-    hotlines: [
-      { number: "160", verified: false },
-      { number: "(049) 544-0136", verified: false },
-    ],
-    action: "Evacuate immediately. Do not use elevators.",
-  },
-  {
-    category: "medical",
-    label: "Medical / EMS",
-    agency: "Nearest hospital / EMS · Philippine Red Cross",
-    hotlines: [
-      { number: "143", note: "Red Cross", verified: true },
-      { number: "(049) 534-0890", verified: false },
-    ],
-    action: "Keep patient still. Do not move unconscious persons.",
-  },
-  {
-    category: "flood",
-    label: "Flooding / Natural Disaster",
-    agency: "CDRRMO – Santa Rosa City",
-    hotlines: [
-      { number: "911", verified: true },
-      { number: "(049) 534-2291", verified: false },
-    ],
-    action: "Move to higher ground. Avoid floodwater.",
-  },
-  {
-    category: "security",
-    label: "Security / Threat",
-    agency: "PNP – Sta. Rosa City Station",
-    hotlines: [
-      { number: "911", verified: true },
-      { number: "(049) 544-0001", verified: false },
-    ],
-    action: "Lockdown. Do not confront intruder.",
-  },
-  {
-    category: "other",
-    label: "Other / General",
-    agency: "CDRRMO Santa Rosa (general dispatch)",
-    hotlines: [
-      { number: "911", verified: true },
-      { number: "(049) 534-2291", verified: false },
-    ],
-    action: "Follow school DRRM officer instructions.",
-  },
-];
-
+// The agency a ticket recommends, in plain text. Only the lead agency of the
+// mapping (shared/agencies.js) — numbers never leave the responder Escalation page.
 export function agencyFor(category) {
-  const row = ESCALATION_MATRIX.find((r) => r.category === category) || ESCALATION_MATRIX[4];
-  return row.agency;
+  return leadAgencyFor(category)?.name ?? "";
 }
 
 export const DISCLAIMERS = {
@@ -241,9 +194,11 @@ export function floorOf(room) {
   return m ? Number(m[1]) : null;
 }
 // Ground-floor rooms and open ground-level areas count as low-lying.
-export function isLowLying({ locationKind, areaId, savedRoom }) {
+export function isLowLying({ locationKind, areaId, savedRoom, selectedRoom }) {
   if (locationKind === "area" && LOW_LYING_AREAS.includes(areaId)) return true;
-  return floorOf(savedRoom) === 1;
+  // A room chosen by the reporter counts low-lying by that room's own floor.
+  const room = selectedRoom || savedRoom;
+  return floorOf(room) === 1;
 }
 
 // Feature: time-based escalation. Minutes without acknowledgement before each tier is alerted.
@@ -255,18 +210,49 @@ export const OVERRIDE_LABEL = {
   HEADCOUNT_MISMATCH: "Headcount mismatch",
 };
 
+// Affected population id stored on every incident (populationId). Older records only
+// carry the label, so fall back to it.
+export function populationIdOf(inc) {
+  if (inc.populationId) return inc.populationId;
+  const label = String(inc.populationLabel || "");
+  if (/individual/i.test(label)) return "individual";
+  if (/whole/i.test(label)) return "wholeschool";
+  return "classroom";
+}
+
+// Headcount verification applies only to group-scope reports: a single pupil is
+// never headcounted, so no mismatch can arise on an individual ticket.
+export function headcountRequired(inc) {
+  return populationIdOf(inc) !== "individual";
+}
+
 // One place that decides location risk, time sensitivity, score and override flags.
-export function scoreIncident(inc, { hazardActive = false } = {}) {
+// `config` is the ticket's own active configuration (weights as fractions + hazard
+// adjustment); without it the built-in defaults apply, so existing scores are identical.
+export function scoreIncident(inc, { hazardActive = false, config = null } = {}) {
   const hazardApplied = Boolean(hazardActive && inc.lowLying);
-  const locationRisk = hazardApplied ? Math.min(5, inc.baseLocationRisk + HAZARD_LOCATION_BOOST) : inc.baseLocationRisk;
-  const mismatch = (inc.headcounts || []).some((h) => h.present !== h.expected);
+  const boost = config && Number.isInteger(config.hazardAdjustment) ? config.hazardAdjustment : HAZARD_LOCATION_BOOST;
+  const locationRisk = hazardApplied ? Math.min(5, inc.baseLocationRisk + boost) : inc.baseLocationRisk;
+  const mismatch = headcountRequired(inc) && (inc.headcounts || []).some((h) => h.present !== h.expected);
   const timeSensitivity = mismatch ? 5 : Math.min(5, inc.baseTimeSensitivity + (inc.escalationLevel || 0));
-  const score = computeScore(inc.severity, inc.vulnerability, locationRisk, timeSensitivity);
+  const score = computeScore(inc.severity, inc.vulnerability, locationRisk, timeSensitivity, config ? config.weights : WEIGHTS);
   const overrideReasons = [];
   if (inc.severity >= 5) overrideReasons.push("SEVERITY_5");
   if (mismatch) overrideReasons.push("HEADCOUNT_MISMATCH");
   return { locationRisk, timeSensitivity, score, overrideReasons, hazardApplied };
 }
+
+// Responder organizations. A responder account belongs to exactly ONE org (no
+// shared accounts); both orgs can respond to the same ticket independently.
+export const RESPONDER_ORGS = [
+  { id: "barangay", label: "Barangay Sinalhan", short: "Barangay" },
+  { id: "cdrrmo", label: "CDRRMO", short: "CDRRMO" },
+];
+export const RESPONDER_ORG_IDS = RESPONDER_ORGS.map((o) => o.id);
+export const orgById = (id) => RESPONDER_ORGS.find((o) => o.id === id) || null;
+export const orgLabel = (id) => orgById(id)?.label ?? "";
+// Suggested transport per org when acknowledging. All three modes stay selectable.
+export const ORG_SUGGESTED_MODES = { barangay: ["walking", "motorcycle"], cdrrmo: ["vehicle"] };
 
 // Feature: responder ETA by transport mode and approach-route status.
 export const TRANSPORT_MODES = [
@@ -285,12 +271,15 @@ export const ROUTE_SPEED_FACTOR = {
   flooded: { walking: 0.75, motorcycle: 0.5, vehicle: 0.4 },
   blocked: null,
 };
-export function computeEta({ mode, distanceKm, route = "passable" }) {
+// `speeds` optionally holds admin-configured km/h per mode (assumed responder speeds).
+export function computeEta({ mode, distanceKm, route = "passable", speeds = null }) {
   const m = TRANSPORT_MODES.find((x) => x.id === mode);
   if (!m || !(distanceKm > 0)) return null;
+  const configured = speeds && Number(speeds[mode]);
+  const kmh = configured > 0 ? configured : m.kmh;
   const factors = ROUTE_SPEED_FACTOR[route];
   if (!factors) return { blocked: true, minutes: null };
-  return { blocked: false, minutes: Math.max(1, Math.round((distanceKm / (m.kmh * factors[mode])) * 60)) };
+  return { blocked: false, minutes: Math.max(1, Math.round((distanceKm / (kmh * factors[mode])) * 60)) };
 }
 
 // Feature: drill metrics are in milliseconds; helper for labelling.

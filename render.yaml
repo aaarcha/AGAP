@@ -1,7 +1,7 @@
 # Render Blueprint – "New +" → "Blueprint" → pick this repo.
 services:
   - type: web
-    name: agap
+    name: aspire
     runtime: node
     plan: free            # see README "Free vs paid" – free sleeps when idle and loses data on restart
     region: singapore     # closest Render region to the Philippines
@@ -12,18 +12,20 @@ services:
     envVars:
       - key: NODE_VERSION
         value: 22
-      - key: AGAP_SECRET
+      - key: ASPIRE_SECRET
         generateValue: true     # signs login tokens; keep it stable
-      - key: AGAP_ACCESS_CODE
+      - key: ASPIRE_ACCESS_CODE
         sync: false             # optional: set a school access code in the dashboard
+      - key: ASPIRE_SCHOOL_PHONE
+        sync: false             # optional: school contact number (parent Contact School button)
       - key: SEED_DEMO_INCIDENT
         value: "0"
       - key: ALLOW_DEMO_RESET
-        value: "1"              # set to 0 once you go live
+        value: "0"              # demo endpoints stay off unless explicitly set to 1
     # For real use (paid plan), uncomment so incidents/roster survive restarts:
     # plan: starter
     # disk:
-    #   name: agap-data
+    #   name: aspire-data
     #   mountPath: /var/data
     #   sizeGB: 1
     # and add env var  DATA_DIR = /var/data

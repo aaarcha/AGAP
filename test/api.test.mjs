@@ -4,16 +4,24 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import http from "node:http";
-import { createApp, DEMO_PASSWORD, DEMO_ADMIN_EMAIL, DEMO_ADMIN_PASSWORD } from "../server/app.js";
-import { computeScore, bandFor } from "../shared/domain.js";
+import { createApp, DEMO_PASSWORD, DEMO_ADMIN_EMAIL } from "../server/app.js";
+import { validatePassword } from "../shared/password.js";
+import { SEED_ROSTER } from "../server/store.js";
+import { LOCATION_RISK_SAVED_ROOM, computeScore, bandFor } from "../shared/domain.js";
+import {
+  CAMPUS_BY_LEGACY, CAMPUS_ROOMS_FLAT, featureForPoint, featureLabel, gpsToMapPoint,
+  nearestCampusFeatureForLocation, roomById, roomByLegacy,
+} from "../shared/campus.js";
 
 const ADMIN_EMAIL = DEMO_ADMIN_EMAIL;
-const ADMIN_BOOTSTRAP_PASSWORD = DEMO_ADMIN_PASSWORD;
-const ADMIN_PASSWORD = "Sinalhan-Admin-2026!";
+// Test fixtures: both satisfy the shared policy for admin@sinalhanes.deped.ph.
+const ADMIN_BOOTSTRAP_PASSWORD = "Aspire-Bootstrap-2026!";
+const ADMIN_PASSWORD = "Sinalhan-SchoolHead-2026!";
 const slug = (s) => String(s).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
 const emailFor = (role, accountId) => {
   if (role === "principal") return "principal@sinalhanes.deped.ph";
-  if (role === "responder") return "responder@sinalhanes.deped.ph";
+  if (role === "responder") return "barangay@sinalhanes.deped.ph";
+  if (role === "cdrrmo") return "cdrrmo@sinalhanes.deped.ph";
   if (role === "super_admin") return ADMIN_EMAIL;
   if (role === "teacher") return `${accountId}@sinalhanes.deped.ph`;
   if (role === "parent") return `parent-${slug(accountId)}@sinalhanes.deped.ph`;
@@ -177,7 +185,8 @@ test("acknowledge → on site → resolve syncs to every role and resets the par
   for (const tok of [teacher, principal, parent]) {
     assert.equal((await s.call("GET", "/api/state", { token: tok })).json.incidents[0].status, "EN_ROUTE");
   }
-  assert.equal((await s.call("POST", `/api/incidents/${incident.id}/onsite`, { token: principal })).json.incident.status, "ON_SITE");
+  // En route / on site are responder-org steps; the Principal closes the school track.
+  assert.equal((await s.call("POST", `/api/incidents/${incident.id}/onsite`, { token: responder })).json.incident.status, "ON_SITE");
   const done = await s.call("POST", `/api/incidents/${incident.id}/resolve`, { token: principal, body: { outcome: "resolved" } });
   assert.equal(done.json.incident.status, "RESOLVED");
   assert.equal((await s.call("POST", `/api/incidents/${incident.id}/resolve`, { token: responder, body: {} })).status, 409);
@@ -187,21 +196,33 @@ test("acknowledge → on site → resolve syncs to every role and resets the par
   assert.deepEqual(log, ["reported", "seen", "en_route", "on_site", "resolved"]);
 
   const fa = (await s.call("POST", "/api/incidents", { token: teacher, body: report({ categoryId: "medical", subId: "heatstroke" }) })).json.incident;
+  // A responder closes a false alarm only after their OWN track reached on site.
+  assert.equal((await s.call("POST", `/api/incidents/${fa.id}/resolve`, { token: responder, body: { outcome: "false_alarm" } })).status, 409, "resolve before own on site is refused");
+  await s.call("POST", `/api/incidents/${fa.id}/ack`, { token: responder, body: { mode: "walking", distanceKm: 1 } });
+  await s.call("POST", `/api/incidents/${fa.id}/onsite`, { token: responder });
   const cancelled = await s.call("POST", `/api/incidents/${fa.id}/resolve`, { token: responder, body: { outcome: "false_alarm" } });
   assert.equal(cancelled.json.incident.outcome, "false_alarm");
   await s.close();
 });
 
-test("principal can report, must pick a section unless whole-school", async () => {
+test("principal reports a classroom without a class; a common area with Individual needs one", async () => {
   const s = await boot();
   const principal = await s.login("principal");
   const parent = await s.login("parent", "Grade 5 - Sec A");
-  const noSection = await s.call("POST", "/api/incidents", { token: principal, body: report({ populationId: "individual" }) });
+
+  // A classroom place resolves its class from the room (never a question).
+  const inRoom = await s.call("POST", "/api/incidents", { token: principal, body: report({ populationId: "individual" }) });
+  assert.equal(inRoom.status, 201);
+
+  // A common area + Individual: the Principal has no class of their own to fall back on.
+  const noSection = await s.call("POST", "/api/incidents", { token: principal, body: report({ populationId: "individual", locationKind: "area", areaId: "canteen" }) });
   assert.equal(noSection.status, 400);
   assert.equal(noSection.json.error, "section_required");
-  const ok = await s.call("POST", "/api/incidents", { token: principal, body: report({ populationId: "individual", section: "Grade 5 - Sec A" }) });
+
+  const ok = await s.call("POST", "/api/incidents", { token: principal, body: report({ populationId: "individual", locationKind: "area", areaId: "canteen", section: "Grade 5 - Sec A" }) });
   assert.equal(ok.status, 201);
-  assert.equal((await s.call("GET", "/api/state", { token: parent })).json.incidents.length, 1);
+  assert.equal(ok.json.incident.linkedSection, "Grade 5 - Sec A");
+  assert.equal((await s.call("GET", "/api/state", { token: parent })).json.incidents.length, 1, "that class's parents see it");
   await s.close();
 });
 
@@ -222,7 +243,7 @@ test("teacher profile edits and roster CRUD are reflected for the principal inst
   assert.ok(st.sections.includes("Grade 3 - Sec B"));
   assert.equal((await s.call("PUT", "/api/profile", { token: teacher, body: { name: "", section: "x", room: "y" } })).status, 400);
 
-  const added = await s.call("POST", "/api/roster", { token: principal, body: { name: "Mr. Lopez", section: "Grade 1 - Sec A", room: "Bldg C | Flr 1 | Rm 101" } });
+  const added = await s.call("POST", "/api/roster", { token: principal, body: { name: "Mr. Lopez", email: "mlopez@sinalhanes.deped.ph", section: "Grade 1 - Sec A", room: "Bldg C | Flr 1 | Rm 101" } });
   assert.equal(added.status, 201);
   const newId = added.json.teacher.id;
   // Creating a roster row also provisions its sign-in account with temporary credentials.
@@ -240,8 +261,11 @@ test("teacher profile edits and roster CRUD are reflected for the principal inst
   assert.equal(blocked.json.message, "Invalid email or password.", "generic error – no account enumeration");
   assert.equal((await s.call("GET", "/api/state", { token: newTeacherTok })).status, 401, "existing session is cut off");
   await s.call("PUT", `/api/roster/${newId}`, { token: principal, body: { status: "active" } });
-  await s.call("DELETE", `/api/roster/${newId}`, { token: principal });
-  assert.equal((await s.call("GET", "/api/state", { token: principal })).json.roster.some((r) => r.id === newId), false);
+  // Deleting is gone: the roster entry is ARCHIVED instead (reversible from the Admin console).
+  assert.equal((await s.call("DELETE", `/api/roster/${newId}`, { token: principal })).status, 404, "DELETE /api/roster/:id is not a route");
+  const archived = await s.call("POST", `/api/roster/${newId}/archive`, { token: principal, body: { reason: "Transferred" } });
+  assert.equal(archived.status, 200, "the Principal can archive a teacher");
+  assert.equal((await s.call("GET", "/api/state", { token: principal })).json.roster.some((r) => r.id === newId), false, "archived teachers leave the live roster");
   assert.equal((await s.call("GET", "/api/state", { token: newTeacherTok })).status, 401);
   void parentOld;
   await s.close();
@@ -278,19 +302,45 @@ test("server-sent events push a change to connected devices", async () => {
   await s.close();
 });
 
-test("data survives a restart and reset clears it", async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agap-"));
+test("data survives a restart and reset clears it when the demo flag is on", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "aspire-"));
   let s = await boot({ dataDir: dir });
   const teacher = await s.login("teacher", "t1");
   await s.call("POST", "/api/incidents", { token: teacher, body: report() });
   await s.close();
-  s = await boot({ dataDir: dir });
+  s = await boot({ dataDir: dir, allowReset: true });
   const principal = await s.login("principal");
   assert.equal((await s.call("GET", "/api/state", { token: principal })).json.incidents.length, 1);
   assert.equal((await s.call("POST", "/api/admin/reset", { token: principal })).status, 200);
   assert.equal((await s.call("GET", "/api/state", { token: principal })).json.incidents.length, 0);
   await s.close();
   fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("demo endpoints are off by default and only enabled by the server flag", async () => {
+  const s = await boot();
+  const principal = await s.login("principal");
+  assert.equal((await s.call("GET", "/api/config")).json.demoReset, false);
+  assert.equal((await s.call("POST", "/api/admin/reset", { token: principal })).status, 403);
+  await s.close();
+
+  const on = await boot({ allowReset: true });
+  const p2 = await on.login("principal");
+  assert.equal((await on.call("GET", "/api/config")).json.demoReset, true);
+  assert.equal((await on.call("POST", "/api/admin/reset", { token: p2 })).status, 200);
+  await on.close();
+});
+
+test("the school phone number comes from configuration", async () => {
+  const s = await boot({ schoolPhone: "+63 49 555 0100" });
+  const cfg = (await s.call("GET", "/api/config")).json;
+  assert.equal(cfg.school.phone, "+63 49 555 0100");
+  assert.equal(cfg.school.name, "Sinalhan Elementary School");
+  await s.close();
+
+  const empty = await boot();
+  assert.equal((await empty.call("GET", "/api/config")).json.school.phone, "");
+  await empty.close();
 });
 
 test("input validation", async () => {
@@ -335,6 +385,9 @@ test("cancel is blocked once a responder is on site or when others corroborated 
   const t1 = await s.login("teacher", "t1");
   const responder = await s.login("responder");
   const a = (await s.call("POST", "/api/incidents", { token: t1, body: report() })).json.incident;
+  // Strict order: on site needs an acknowledgement first.
+  assert.equal((await s.call("POST", `/api/incidents/${a.id}/onsite`, { token: responder })).status, 409);
+  await s.call("POST", `/api/incidents/${a.id}/ack`, { token: responder, body: {} });
   await s.call("POST", `/api/incidents/${a.id}/onsite`, { token: responder });
   assert.equal((await s.call("POST", `/api/incidents/${a.id}/cancel`, { token: t1 })).status, 409);
   await s.call("POST", `/api/incidents/${a.id}/resolve`, { token: responder, body: {} });
@@ -350,49 +403,70 @@ test("cancel is blocked once a responder is on site or when others corroborated 
   await s.close();
 });
 
-test("history: principal deletes permanently; other roles only clear their own view", async () => {
+// ---------------------------------------------------------------- no deletes
+const { fileURLToPath } = await import("node:url");
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+
+test("no API route accepts DELETE and the old delete helpers no longer exist", async () => {
   const s = await boot();
   const teacher = await s.login("teacher", "t1");
   const principal = await s.login("principal");
-  const responder = await s.login("responder");
+  const admin = await s.loginSuper();
   const parent = await s.login("parent", "Grade 3 - Sec A");
+  const responder = await s.login("responder");
   const open = (await s.call("POST", "/api/incidents", { token: teacher, body: report() })).json.incident;
 
-  // open incidents cannot be deleted
-  for (const tok of [teacher, principal, responder, parent]) {
-    assert.equal((await s.call("DELETE", `/api/incidents/${open.id}`, { token: tok })).status, 409);
+  const paths = [
+    "/api/history", `/api/incidents/${open.id}`, "/api/roster/t1", "/api/admin/reset",
+    "/api/admin/audit", "/api/admin/accounts", "/api/incidents",
+  ];
+  for (const p of paths) {
+    for (const [name, tok] of [["teacher", teacher], ["principal", principal], ["admin", admin], ["parent", parent], ["responder", responder]]) {
+      const r = await s.call("DELETE", p, { token: tok });
+      assert.equal(r.status, 404, `DELETE ${p} as ${name} must not be a route (got ${r.status})`);
+    }
+    // Anonymous traffic is stopped by the auth gate before routing — never served.
+    assert.equal((await s.call("DELETE", p)).status, 401, `DELETE ${p} as anon is rejected`);
   }
-  await s.call("POST", `/api/incidents/${open.id}/resolve`, { token: responder, body: { outcome: "resolved" } });
-
-  // a parent from another section can't touch it
-  const stranger = await s.login("parent", "Grade 4 - Sec B");
-  assert.equal((await s.call("DELETE", `/api/incidents/${open.id}`, { token: stranger })).status, 404);
-
-  // teacher hides -> gone for teacher only
-  assert.equal((await s.call("DELETE", `/api/incidents/${open.id}`, { token: teacher })).json.mode, "hidden");
-  assert.equal((await s.call("GET", "/api/state", { token: teacher })).json.incidents.length, 0);
-  for (const tok of [principal, responder, parent]) {
-    assert.equal((await s.call("GET", "/api/state", { token: tok })).json.incidents.length, 1);
-  }
-  // responder + parent clear their history
-  assert.equal((await s.call("DELETE", "/api/history", { token: responder })).json.count, 1);
-  assert.equal((await s.call("DELETE", `/api/incidents/${open.id}`, { token: parent })).status, 200);
-  assert.equal((await s.call("GET", "/api/state", { token: responder })).json.incidents.length, 0);
-  assert.equal((await s.call("GET", "/api/state", { token: parent })).json.incidents.length, 0);
-  // principal still has the record until they delete it permanently
-  assert.equal((await s.call("GET", "/api/state", { token: principal })).json.incidents.length, 1);
-  assert.equal((await s.call("DELETE", `/api/incidents/${open.id}`, { token: principal })).json.mode, "permanent");
-  assert.equal((await s.call("GET", "/api/state", { token: principal })).json.incidents.length, 0);
-
-  // clear-all as principal wipes only closed incidents
-  const a = (await s.call("POST", "/api/incidents", { token: teacher, body: report() })).json.incident;
-  const b = (await s.call("POST", "/api/incidents", { token: teacher, body: report({ categoryId: "medical", subId: "heatstroke" }) })).json.incident;
-  await s.call("POST", `/api/incidents/${a.id}/resolve`, { token: principal, body: {} });
-  const cleared = await s.call("DELETE", "/api/history", { token: principal });
-  assert.equal(cleared.json.count, 1);
-  const left = (await s.call("GET", "/api/state", { token: principal })).json.incidents;
-  assert.deepEqual(left.map((i) => i.id), [b.id]);
+  // …and nothing was removed by those attempts.
+  assert.equal((await s.call("GET", "/api/state", { token: principal })).json.incidents.length, 1, "the record survives every DELETE attempt");
   await s.close();
+
+  // The client store no longer exports deleteTeacher / deleteIncident / clearHistory.
+  const storeSrc = fs.readFileSync(path.join(ROOT, "src/lib/store.tsx"), "utf8");
+  for (const gone of ["deleteTeacher", "deleteIncident", "clearHistory"]) {
+    assert.equal(storeSrc.includes(gone), false, `${gone} must be gone from src/lib/store.tsx`);
+  }
+  assert.equal(/method:\s*"DELETE"/.test(storeSrc), false, "the client never sends DELETE");
+});
+
+test("the demo reset is off by default, refused without the flag and refused in production", async () => {
+  // 1. off by default
+  const off = await boot();
+  const p1 = await off.login("principal");
+  const offRes = await off.call("POST", "/api/admin/reset", { token: p1 });
+  assert.equal(offRes.status, 403, "reset is refused when allowReset is false");
+  assert.match(offRes.json.message, /disabled/i);
+  await off.close();
+
+  // 2. allowed when the flag is on
+  const on = await boot({ allowReset: true });
+  const p2 = await on.login("principal");
+  assert.equal((await on.call("POST", "/api/admin/reset", { token: p2 })).status, 200, "reset runs when allowReset is on");
+  await on.close();
+
+  // 3. refused in production even with the flag on
+  const prev = process.env.NODE_ENV;
+  process.env.NODE_ENV = "production";
+  try {
+    const prod = await boot({ allowReset: true });
+    const p3 = await prod.login("principal");
+    assert.equal((await prod.call("POST", "/api/admin/reset", { token: p3 })).status, 403, "refused when NODE_ENV=production");
+    await prod.close();
+  } finally {
+    if (prev === undefined) delete process.env.NODE_ENV;
+    else process.env.NODE_ENV = prev;
+  }
 });
 
 test("old resolved incidents are pruned only after the retention window", async () => {
@@ -423,16 +497,19 @@ test("headcount: aggregate counts only; a mismatch forces CRITICAL and clears wh
   const teacher = await s.login("teacher", "t1"); // registry 28
   const principal = await s.login("principal");
   const parent = await s.login("parent", "Grade 3 - Sec A");
-  const { incident } = (await s.call("POST", "/api/incidents", { token: teacher, body: report({ categoryId: "medical", subId: "heatstroke", populationId: "individual" }) })).json;
-  assert.equal(incident.score, 2.6);
+  const { incident } = (await s.call("POST", "/api/incidents", { token: teacher, body: report({ categoryId: "medical", subId: "heatstroke", populationId: "classroom" }) })).json;
+  assert.equal(incident.populationId, "classroom");
+  assert.equal(incident.score, 3.18); // 0.5×3 + 0.29×4 + 0.11×2 + 0.10×3
   assert.equal(incident.accountability.status, "pending");
+  assert.equal(incident.accountability.total, 1, "a classroom ticket asks only for its own section");
 
   const bad = await hc(s.call, teacher, incident.id, { present: 27 });
   assert.equal(bad.status, 200);
   assert.equal(bad.json.incident.accountability.status, "mismatch");
   assert.deepEqual(bad.json.incident.overrideReasons, ["HEADCOUNT_MISMATCH"]);
   assert.equal(bad.json.incident.timeSensitivity, 5);
-  assert.ok(bad.json.incident.score > 2.6, "mismatch raises the score");
+  assert.equal(bandFor(bad.json.incident.score, bad.json.incident.status, bad.json.incident.overrideReasons), "CRITICAL", "mismatch still forces CRITICAL on a group ticket");
+  assert.ok(bad.json.incident.score > 3.18, "mismatch raises the score");
   const pv = (await s.call("GET", "/api/state", { token: parent })).json.incidents[0];
   assert.deepEqual(pv.overrideReasons, ["HEADCOUNT_MISMATCH"]);
   assert.deepEqual(pv.headcounts.map((h) => [h.present, h.expected]), [[27, 28]]);
@@ -441,7 +518,7 @@ test("headcount: aggregate counts only; a mismatch forces CRITICAL and clears wh
   const fixed = await hc(s.call, teacher, incident.id, { present: 28 });
   assert.equal(fixed.json.incident.accountability.status, "verified");
   assert.deepEqual(fixed.json.incident.overrideReasons, []);
-  assert.equal(fixed.json.incident.score, 2.6, "override cleared, score back to normal");
+  assert.equal(fixed.json.incident.score, 3.18, "override cleared, score back to normal");
 
   assert.equal((await hc(s.call, teacher, incident.id, { present: -1 })).status, 400);
   assert.equal((await hc(s.call, teacher, incident.id, { present: "abc" })).status, 400);
@@ -460,12 +537,61 @@ test("headcount: whole-school incidents need every active section before they re
   const t2 = await s.login("teacher", "t2");
   const t3 = await s.login("teacher", "t3");
   const { incident } = (await s.call("POST", "/api/incidents", { token: t1, body: report({ populationId: "wholeschool" }) })).json;
+  assert.equal(incident.populationId, "wholeschool");
   assert.equal(incident.accountability.total, 3);
   assert.equal((await hc(s.call, t1, incident.id, { present: 28 })).json.incident.accountability.status, "partial");
   assert.equal((await hc(s.call, t2, incident.id, { present: 30 })).json.incident.accountability.status, "partial");
   const last = await hc(s.call, t3, incident.id, { present: 29 });
   assert.equal(last.json.incident.accountability.status, "verified");
   assert.equal(last.json.incident.accountability.reported, 3);
+  await s.close();
+});
+
+test("headcount: an individual ticket never asks for a headcount", async () => {
+  const s = await boot();
+  const teacher = await s.login("teacher", "t1");
+  const { incident } = (await s.call("POST", "/api/incidents", { token: teacher, body: report({ populationId: "individual" }) })).json;
+  assert.equal(incident.populationId, "individual");
+  assert.equal(incident.accountability.status, "not_required");
+  assert.equal(incident.accountability.total, 0);
+  assert.deepEqual(incident.overrideReasons, [], "no mismatch override can arise without a headcount");
+  assert.equal((await hc(s.call, teacher, incident.id, { present: 27 })).status, 403, "the server refuses headcounts on individual tickets");
+  await s.close();
+});
+
+test("headcount: a classroom ticket asks only for its own section", async () => {
+  const s = await boot();
+  const t1 = await s.login("teacher", "t1");
+  const t2 = await s.login("teacher", "t2");
+  const principal = await s.login("principal");
+  const { incident } = (await s.call("POST", "/api/incidents", { token: t1, body: report({ populationId: "classroom" }) })).json;
+  assert.equal(incident.accountability.status, "pending");
+  assert.equal(incident.accountability.total, 1);
+  assert.equal((await hc(s.call, t2, incident.id, { present: 30 })).status, 404, "another section is not part of this ticket");
+  assert.equal((await hc(s.call, principal, incident.id, { section: "Grade 4 - Sec B", present: 30 })).status, 403, "the principal can only count a section on the ticket");
+  const done = await hc(s.call, t1, incident.id, { present: 28 });
+  assert.equal(done.json.incident.accountability.status, "verified");
+  assert.equal(done.json.incident.accountability.reported, 1);
+  await s.close();
+});
+
+test("merge upgrade: corroboration with a wider population raises the ticket's scope and headcount duty", async () => {
+  const s = await boot();
+  const teacher = await s.login("teacher", "t1");
+  const solo = (await s.call("POST", "/api/incidents", { token: teacher, body: report({ populationId: "individual" }) })).json.incident;
+  assert.equal(solo.accountability.status, "not_required");
+
+  const cls = await s.call("POST", "/api/incidents", { token: teacher, body: report({ populationId: "classroom" }) });
+  assert.equal(cls.json.merged, true);
+  assert.equal(cls.json.incident.populationId, "classroom", "individual → classroom");
+  assert.equal(cls.json.incident.accountability.status, "pending");
+  assert.equal(cls.json.incident.accountability.total, 1);
+
+  const whole = await s.call("POST", "/api/incidents", { token: teacher, body: report({ populationId: "wholeschool" }) });
+  assert.equal(whole.json.merged, true);
+  assert.equal(whole.json.incident.populationId, "wholeschool", "classroom → whole school");
+  assert.equal(whole.json.incident.linkedSection, "ALL");
+  assert.equal(whole.json.incident.accountability.total, 3, "every active section must now report");
   await s.close();
 });
 
@@ -557,11 +683,12 @@ test("drill mode: parents are not alarmed, metrics are captured, ending the dril
   const responder = await s.login("responder");
   const parent = await s.login("parent", "Grade 3 - Sec A");
   assert.equal((await s.call("PUT", "/api/modes/drill", { token: teacher, body: { active: true } })).status, 403);
-  await s.call("PUT", "/api/modes/drill", { token: principal, body: { active: true, label: "Quarterly earthquake drill" } });
+  // Responders take part only in a simulation drill.
+  await s.call("PUT", "/api/modes/drill", { token: principal, body: { active: true, label: "Quarterly earthquake drill", scope: "simulation" } });
   t += 12000;
   const { incident } = (await s.call("POST", "/api/incidents", { token: teacher, body: { ...report({ categoryId: "flood", subId: "structural_eq", populationId: "wholeschool" }), interactions: 4 } })).json;
   assert.equal((await s.call("GET", "/api/state", { token: parent })).json.incidents.length, 0, "parents never see drill tickets");
-  assert.equal((await s.call("GET", "/api/state", { token: parent })).json.modes.drill.active, true, "…but are told a drill is on");
+  assert.equal((await s.call("GET", "/api/state", { token: parent })).json.modes.drill.active, false, "…and are not told a drill is on");
   const seen = (await s.call("GET", "/api/state", { token: responder })).json.incidents[0];
   assert.equal(seen.drill, true);
   assert.equal(seen.metrics.toReportMs, 12000);
@@ -573,6 +700,7 @@ test("drill mode: parents are not alarmed, metrics are captured, ending the dril
   await hc(s.call, teacher, incident.id, { present: 28 });
   const end = await s.call("PUT", "/api/modes/drill", { token: principal, body: { active: false } });
   assert.equal(end.json.summary.incidents, 1);
+  assert.equal(end.json.summary.scope, "simulation");
   assert.equal(end.json.summary.avgToReportMs, 12000);
   assert.equal(end.json.summary.avgToAckMs, 20000);
   assert.equal(end.json.summary.avgToOnSiteMs, 50000);
@@ -717,25 +845,67 @@ test("deactivated accounts cannot sign in and their sessions are revoked", async
   const admin = await s.loginSuper();
   const prov = await s.call("POST", "/api/admin/accounts", {
     token: admin,
-    body: { email: "ptagrade3@example.com", role: "parent", section: "Grade 3 - Sec A", password: "Grade3PTA-2026" },
+    body: { email: "ptagrade3@example.com", role: "parent", section: "Grade 3 - Sec A", password: "Grade3PTA-2026!" },
   });
   assert.equal(prov.status, 201);
   assert.equal(prov.json.tempPassword, null, "an admin-chosen password is not a temporary one");
-  const tok = (await s.loginWith("ptagrade3@example.com", "Grade3PTA-2026")).json.token;
+  const tok = (await s.loginWith("ptagrade3@example.com", "Grade3PTA-2026!")).json.token;
   assert.equal((await s.call("GET", "/api/state", { token: tok })).status, 200);
 
   const id = prov.json.account.id;
   assert.equal((await s.call("POST", `/api/admin/accounts/${id}/deactivate`, { token: admin })).status, 200);
-  const blocked = await s.loginWith("ptagrade3@example.com", "Grade3PTA-2026");
+  const blocked = await s.loginWith("ptagrade3@example.com", "Grade3PTA-2026!");
   assert.equal(blocked.status, 401);
   assert.equal(blocked.json.message, "Invalid email or password.", "deactivation is not disclosed");
   assert.equal((await s.call("GET", "/api/state", { token: tok })).status, 401, "session revoked on deactivation");
 
   assert.equal((await s.call("POST", `/api/admin/accounts/${id}/activate`, { token: admin })).status, 200);
-  assert.equal((await s.loginWith("ptagrade3@example.com", "Grade3PTA-2026")).status, 200, "sign-in works again after reactivation");
+  assert.equal((await s.loginWith("ptagrade3@example.com", "Grade3PTA-2026!")).status, 200, "sign-in works again after reactivation");
+
+  // An admin-chosen password is held to the same policy as any other password.
+  const weak = await s.call("POST", "/api/admin/accounts", {
+    token: admin,
+    body: { email: "weak@example.com", role: "parent", section: "Grade 3 - Sec A", password: "weakpassword" },
+  });
+  assert.equal(weak.status, 400);
+  assert.equal(weak.json.error, "weak_password");
 
   const adminId = (await s.call("GET", "/api/admin/accounts", { token: admin })).json.accounts.find((a) => a.email === ADMIN_EMAIL).id;
   assert.equal((await s.call("POST", `/api/admin/accounts/${adminId}/deactivate`, { token: admin })).status, 400, "Super Admin cannot deactivate their own account");
+  await s.close();
+});
+
+test("an Admin can provision a Teacher with section, room and registry; the new teacher signs in into that section", async () => {
+  const s = await boot();
+  const admin = await s.loginSuper();
+
+  // A teacher without a section or room is refused exactly as the server documents.
+  const bare = await s.call("POST", "/api/admin/accounts", {
+    token: admin,
+    body: { email: "bare.teacher@example.com", name: "Bare Teacher", role: "teacher" },
+  });
+  assert.equal(bare.status, 400);
+  assert.equal(bare.json.message, "Grade / section is required.");
+
+  const created = await s.call("POST", "/api/admin/accounts", {
+    token: admin,
+    body: {
+      email: "new.teacher@example.com", name: "Ms. Nueva", role: "teacher",
+      section: "Grade 3 - Sec A", room: "Bldg A | Flr 2 | Rm 205", registry: 28,
+      password: "New-Teacher-2026!",
+    },
+  });
+  assert.equal(created.status, 201, JSON.stringify(created.json));
+  assert.equal(created.json.account.role, "teacher");
+  assert.equal(created.json.account.section, "Grade 3 - Sec A");
+
+  const signIn = await s.loginWith("new.teacher@example.com", "New-Teacher-2026!");
+  assert.equal(signIn.status, 200, "the new teacher can sign in");
+  const state = await s.call("GET", "/api/state", { token: signIn.json.token });
+  assert.equal(state.status, 200);
+  assert.equal(state.json.me.section, "Grade 3 - Sec A", "the teacher lands in the right section");
+  assert.equal(state.json.me.room, "Bldg A | Flr 2 | Rm 205", "with the default room");
+  assert.equal(state.json.me.registry, 28, "and today's registry");
   await s.close();
 });
 
@@ -751,7 +921,7 @@ test("school-year rollover issues temporary credentials, forces a new password a
   const roll = await s.call("POST", "/api/admin/school-year/start", { token: admin });
   assert.equal(roll.status, 200);
   assert.equal(roll.json.year, 1);
-  assert.equal(roll.json.accounts.length, 8, "every non-admin account (3 teachers, principal, responder, 3 parents) is rolled over");
+  assert.equal(roll.json.accounts.length, 9, "every non-admin account (3 teachers, principal, 2 responders, 3 parents) is rolled over");
   assert.equal((await s.call("GET", "/api/state", { token: teacher2 })).status, 401, "existing sessions are invalidated");
 
   const entry = roll.json.accounts.find((a) => a.email === emailFor("teacher", "t1"));
@@ -762,12 +932,15 @@ test("school-year rollover issues temporary credentials, forces a new password a
   const tok = forced.json.token;
   assert.equal((await s.call("GET", "/api/state", { token: tok })).status, 403, "data access is blocked until the change");
   assert.equal((await s.call("POST", "/api/incidents", { token: tok, body: report() })).status, 403);
+  assert.equal(validatePassword(entry.tempPassword, { email: entry.email, name: entry.name }), null, "the issued credential satisfies the policy");
   assert.equal((await s.call("POST", "/api/password", { token: tok, body: { password: "short" } })).status, 400, "minimum 8 characters");
   assert.equal((await s.call("POST", "/api/password", { token: tok, body: { password: "12345678" } })).status, 400, "common passwords rejected");
-  assert.equal((await s.call("POST", "/api/password", { token: tok, body: { password: "abcdefgh" } })).status, 200, "no composition rules – 8 letters is a valid password");
+  assert.equal((await s.call("POST", "/api/password", { token: tok, body: { password: "abcdefgh" } })).status, 400, "composition rules apply to a first-time set too");
+  assert.equal((await s.call("POST", "/api/password", { token: tok, body: { password: entry.tempPassword } })).status, 400, "the new password must differ from the current one");
+  assert.equal((await s.call("POST", "/api/password", { token: tok, body: { password: "Grade5-New-2026!" } })).status, 200, "a policy-compliant password is accepted");
   assert.equal((await s.call("GET", "/api/state", { token: tok })).status, 200, "in with the new password");
   assert.equal((await s.loginWith(entry.email, entry.tempPassword)).status, 401, "the temporary credential is spent");
-  assert.equal((await s.loginWith(entry.email, "abcdefgh")).status, 200);
+  assert.equal((await s.loginWith(entry.email, "Grade5-New-2026!")).status, 200);
 
   // The audit log covers the whole flow – and never contains a password or a token.
   const entries = (await s.call("GET", "/api/admin/audit", { token: admin })).json.entries;
@@ -776,7 +949,7 @@ test("school-year rollover issues temporary credentials, forces a new password a
     assert.ok(actions.includes(a), `audit records ${a}`);
   const raw = JSON.stringify(entries);
   assert.equal(raw.includes(entry.tempPassword), false, "audit never stores temporary passwords");
-  assert.equal(raw.includes("abcdefgh"), false, "audit never stores passwords");
+  assert.equal(raw.includes("Grade5-New-2026!"), false, "audit never stores passwords");
   assert.equal(raw.includes(tok), false, "audit never stores tokens");
   await s.close();
 });
@@ -826,6 +999,101 @@ test("first Super Admin is bootstrapped from the environment with a forced passw
   await s.close();
 });
 
+test("a bootstrap Super Admin password must meet the shared policy too", async () => {
+  const logs = [];
+  const weak = await boot({
+    seedDemoAccounts: false,
+    superAdminEmail: "boss@sinalhanes.deped.ph",
+    superAdminPassword: "boss-password",
+    log: (...args) => logs.push(args.join(" ")),
+  });
+  assert.equal(weak.app.store.db.accounts.length, 0, "no account is created from a weak bootstrap password");
+  assert.ok(logs.some((l) => /ASPIRE_SUPER_ADMIN_PASSWORD does not meet the password policy/.test(l)), "the refusal is logged");
+  assert.equal(logs.join(" ").includes("boss-password"), false, "the password itself is never logged");
+  await weak.close();
+
+  const ok = await boot({
+    seedDemoAccounts: false,
+    superAdminEmail: "boss@sinalhanes.deped.ph",
+    superAdminPassword: "Bootstrap-School-2026!",
+  });
+  assert.equal(ok.app.store.db.accounts.length, 1, "a compliant bootstrap password creates the account");
+  assert.equal(ok.app.store.db.accounts[0].mustChange, true);
+  await ok.close();
+});
+
+test("voluntary password change requires the current password and revokes other sessions", async () => {
+  const s = await boot();
+  const phone = await s.login("teacher", "t1");
+  const tablet = await s.login("teacher", "t1");
+  const email = emailFor("teacher", "t1");
+
+  assert.equal((await s.call("POST", "/api/password", { token: phone, body: { password: "NewTeacher-2026!" } })).status, 401, "current password is required");
+  const wrong = await s.call("POST", "/api/password", { token: phone, body: { password: "NewTeacher-2026!", currentPassword: "not-the-password" } });
+  assert.equal(wrong.status, 401);
+  assert.equal(wrong.json.error, "invalid_password");
+
+  const changed = await s.call("POST", "/api/password", { token: phone, body: { password: "NewTeacher-2026!", currentPassword: DEMO_PASSWORD } });
+  assert.equal(changed.status, 200);
+  assert.equal((await s.call("GET", "/api/state", { token: tablet })).status, 401, "other devices are signed out");
+  assert.equal((await s.call("GET", "/api/state", { token: phone })).status, 200, "the device that changed it stays signed in");
+  assert.equal((await s.loginWith(email, DEMO_PASSWORD)).status, 401, "the old password no longer works");
+  assert.equal((await s.loginWith(email, "NewTeacher-2026!")).status, 200);
+
+  const admin = await s.loginSuper();
+  const entries = (await s.call("GET", "/api/admin/audit", { token: admin })).json.entries;
+  const change = entries.find((e) => e.action === "password_change" && e.target === email);
+  assert.equal(change?.detail, "voluntary change");
+  assert.ok(!JSON.stringify(entries).includes("NewTeacher-2026!"), "no password ever reaches the audit log");
+  await s.close();
+});
+
+test("voluntary password change failures count toward the account lockout", async () => {
+  const s = await boot({ lockoutFailures: 3 });
+  const token = await s.login("teacher", "t1");
+  for (let i = 0; i < 3; i++) {
+    assert.equal((await s.call("POST", "/api/password", { token, body: { currentPassword: "wrong", password: "NewTeacher-2026!" } })).status, 401);
+  }
+  const blocked = await s.call("POST", "/api/password", { token, body: { currentPassword: DEMO_PASSWORD, password: "NewTeacher-2026!" } });
+  assert.equal(blocked.status, 429, "lockout applies to password changes too");
+  assert.equal((await s.loginWith(emailFor("teacher", "t1"), DEMO_PASSWORD)).status, 429, "and to signing in");
+  await s.close();
+});
+
+test("all roles share one password policy: 8+ chars with upper, lower, digit and special", async () => {
+  const s = await boot();
+  const tokens = {
+    teacher: await s.login("teacher", "t1"),
+    principal: await s.login("principal"),
+    responder: await s.login("responder"),
+    parent: await s.login("parent", "Grade 3 - Sec A"),
+    super_admin: await s.loginSuper(),
+  };
+  const change = (token, password, currentPassword = DEMO_PASSWORD) =>
+    s.call("POST", "/api/password", { token, body: { currentPassword, password } });
+
+  // Every role gets exactly the same rejections.
+  for (const [role, token] of Object.entries(tokens)) {
+    if (role === "super_admin") continue; // its current password is not the demo one
+    assert.equal((await change(token, "Abc1234")).status, 400, `${role}: shorter than 8 rejected`);
+    assert.equal((await change(token, "abcdefg1!")).status, 400, `${role}: no uppercase rejected`);
+    assert.equal((await change(token, "ABCDEFG1!")).status, 400, `${role}: no lowercase rejected`);
+    assert.equal((await change(token, "Abcdefgh!")).status, 400, `${role}: no digit rejected`);
+    assert.equal((await change(token, "Abcdefgh1")).status, 400, `${role}: no special character rejected`);
+    assert.equal((await change(token, `Abcdef1!${"x".repeat(60)}`)).status, 400, `${role}: longer than 64 rejected`);
+    assert.equal((await change(token, " Abcdef1!")).status, 400, `${role}: leading space rejected`);
+    assert.equal((await change(token, DEMO_PASSWORD)).status, 400, `${role}: same as the current password rejected`);
+  }
+
+  // …and the same acceptances.
+  assert.equal((await change(tokens.teacher, "Room204-Strong!")).status, 200, "teacher accepts a compliant password");
+  assert.equal((await change(tokens.principal, "Command-Center-1!")).status, 200, "principal accepts a compliant password");
+  assert.equal((await change(tokens.responder, "Dispatch-Unit-1!")).status, 200, "responder accepts a compliant password");
+  assert.equal((await change(tokens.parent, "Guardian-Pickup-1!")).status, 200, "parent accepts a compliant password");
+  assert.equal((await change(tokens.super_admin, "Console-Desk-1!", ADMIN_PASSWORD)).status, 200, "super admin accepts a compliant password");
+  await s.close();
+});
+
 test("idle timeout is role-based: short for principal/super admin, long for teachers, refreshed by activity", async () => {
   let t = Date.now();
   const s = await boot({ now: () => t });
@@ -848,7 +1116,7 @@ test("idle timeout is role-based: short for principal/super admin, long for teac
 });
 
 test("passwords are scrypt-hashed per user and never stored or audited in plain text", async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agap-auth-"));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "aspire-auth-"));
   const s = await boot({ dataDir: dir });
   const secret = "My-Secret-Passphrase-9";
   const email = emailFor("teacher", "t2");
@@ -864,7 +1132,7 @@ test("passwords are scrypt-hashed per user and never stored or audited in plain 
   assert.equal(inMemory.includes(DEMO_PASSWORD), false, "the demo password itself is never stored in plain text");
   assert.equal(inMemory.includes(secret), false, "attempted passwords are never stored");
   await s.close();
-  const onDisk = fs.readFileSync(path.join(dir, "agap-db.json"), "utf8");
+  const onDisk = fs.readFileSync(path.join(dir, "aspire-db.json"), "utf8");
   assert.equal(onDisk.includes(DEMO_PASSWORD), false, "nothing sensitive hits the disk");
   assert.equal(onDisk.includes(secret), false);
   fs.rmSync(dir, { recursive: true, force: true });
@@ -880,4 +1148,496 @@ test("demo accounts are seeded only in demo mode; otherwise just the env Super A
   assert.ok(demo.app.store.db.accounts.length >= 8, "demo mode seeds teachers, principal, responder and parents");
   assert.equal((await demo.loginWith(emailFor("teacher", "t1"), DEMO_PASSWORD)).status, 200);
   await demo.close();
+});
+
+// ---- Campus layout & report location (1A) -------------------------------------
+
+test("campus layout resolves every seeded roster room with no migration", () => {
+  assert.ok(CAMPUS_ROOMS_FLAT.length > 0, "the campus layout has rooms");
+  for (const entry of SEED_ROSTER) {
+    const room = roomByLegacy(entry.room);
+    assert.ok(room, `roster room resolves through the campus mapper: ${entry.room}`);
+    assert.equal(CAMPUS_BY_LEGACY[room.legacy].id, room.id);
+    assert.equal(roomById(room.id).legacy, room.legacy, "id and legacy string round-trip");
+    assert.match(room.legacy, /^Bldg [AB] \| Flr \d+ \| /, "the canonical Bldg X | Flr N | Rm NNN format is kept");
+    assert.ok(Number.isFinite(room.point.x) && Number.isFinite(room.point.y), "every room sits on the map");
+  }
+});
+
+test("the GPS projection pins the roster coordinates to the right campus places", () => {
+  const buildingA = nearestCampusFeatureForLocation(gpsToMapPoint(14.312, 121.115));
+  const buildingB = nearestCampusFeatureForLocation(gpsToMapPoint(14.313, 121.116));
+  assert.ok(buildingA && buildingB, "both known coordinates land on a known feature");
+  assert.equal(buildingA.buildingId, "bldg-a");
+  assert.equal(buildingB.buildingId, "bldg-b");
+  assert.equal(featureLabel(buildingB), "Building B · Rm 105");
+  assert.equal(nearestCampusFeatureForLocation(gpsToMapPoint(14.4, 121.4)), null, "far off campus nothing is named");
+  assert.ok(featureForPoint(null) === null);
+});
+
+test("a teacher reports from outside their assigned room: Grade 4 teacher picks the Building B room", async () => {
+  const s = await boot();
+  const teacher = await s.login("teacher", "t2"); // saved room is Bldg A | Flr 2 | Rm 210
+  const principal = await s.login("principal");
+  const responder = await s.login("responder");
+
+  const made = await s.call("POST", "/api/incidents", {
+    token: teacher,
+    body: report({ locationKind: "room", roomId: "bldg-b-flr-1-rm-105" }),
+  });
+  assert.equal(made.status, 201, JSON.stringify(made.json));
+  const inc = made.json.incident;
+  assert.equal(inc.room, "Bldg B | Flr 1 | Rm 105");
+  assert.equal(inc.locationKind, "room");
+  assert.equal(inc.locationSetBy, "selected_room");
+  assert.match(inc.locationNote, /Selected by reporter/);
+  assert.equal(inc.locationRisk, LOCATION_RISK_SAVED_ROOM, "a selected classroom keeps the saved-room Location Risk");
+  const stored = s.app.store.db.incidents.find((i) => i.id === inc.id);
+  assert.equal(stored.lowLying, true, "low-lying follows the selected room's own floor");
+
+  const forPrincipal = (await s.call("GET", "/api/state", { token: principal })).json.incidents.find((i) => i.id === inc.id);
+  assert.equal(forPrincipal.room, "Bldg B | Flr 1 | Rm 105");
+  assert.equal(forPrincipal.locationSetBy, "selected_room");
+  assert.match(forPrincipal.locationNote, /Selected by reporter/);
+  const forResponder = (await s.call("GET", "/api/state", { token: responder })).json.incidents.find((i) => i.id === inc.id);
+  assert.equal(forResponder.locationSetBy, "selected_room", "responders see how the location was set");
+  await s.close();
+});
+
+test("a GPS-detected classroom is filed as that room, tagged as detected", async () => {
+  const s = await boot();
+  const teacher = await s.login("teacher", "t1");
+  const made = await s.call("POST", "/api/incidents", {
+    token: teacher,
+    body: report({ locationKind: "room", roomId: "bldg-a-flr-2-rm-205", locationSetBy: "gps_detected" }),
+  });
+  assert.equal(made.status, 201, JSON.stringify(made.json));
+  assert.equal(made.json.incident.room, "Bldg A | Flr 2 | Rm 205");
+  assert.equal(made.json.incident.locationSetBy, "gps_detected");
+  assert.match(made.json.incident.locationNote, /^Detected by GPS/);
+  assert.equal(made.json.incident.locationRisk, LOCATION_RISK_SAVED_ROOM);
+
+  // An unknown room, a bogus area or a bogus "how it was set" are all refused.
+  const badRoom = await s.call("POST", "/api/incidents", { token: teacher, body: report({ locationKind: "room", roomId: "rm-999" }) });
+  assert.equal(badRoom.status, 400);
+  const badArea = await s.call("POST", "/api/incidents", { token: teacher, body: report({ locationKind: "area", areaId: "nowhere" }) });
+  assert.equal(badArea.status, 400);
+  await s.close();
+});
+
+test("the reporter keeps every location option: saved room, common area and unverified", async () => {
+  const s = await boot();
+  const teacher = await s.login("teacher", "t1");
+
+  const saved = await s.call("POST", "/api/incidents", { token: teacher, body: report() });
+  assert.equal(saved.json.incident.room, "Bldg A | Flr 2 | Rm 204");
+  assert.equal(saved.json.incident.locationKind, "saved");
+  assert.equal(saved.json.incident.locationSetBy, "saved_room");
+
+  const area = await s.call("POST", "/api/incidents", { token: teacher, body: report({ locationKind: "area", areaId: "canteen" }) });
+  assert.equal(area.json.incident.locationKind, "area");
+  assert.equal(area.json.incident.locationSetBy, "selected_area");
+  assert.match(area.json.incident.room, /^Canteen \(reassigned from /);
+
+  const unverified = await s.call("POST", "/api/incidents", { token: teacher, body: report({ locationKind: "unverified" }) });
+  assert.equal(unverified.json.incident.locationSetBy, "unverified");
+  assert.match(unverified.json.incident.locationNote, /not verified/i);
+  await s.close();
+});
+
+test("a teacher can set their default classroom from the campus picker", async () => {
+  const s = await boot();
+  const teacher = await s.login("teacher", "t2");
+  const parent = await s.login("parent", "Grade 3 - Sec A");
+
+  const changed = await s.call("PUT", "/api/profile/room", { token: teacher, body: { roomId: "bldg-b-flr-1-rm-105" } });
+  assert.equal(changed.status, 200, JSON.stringify(changed.json));
+  const state = (await s.call("GET", "/api/state", { token: teacher })).json;
+  assert.equal(state.me.room, "Bldg B | Flr 1 | Rm 105");
+  assert.equal(state.roster[0].room, "Bldg B | Flr 1 | Rm 105");
+  assert.equal(state.roster[0].gps, "14.313, 121.116", "the saved coordinate follows the building");
+
+  // A report with no location now files the new default room.
+  const made = await s.call("POST", "/api/incidents", { token: teacher, body: report() });
+  assert.equal(made.json.incident.room, "Bldg B | Flr 1 | Rm 105");
+  assert.equal(made.json.incident.locationSetBy, "saved_room");
+
+  assert.equal((await s.call("PUT", "/api/profile/room", { token: teacher, body: { roomId: "rm-999" } })).status, 400);
+  assert.equal((await s.call("PUT", "/api/profile/room", { token: parent, body: { roomId: "bldg-a-flr-2-rm-204" } })).status, 403, "only the teacher changes their own room");
+  await s.close();
+});
+
+test("login for seeded @sinalhanes.deped.ph account with wrong password returns 401 invalid_credentials (never 500); correct password returns 200", async () => {
+  const s = await boot();
+  const email = "t1@sinalhanes.deped.ph";
+  const wrong = await s.call("POST", "/api/login", { body: { email, password: "WrongPassword123!" } });
+  assert.equal(wrong.status, 401);
+  assert.equal(wrong.json?.error, "invalid_credentials");
+  const correct = await s.call("POST", "/api/login", { body: { email, password: DEMO_PASSWORD } });
+  assert.equal(correct.status, 200);
+  assert.ok(correct.json?.token);
+  await s.close();
+});
+
+test("every subtype in CATEGORIES is reachable from the tiles", async () => {
+  const { CATEGORIES } = await import("../shared/domain.js");
+  for (const cat of CATEGORIES) {
+    assert.ok(Array.isArray(cat.subs) && cat.subs.length > 0, `category ${cat.id} has subs`);
+    for (const sub of cat.subs) {
+      assert.ok(sub.id && sub.label, `subtype ${cat.id} missing id/label`);
+    }
+  }
+  // Medical Mass Collapse must exist
+  const medical = CATEGORIES.find((c) => c.id === "medical");
+  assert.ok(medical?.subs.some((s) => s.id === "mass_collapse"), "medical.mass_collapse exists");
+});
+
+// ------------------------------------------- My profile (Account → My profile)
+test("the profile screen's API calls update name, section and registry, and stamp registryUpdatedAt", async () => {
+  const s = await boot();
+  const teacher = await s.login("teacher", "t1");
+
+  const before = (await s.call("GET", "/api/me", { token: teacher })).json.user;
+  assert.equal(before.registryUpdatedAt ?? null, null, "never set yet");
+
+  // Exactly what the new screen sends on Save.
+  const saved = await s.call("PUT", "/api/profile", {
+    token: teacher,
+    body: { name: "Ms. Ana Reyes", section: "Grade 3 - Sec B", room: "Bldg A | Flr 2 | Rm 204", registry: 28 },
+  });
+  assert.equal(saved.status, 200, JSON.stringify(saved.json));
+  assert.deepEqual(
+    [saved.json.user.name, saved.json.user.section, saved.json.user.registry],
+    ["Ms. Ana Reyes", "Grade 3 - Sec B", 28],
+  );
+  assert.ok(Number.isInteger(saved.json.user.registryUpdatedAt), "profile response carries registryUpdatedAt");
+
+  const me = (await s.call("GET", "/api/me", { token: teacher })).json.user;
+  assert.deepEqual([me.name, me.section, me.registry], ["Ms. Ana Reyes", "Grade 3 - Sec B", 28], "/api/me reflects the edit");
+  assert.equal(me.registryUpdatedAt, saved.json.user.registryUpdatedAt, "/api/me returns registryUpdatedAt");
+  await s.close();
+});
+
+test("profile validation: empty name, registry 201 and a non-integer registry are rejected", async () => {
+  const s = await boot();
+  const teacher = await s.login("teacher", "t1");
+  const base = { section: "Grade 3 - Sec A", room: "Bldg A | Flr 2 | Rm 204" };
+
+  assert.equal((await s.call("PUT", "/api/profile", { token: teacher, body: { ...base, name: "", registry: 30 } })).status, 400, "empty name");
+  assert.equal((await s.call("PUT", "/api/profile", { token: teacher, body: { ...base, name: "Ms. Reyes", registry: 201 } })).status, 400, "registry above 200");
+  assert.equal((await s.call("PUT", "/api/profile", { token: teacher, body: { ...base, name: "Ms. Reyes", registry: 12.5 } })).status, 400, "non-integer registry");
+  assert.equal((await s.call("PUT", "/api/profile", { token: teacher, body: { ...base, name: "Ms. Reyes", registry: 150 } })).status, 200, "the valid save still goes through");
+  await s.close();
+});
+
+test("a teacher's section change moves parent accounts, incidents and headcounts, and is audited", async () => {
+  const s = await boot();
+  const teacher = await s.login("teacher", "t1");
+  const principal = await s.login("principal");
+  const parent = await s.login("parent", "Grade 3 - Sec A");
+
+  const { incident } = (await s.call("POST", "/api/incidents", { token: teacher, body: report() })).json;
+  await hc(s.call, teacher, incident.id, { present: 28 }); // recorded under the old section
+  assert.equal((await s.call("GET", "/api/me", { token: parent })).json.user.section, "Grade 3 - Sec A");
+
+  const edit = await s.call("PUT", "/api/profile", {
+    token: teacher,
+    body: { name: "Ms. Reyes", section: "Grade 3 - Sec B", room: "Bldg A | Flr 2 | Rm 204" },
+  });
+  assert.equal(edit.status, 200);
+
+  assert.equal((await s.call("GET", "/api/me", { token: parent })).json.user.section, "Grade 3 - Sec B", "parent account moved with the section");
+  const st = (await s.call("GET", "/api/state", { token: principal })).json;
+  const moved = st.incidents.find((i) => i.id === incident.id);
+  assert.equal(moved.linkedSection, "Grade 3 - Sec B", "incident linkedSection moved");
+  assert.equal(moved.headcounts[0].section, "Grade 3 - Sec B", "headcount record moved");
+  assert.equal(moved.accountability.status, "verified", "the moved headcount still lines up");
+
+  const audit = (await s.call("GET", "/api/admin/audit", { token: await s.loginSuper() })).json.entries;
+  const entry = audit.find((e) => e.action === "section_changed");
+  assert.ok(entry, "section change is audited");
+  assert.match(entry.detail, /Grade 3 - Sec A → Grade 3 - Sec B/);
+  assert.ok(!/password|pwHash|pwSalt/i.test(entry.detail), "the audit entry names fields, never passwords");
+  await s.close();
+});
+
+test("the Principal's roster edit moves parent accounts, incidents and headcounts the same way", async () => {
+  const s = await boot();
+  const teacher = await s.login("teacher", "t1");
+  const principal = await s.login("principal");
+  const parent = await s.login("parent", "Grade 3 - Sec A");
+
+  const { incident } = (await s.call("POST", "/api/incidents", { token: teacher, body: report() })).json;
+  await hc(s.call, teacher, incident.id, { present: 28 });
+
+  const edit = await s.call("PUT", "/api/roster/t1", { token: principal, body: { section: "Grade 3 - Sec C" } });
+  assert.equal(edit.status, 200, JSON.stringify(edit.json));
+  assert.equal((await s.call("GET", "/api/me", { token: parent })).json.user.section, "Grade 3 - Sec C", "parent account moved");
+
+  const st = (await s.call("GET", "/api/state", { token: principal })).json;
+  const moved = st.incidents.find((i) => i.id === incident.id);
+  assert.equal(moved.linkedSection, "Grade 3 - Sec C", "incident linkedSection moved");
+  assert.equal(moved.headcounts[0].section, "Grade 3 - Sec C", "headcount record moved");
+
+  const audit = (await s.call("GET", "/api/admin/audit", { token: await s.loginSuper() })).json.entries;
+  assert.ok(audit.some((e) => e.action === "section_changed" && /Grade 3 - Sec A → Grade 3 - Sec C/.test(e.detail)), "roster edit is audited too");
+  await s.close();
+});
+
+test("the Principal's roster edit also stamps registryUpdatedAt", async () => {
+  const s = await boot();
+  const principal = await s.login("principal");
+  const teacher = await s.login("teacher", "t1");
+  assert.equal((await s.call("GET", "/api/me", { token: teacher })).json.user.registryUpdatedAt ?? null, null);
+
+  const edit = await s.call("PUT", "/api/roster/t1", { token: principal, body: { registry: 30 } });
+  assert.equal(edit.status, 200);
+  assert.ok(Number.isInteger(edit.json.teacher.registryUpdatedAt), "roster response carries registryUpdatedAt");
+  const row = (await s.call("GET", "/api/state", { token: principal })).json.roster.find((r) => r.id === "t1");
+  assert.equal(row.registryUpdatedAt, edit.json.teacher.registryUpdatedAt);
+  await s.close();
+});
+
+test("teacher records and parent accounts carry structured grade and sectionName", async () => {
+  const s = await boot();
+  const principal = await s.login("principal");
+  const superToken = await s.loginSuper();
+
+  const roster = (await s.call("GET", "/api/state", { token: principal })).json.roster;
+  assert.deepEqual([roster[0].grade, roster[0].sectionName], ["3", "A"], "roster row derived from its section string");
+  assert.deepEqual([roster[1].grade, roster[1].sectionName], ["4", "B"]);
+  assert.deepEqual([roster[2].grade, roster[2].sectionName], ["5", "A"]);
+
+  const { accounts } = (await s.call("GET", "/api/admin/accounts", { token: superToken })).json;
+  const parent = accounts.find((a) => a.role === "parent");
+  const teacher = accounts.find((a) => a.teacher && a.teacher.id === "t1");
+  assert.deepEqual([parent.grade, parent.sectionName], ["3", "A"], "parent account derived from its own section");
+  assert.deepEqual([teacher.grade, teacher.sectionName], ["3", "A"], "teacher account derived from the roster row");
+  assert.deepEqual([parent.section, teacher.section], ["Grade 3 - Sec A", "Grade 3 - Sec A"]);
+  await s.close();
+});
+
+test("roster creation and section edits keep the structured fields in step", async () => {
+  const s = await boot();
+  const principal = await s.login("principal");
+  const superToken = await s.loginSuper();
+  const parent = await s.login("parent", "Grade 3 - Sec A");
+
+  // A new roster row derives its parts from the composed string.
+  const created = await s.call("POST", "/api/roster", {
+    token: principal,
+    body: { name: "Mr. Santos", email: "msantos@sinalhanes.deped.ph", section: "Kinder - Sec M", room: "Bldg A | Flr 1 | Rm 101" },
+  });
+  assert.equal(created.status, 201, JSON.stringify(created.json));
+  assert.deepEqual([created.json.teacher.grade, created.json.teacher.sectionName], ["K", "M"]);
+  assert.deepEqual([created.json.account.grade, created.json.account.sectionName], ["K", "M"]);
+
+  // Moving an existing teacher rewrites the roster row AND the parent accounts that moved.
+  const edit = await s.call("PUT", "/api/roster/t1", { token: principal, body: { section: "Grade 5 - Sec A" } });
+  assert.equal(edit.status, 200, JSON.stringify(edit.json));
+  assert.deepEqual([edit.json.teacher.grade, edit.json.teacher.sectionName], ["5", "A"]);
+
+  const me = (await s.call("GET", "/api/me", { token: parent })).json.user;
+  assert.equal(me.section, "Grade 5 - Sec A", "the parent account moved");
+
+  const { accounts } = (await s.call("GET", "/api/admin/accounts", { token: superToken })).json;
+  const moved = accounts.find((a) => a.id === me.id);
+  assert.deepEqual([moved.section, moved.grade, moved.sectionName], ["Grade 5 - Sec A", "5", "A"], "parent grade/sectionName follow the move");
+  const t1 = accounts.find((a) => a.teacher && a.teacher.id === "t1");
+  assert.deepEqual([t1.section, t1.grade, t1.sectionName], ["Grade 5 - Sec A", "5", "A"], "teacher account follows the roster row");
+  await s.close();
+});
+
+test("provisioning a Parent/PTA account derives grade and sectionName from the composed section", async () => {
+  const s = await boot();
+  const superToken = await s.loginSuper();
+  const made = await s.call("POST", "/api/admin/accounts", {
+    token: superToken,
+    body: { email: "pta-derp@sinalhanes.deped.ph", name: "PTA Rep", role: "parent", section: "Kinder - Sec M" },
+  });
+  assert.equal(made.status, 201, JSON.stringify(made.json));
+  assert.equal(made.json.account.section, "Kinder - Sec M");
+  assert.deepEqual([made.json.account.grade, made.json.account.sectionName], ["K", "M"]);
+  await s.close();
+});
+
+test("a new teacher whose registry is 28 and who reports 28 present gets no mismatch", async () => {
+  const s = await boot();
+  const principal = await s.login("principal");
+
+  const created = await s.call("POST", "/api/roster", {
+    token: principal,
+    body: { name: "Mr. Lopez", email: "mlopez-registry@sinalhanes.deped.ph", section: "Grade 1 - Sec A", room: "Bldg A | Flr 2 | Rm 205", registry: 30 },
+  });
+  assert.equal(created.status, 201, JSON.stringify(created.json));
+  const id = created.json.teacher.id;
+
+  // Today's registry is set to 28 through the roster edit (the same code path as the profile screen).
+  const edited = await s.call("PUT", `/api/roster/${id}`, { token: principal, body: { registry: 28 } });
+  assert.equal(edited.status, 200);
+  assert.ok(Number.isInteger(edited.json.teacher.registryUpdatedAt));
+
+  const first = await s.loginWith(created.json.account.email, created.json.tempPassword);
+  assert.equal(first.status, 200);
+  const token = first.json.token;
+  assert.equal((await s.call("POST", "/api/password", { token, body: { password: "Mrlopez-2026!" } })).status, 200);
+
+  const { incident } = (await s.call("POST", "/api/incidents", { token, body: report() })).json;
+  await hc(s.call, token, incident.id, { present: 28 });
+  const inc = (await s.call("GET", "/api/state", { token })).json.incidents.find((i) => i.id === incident.id);
+  assert.equal(inc.headcounts[0].expected, 28, "expected comes from the updated registry");
+  assert.notEqual(inc.accountability.status, "mismatch");
+  assert.equal(inc.accountability.status, "verified");
+  await s.close();
+});
+
+test("status steps only move forward and every step timestamp is locked after its first write", async () => {
+  let t = Date.now();
+  const s = await boot({ now: () => t, autoTick: false });
+  const teacher = await s.login("teacher", "t1");
+  const responder = await s.login("responder");
+  const principal = await s.login("principal");
+  const { incident } = (await s.call("POST", "/api/incidents", { token: teacher, body: report() })).json;
+  const id = incident.id;
+  assert.equal(incident.status, "SENT");
+  assert.deepEqual(
+    [incident.seenAt, incident.enRouteAt, incident.onSiteAt, incident.resolvedAt],
+    [null, null, null, null],
+    "nothing is stamped before a step happens",
+  );
+
+  // On site cannot skip the acknowledgement that comes before it.
+  const skipped = await s.call("POST", `/api/incidents/${id}/onsite`, { token: responder });
+  assert.equal(skipped.status, 409);
+  assert.equal(skipped.json.error, "out_of_order");
+  assert.equal((await s.call("GET", "/api/state", { token: responder })).json.incidents[0].status, "SENT", "the refused step changed nothing");
+
+  t += 1000;
+  const seen = (await s.call("POST", `/api/incidents/${id}/seen`, { token: responder })).json.incident;
+  assert.equal(seen.status, "SEEN");
+  assert.equal(seen.seenAt, t, "Seen is stamped when it happens");
+  t += 1000;
+  const seenAgain = (await s.call("POST", `/api/incidents/${id}/seen`, { token: responder })).json;
+  assert.equal(seenAgain.changed, false, "Seen is not re-triggered");
+  assert.equal(seenAgain.incident.seenAt, seen.seenAt, "the seen timestamp never moves");
+
+  t += 1000;
+  const ack = (await s.call("POST", `/api/incidents/${id}/ack`, {
+    token: responder, body: { mode: "walking", distanceKm: 1 },
+  })).json.incident;
+  assert.equal(ack.status, "EN_ROUTE");
+  assert.equal(ack.enRouteAt, t, "En route is stamped when it happens");
+  assert.equal(ack.responses.barangay.ackAt, t);
+  const logLength = ack.log.length;
+
+  t += 1000;
+  const reAck = await s.call("POST", `/api/incidents/${id}/ack`, {
+    token: responder, body: { mode: "vehicle", distanceKm: 3 },
+  });
+  assert.equal(reAck.json.changed, false, "an org that already acknowledged cannot acknowledge again");
+  const afterAck = reAck.json.incident;
+  assert.equal(afterAck.enRouteAt, ack.enRouteAt, "the en route timestamp is locked");
+  assert.equal(afterAck.responses.barangay.ackAt, ack.responses.barangay.ackAt, "the org acknowledgement time is locked");
+  assert.equal(afterAck.responses.barangay.mode, "walking", "the first transport and ETA are kept");
+  assert.equal(afterAck.log.length, logLength, "no duplicate en route entry is written");
+
+  t += 1000;
+  const onsite = (await s.call("POST", `/api/incidents/${id}/onsite`, { token: responder })).json.incident;
+  assert.equal(onsite.status, "ON_SITE");
+  assert.equal(onsite.onSiteAt, t, "On site is stamped when it happens");
+
+  t += 1000;
+  const onsiteAgain = (await s.call("POST", `/api/incidents/${id}/onsite`, { token: responder })).json;
+  assert.equal(onsiteAgain.changed, false, "On site is not re-triggered");
+  assert.equal(onsiteAgain.incident.onSiteAt, onsite.onSiteAt, "the on site timestamp never moves");
+
+  // The ticket-level steps never go backwards: an earlier action is a no-op.
+  const earlier = (await s.call("POST", `/api/incidents/${id}/ack`, { token: principal, body: {} })).json;
+  assert.equal(earlier.changed, false, "Acknowledge cannot be re-triggered after the ticket moved on");
+  assert.equal(earlier.incident.status, "ON_SITE", "the ticket stays on site");
+  assert.equal(earlier.incident.enRouteAt, onsite.enRouteAt);
+
+  t += 1000;
+  const done = (await s.call("POST", `/api/incidents/${id}/resolve`, { token: principal, body: { outcome: "resolved" } })).json.incident;
+  assert.equal(done.status, "RESOLVED");
+  assert.equal(done.resolvedAt, t, "Resolved is stamped when it happens");
+  assert.equal(done.metrics.toAckMs, done.enRouteAt - done.createdAt, "the recorded acknowledgment duration is fixed");
+  assert.equal(done.metrics.toOnSiteMs, done.onSiteAt - done.createdAt, "the recorded on-site duration is fixed");
+
+  t += 1000;
+  for (const action of ["ack", "onsite", "resolve"]) {
+    const late = await s.call("POST", `/api/incidents/${id}/${action}`, { token: principal, body: {} });
+    assert.equal(late.status, 409, `${action} after resolution is refused`);
+  }
+  const lateSeen = (await s.call("POST", `/api/incidents/${id}/seen`, { token: principal })).json;
+  assert.equal(lateSeen.changed, false, "Seen cannot reopen a closed ticket");
+  assert.equal(lateSeen.incident.seenAt, seen.seenAt);
+  const final = (await s.call("GET", "/api/state", { token: principal })).json.incidents.find((i) => i.id === id);
+  assert.deepEqual(
+    [final.seenAt, final.enRouteAt, final.onSiteAt, final.resolvedAt],
+    [seen.seenAt, ack.enRouteAt, onsite.onSiteAt, done.resolvedAt],
+    "no later call moved a single step timestamp",
+  );
+  await s.close();
+});
+
+// ---------------------------------------------------------------- incident records
+test("records: Principal and Admin get anonymised, aggregated history; other roles are refused", async () => {
+  const s = await boot();
+  const teacher = await s.login("teacher", "t1");
+  const responder = await s.login("responder");
+  const principal = await s.login("principal");
+  const parent = await s.login("parent", "Grade 3 - Sec A");
+  const admin = await s.loginSuper();
+
+  const a = (await s.call("POST", "/api/incidents", { token: teacher, body: report() })).json.incident;
+  await s.call("POST", `/api/incidents/${a.id}/ack`, { token: responder, body: { mode: "walking", distanceKm: 1 } });
+  await s.call("POST", `/api/incidents/${a.id}/onsite`, { token: responder });
+  await s.call("POST", `/api/incidents/${a.id}/resolve`, { token: responder, body: {} });
+
+  const b = (await s.call("POST", "/api/incidents", {
+    token: teacher,
+    body: report({ categoryId: "medical", subId: "heatstroke", populationId: "individual" }),
+  })).json.incident;
+  await s.call("POST", `/api/incidents/${b.id}/resolve`, { token: principal, body: {} });
+  await s.call("POST", `/api/incidents/${b.id}/archive`, { token: principal, body: { reason: "Duplicate" } });
+
+  // Responders never reach the records screen.
+  for (const [name, tok] of [["teacher", teacher], ["responder", responder], ["parent", parent]]) {
+    assert.equal((await s.call("GET", "/api/records", { token: tok })).status, 403, `${name} is refused`);
+  }
+
+  const res = await s.call("GET", "/api/records?period=sy", { token: principal });
+  assert.equal(res.status, 200, JSON.stringify(res.json));
+  assert.equal(res.json.period.id, "sy");
+  assert.equal(res.json.incidents.length, 2, "the explorer keeps resolved + archived real incidents");
+  assert.equal(res.json.analytics.total, 2, "analytics cover the selected school year");
+  assert.equal(res.json.archives.incidents.length, 1, "archived tickets live in the archive tab");
+  assert.equal(res.json.archives.accounts.length, 0, "the Principal never receives account records");
+
+  for (const row of res.json.incidents) {
+    assert.equal(row.reporterName, undefined, "no reporter name");
+    assert.equal(row.reporterId, undefined, "no reporter id");
+    assert.equal(row.reporterRole, "Teacher", "the reporter is a role label");
+    assert.equal(row.readOnly, true);
+    assert.ok(row.zone.label, "every record has a spatial zone");
+  }
+  assert.ok(res.json.analytics.avgAckMs > 0, "average time-to-acknowledge is computed");
+  assert.ok(res.json.analytics.avgOnSiteMs > 0, "average time-to-on-site is computed");
+  assert.equal(res.json.analytics.times.length, 4, "all four time-of-day buckets are returned");
+  assert.ok(res.json.analytics.zones.length >= 1);
+  assert.ok(res.json.analytics.hazards.length >= 1);
+  assert.deepEqual(Object.keys(res.json.analytics.tiers), ["CRITICAL", "HIGH", "MODERATE"]);
+  assert.ok(!JSON.stringify(res.json).includes("Ms. Reyes"), "the payload carries no personal name");
+
+  const adminRes = await s.call("GET", "/api/records", { token: admin });
+  assert.equal(adminRes.status, 200, "the Admin has read-only access");
+  assert.ok(Array.isArray(adminRes.json.archives.accounts), "the Admin receives archived accounts");
+
+  const empty = await s.call("GET", "/api/records?period=custom&from=2000-01-01&to=2000-01-02", { token: principal });
+  assert.equal(empty.json.analytics.total, 0, "a custom period outside the data has no analytics");
+  assert.equal(empty.json.incidents.length, 2, "the browser itself still lists every record");
+
+  assert.equal((await s.call("POST", "/api/records", { token: principal, body: {} })).status, 404, "there is no write route");
+  await s.close();
 });

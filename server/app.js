@@ -8,13 +8,20 @@ import path from "node:path";
 import crypto from "node:crypto";
 import zlib from "node:zlib";
 import * as D from "../shared/domain.js";
+import * as C from "../shared/campus.js";
+import * as R from "../shared/records.js";
 import { createStore } from "./store.js";
+import { createConfigService, ConfigError } from "./config.js";
+import { createRetention, archiveExpired, incidentExpired, accountExpired, drillExpired } from "./retention.js";
+import { validatePassword, POLICY_TEXT, PASSWORD_MIN, tempPasswordFromBytes } from "../shared/password.js";
+import { parseSection } from "../shared/section.js";
 
 class HttpError extends Error {
-  constructor(status, code, message) {
+  constructor(status, code, message, details = null) {
     super(message || code);
     this.status = status;
     this.code = code;
+    this.details = details;
   }
 }
 const bad = (msg, code = "bad_request") => new HttpError(400, code, msg);
@@ -42,42 +49,26 @@ const PRINCIPAL_ROOM = D.PRINCIPAL_ROOM;
 // Demo-mode credentials – only seeded when SEED_DEMO_INCIDENT / SEED_DEMO_ACCOUNTS is on.
 export const DEMO_PASSWORD = "Sinalhan-Demo-2026!";
 export const DEMO_ADMIN_EMAIL = "admin@sinalhanes.deped.ph";
-export const DEMO_ADMIN_PASSWORD = "Agap-Admin-2026!";
 
 const ACCOUNT_ROLES = new Set(["teacher", "principal", "responder", "parent", "super_admin"]);
+// A responder belongs to exactly one organisation — there is no shared account.
+const ACCOUNT_ORGS = new Set(D.RESPONDER_ORG_IDS);
 const ADMIN_ROLES = new Set(["super_admin", "principal"]); // role-based idle timeout: short for admins
-const PASSWORD_MIN = 8;
-
-// No composition rules (letters+digits+symbols are NOT required) – just length and
-// a blocklist of the passwords that get tried first anyway.
-const COMMON_PASSWORDS = new Set([
-  "password", "password1", "password12", "password123", "12345678", "123456789", "1234567890", "qwerty", "qwerty123",
-  "qwertyuiop", "letmein", "letmein123", "welcome", "welcome1", "admin", "admin123", "iloveyou", "iloveyou1",
-  "monkey", "dragon", "dragon123", "football", "baseball", "abc123", "passw0rd", "p@ssw0rd", "master",
-  "sunshine", "princess", "trustno1", "superman", "michael", "shadow", "11111111", "00000000", "aa123456",
-  "asdfgh", "asdfghjkl", "zxcvbn", "qazwsx", "changeme", "temp1234", "test1234", "school123", "teacher1",
-  "deped123", "sinalhan", "blanket", "flower", "chocolate", "internet",
-]);
-
 const normEmail = (v) => String(v ?? "").trim().toLowerCase();
 const emailOk = (e) => e.length <= 160 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e);
 const slugify = (s) => String(s).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
 
-function validatePassword(pw) {
-  const s = String(pw ?? "");
-  if (s.length < PASSWORD_MIN) return `Password must be at least ${PASSWORD_MIN} characters.`;
-  if (s.length > 200) return "Password must be 200 characters or fewer.";
-  if (COMMON_PASSWORDS.has(s.toLowerCase())) return "That password is too common. Please choose a different one.";
-  return null;
-}
+const passwordProblem = (pw, account = {}) => validatePassword(String(pw ?? ""), account);
 
-const TEMP_ALPHABET = "abcdefghjkmnpqrstuvwxyz23456789";
-function makeTempPassword() {
-  // Per-account temporary credential (readable, ≥20 chars) – always flagged must-change at first sign-in.
-  const bytes = crypto.randomBytes(20);
-  let out = "";
-  for (let i = 0; i < 20; i++) out += TEMP_ALPHABET[bytes[i] % TEMP_ALPHABET.length];
-  return `${out.slice(0, 5)}-${out.slice(5, 10)}-${out.slice(10, 15)}-${out.slice(15, 20)}`;
+// Per-account temporary credential (readable, ≥20 chars) – always flagged must-change at
+// first sign-in. The generator satisfies the shared policy by construction; the loop only
+// guards the account-specific rules (email local-part / account name).
+function makeTempPassword(account = {}) {
+  for (let i = 0; i < 50; i++) {
+    const pw = tempPasswordFromBytes(crypto.randomBytes(48));
+    if (!passwordProblem(pw, account)) return pw;
+  }
+  throw new Error("Could not generate a policy-compliant temporary password.");
 }
 
 export function createApp(opts = {}) {
@@ -86,7 +77,8 @@ export function createApp(opts = {}) {
     secret = crypto.randomBytes(32).toString("hex"),
     accessCode = "",
     staticDir = "",
-    allowReset = true,
+    allowReset = false,
+    schoolPhone = "",
     seedDemoIncident = false,
     seedDemoAccounts = false,
     superAdminEmail = "",
@@ -105,6 +97,9 @@ export function createApp(opts = {}) {
   } = opts;
 
   const store = createStore({ dataDir, onPersistError: (...a) => log(...a) });
+  // Placeholder retention periods (see server/retention.js): read once at boot,
+  // invalid env values fall back to the defaults with a warning.
+  const retention = createRetention({ env: process.env, warn: (msg) => log(msg) });
   const sseClients = new Set();
   const buckets = new Map();
   const gzCache = new Map();
@@ -112,6 +107,16 @@ export function createApp(opts = {}) {
   // ---------------------------------------------------------------- helpers
   const clean = (v, max) => String(v ?? "").replace(/\s+/g, " ").trim().slice(0, max);
   const sections = () => [...new Set(store.db.roster.map((r) => r.section).filter(Boolean))];
+
+  // Bookkeeping timeline entries (archive, restore, hide, purge, anonymise, data
+  // request) are INTERNAL: only the Principal and the System Admin receive them.
+  // Older files are tagged by action name in store.normalize().
+  const INTERNAL_LOG_ACTIONS = new Set([
+    "archived", "auto_archived", "restored", "hidden", "unhidden", "purged", "anonymized", "data_request",
+  ]);
+  const isInternalLog = (l) => Boolean(l && l.internal) || INTERNAL_LOG_ACTIONS.has(String(l && l.action));
+  const operationalLog = (i) => (Array.isArray(i.log) ? i.log : []).filter((l) => !isInternalLog(l));
+  const keepsInternal = (user) => user.role === "principal" || user.role === "super_admin";
 
   const SESSION_TTL_MS = sessionDays * 24 * 3600 * 1000;
 
@@ -139,11 +144,108 @@ export function createApp(opts = {}) {
   const clientIp = (req) => String(req.headers["x-forwarded-for"] || req.socket.remoteAddress || "?").split(",")[0].trim();
 
   // Append-only audit trail. NEVER put passwords, hashes or tokens in here.
-  function audit(action, { by = null, target = null, detail = "", req = null } = {}) {
-    store.db.audit.push({ at: now(), action, by, target, detail, ip: req ? clientIp(req) : "" });
+  // New entries store IDS (actor id, target id) plus role/org and the reason —
+  // never a person's name.
+  function audit(action, { by = null, target = null, detail = "", req = null, role = null, org = null, reason = null } = {}) {
+    const entry = { at: now(), action, by, target, detail, ip: req ? clientIp(req) : "" };
+    if (role) entry.role = role;
+    if (org) entry.org = org;
+    if (reason) entry.reason = reason;
+    store.db.audit.push(entry);
     if (store.db.audit.length > 1000) store.db.audit.splice(0, store.db.audit.length - 800);
     store.save();
   }
+
+  /** Organisation a role belongs to — stored on audit entries instead of a name. */
+  const orgOf = (acc) =>
+    acc && acc.role === "responder" ? (D.orgLabel(acc.org) || "Responder") : D.SCHOOL.name;
+
+  // ---- audit labels -------------------------------------------------------
+  // Entries keep storing ids. The Admin view resolves them to something a
+  // person can read, while the raw id stays available as the "Reference".
+  const maskEmail = (e) => {
+    const [name, domain] = String(e ?? "").split("@");
+    return domain ? `${name.slice(0, 1)}***@${domain}` : "****";
+  };
+  const shortTicket = (id) => `Ticket ${String(id).replace(/^INC-/, "#")}`;
+  const friendlyPlace = (room) => {
+    const text = String(room ?? "").replace(/\s*\(reassigned from\s+.*\)\s*$/i, "").trim();
+    const parts = text.split("|").map((x) => x.trim()).filter(Boolean).map((x) => {
+      const m = /^Flr\s+(\d+)$/i.exec(x);
+      return m ? `Floor ${m[1]}` : x;
+    });
+    return parts.join(", ") || "School";
+  };
+  function accountForRef(ref) {
+    const raw = String(ref ?? "").trim();
+    if (!raw) return null;
+    return accountById(raw) || findAccount(raw.toLowerCase()) || store.db.accounts.find((a) => a.teacherId === raw) || null;
+  }
+  function labelAccount(acc) {
+    if (!acc) return null;
+    if (acc.status === "purged") return "Deleted account";
+    const roleLabel = { teacher: "Teacher", principal: "Principal", super_admin: "Admin", responder: "Responder", parent: "Parent/PTA" }[acc.role] || acc.role;
+    return `${acc.email} (${roleLabel}, ${orgOf(acc)})`;
+  }
+  function actorLabelFor(ref) {
+    const raw = String(ref ?? "").trim();
+    if (!raw) return "System";
+    return labelAccount(accountForRef(raw)) || raw;
+  }
+  function targetLabelFor(ref) {
+    const raw = String(ref ?? "").trim();
+    if (!raw) return null;
+    const parts = raw.split(/,\s*/).filter(Boolean);
+    if (parts.length > 1) return parts.map((x) => targetLabelFor(x)).join(", ");
+    const acc = accountForRef(raw);
+    if (acc) return labelAccount(acc);
+    const inc = store.db.incidents.find((i) => i.id === raw);
+    if (inc) return inc.anonymizedAt ? `${shortTicket(raw)} (anonymised)` : `${shortTicket(raw)} · ${inc.subLabel} · ${friendlyPlace(inc.room)}`;
+    return raw;
+  }
+
+  // Admin configuration: versioned records, cached active version, safe fallback.
+  // ESCALATION_MINUTES from the environment only seeds the very first version.
+  const config = createConfigService({
+    store,
+    audit: (action, details) => audit(action, details),
+    now,
+    defaults: { escalation: envEscalation() },
+  });
+  function envEscalation() {
+    const [a, b] = Array.isArray(escalationMinutes) ? escalationMinutes : [];
+    const ok = (n) => Number.isInteger(n) && n >= 1 && n <= 60;
+    return ok(a) && ok(b) && a < b ? { barangayMinutes: a, cdrrmoMinutes: b } : undefined;
+  }
+  config.ensure();
+  // Every ticket scores against its own stamped version; legacy rows fall back to the active one.
+  const cfgFor = (inc) => config.forTicket(inc);
+
+  // Re-entering the current password for a sensitive write. Wrong attempts share the
+  // account lockout counter with sign-in and are audit-logged.
+  function requireReentry(account, password, req, scope) {
+    const t = now();
+    if (account.lockedUntil > t) {
+      const mins = Math.max(1, Math.ceil((account.lockedUntil - t) / 60000));
+      throw new HttpError(429, "account_locked", `Too many failed attempts. This account is locked for ${mins} more minute${mins === 1 ? "" : "s"}.`);
+    }
+    if (typeof password !== "string" || !password || !checkPassword(password, account.pwSalt, account.pwHash)) {
+      account.failed += 1;
+      if (account.failed >= lockoutFailures) {
+        account.lockedUntil = t + lockoutMinutes * 60000;
+        audit("account_locked", { target: account.email, detail: `${account.failed} failed password re-entries`, req });
+      }
+      store.save();
+      audit(`${scope}_failed`, { target: account.email, detail: "wrong current password", req });
+      throw new HttpError(401, "invalid_password", "Your password is incorrect.");
+    }
+    account.failed = 0;
+    account.lockedUntil = 0;
+  }
+
+  // Real tickets still open – a configuration change can silently reprioritise them,
+  // so saving while they exist needs an explicit confirmation.
+  const openRealTickets = () => store.db.incidents.filter((i) => i.status !== "RESOLVED" && !i.drill).length;
 
   function sign(payload) {
     const body = Buffer.from(JSON.stringify(payload)).toString("base64url");
@@ -176,21 +278,29 @@ export function createApp(opts = {}) {
     if (!acc || acc.status !== "active") return null;
     if (acc.role === "super_admin") return { id: acc.id, role: "super_admin", name: acc.name, subtitle: acc.email };
     if (acc.role === "principal") return { id: acc.id, role: "principal", name: acc.name, subtitle: acc.email };
-    if (acc.role === "responder") return { id: acc.id, role: "responder", name: acc.name, subtitle: "Barangay + CDRRMO liaison" };
+    if (acc.role === "responder") {
+      const org = D.orgById(acc.org) ? acc.org : null;
+      return { id: acc.id, role: "responder", name: acc.name, org, subtitle: `Responder · ${D.orgLabel(org) || "Unassigned org"}` };
+    }
     if (acc.role === "teacher") {
       const t = db.roster.find((r) => r.id === acc.teacherId);
       if (!t || t.status !== "active") return null;
-      return { id: t.id, role: "teacher", name: t.name, section: t.section, room: t.room, gps: t.gps, registry: t.registry, subtitle: `Teacher · ${t.section}` };
+      return { id: t.id, role: "teacher", name: t.name, section: t.section, room: t.room, gps: t.gps, registry: t.registry, registryUpdatedAt: t.registryUpdatedAt ?? null, subtitle: `Teacher · ${t.section}` };
     }
     if (acc.role === "parent" && acc.section)
       return { id: acc.id, role: "parent", name: acc.name, section: acc.section, subtitle: `Parent/PTA · ${acc.section}` };
     return null;
   }
 
-  function newAccount({ email, role, name, password, mustChange = false, temp = false, id = null, teacherId = null, section = null }) {
+  function newAccount({ email, role, name, password, mustChange = false, temp = false, id = null, teacherId = null, section = null, org = null }) {
     const { salt, hash } = hashPassword(password);
+    const structured = parseSection(section);
     const acc = {
       id: id || store.nextId("acc"), email, role, name, teacherId, section,
+      // Only responders carry an organisation; nobody else belongs to a dispatch org.
+      org: role === "responder" ? (ACCOUNT_ORGS.has(org) ? org : null) : null,
+      // Structured grade (K|1..6) + section name derived from the stored string.
+      grade: structured.grade, sectionName: structured.sectionName,
       pwSalt: salt, pwHash: hash, status: "active", mustChange, temp,
       failed: 0, lockedUntil: 0, createdAt: now(), lastLoginAt: null,
     };
@@ -200,12 +310,31 @@ export function createApp(opts = {}) {
 
   function publicAccount(a, t = now()) {
     const roster = a.teacherId ? store.db.roster.find((r) => r.id === a.teacherId) : null;
+    // A purged account exposes nothing personal: no section, no roster details.
+    const purged = a.status === "purged";
+    const section = purged ? null : a.role === "parent" ? a.section : roster ? roster.section : a.section || null;
+    const structured = parseSection(section);
     return {
       id: a.id, email: a.email, role: a.role, name: a.name,
-      section: a.role === "parent" ? a.section : roster ? roster.section : a.section || null,
+      // Responders show which organization they answer for; other roles are the school's.
+      org: a.role === "responder" ? (a.org ?? null) : null,
+      orgLabel: a.role === "responder" ? (D.orgLabel(a.org) || "Unassigned org") : D.SCHOOL.name,
+      section,
+      grade: structured.grade, sectionName: structured.sectionName,
       status: a.status, mustChange: Boolean(a.mustChange), temp: Boolean(a.temp),
       locked: a.lockedUntil > t, lockedUntil: a.lockedUntil, failed: a.failed,
       lastLoginAt: a.lastLoginAt, createdAt: a.createdAt,
+      archivedAt: a.archivedAt ?? null, archiveReason: a.archiveReason ?? null, archivedAuto: Boolean(a.archivedAuto), purgedAt: a.purgedAt ?? null,
+      // Admin purge is offered only once the placeholder retention period has passed.
+      purgeEligible: a.status === "archived" && accountExpired(a, t, retention.accountDays),
+      teacher: a.teacherId && !purged ? {
+        id: roster?.id ?? a.teacherId,
+        name: roster?.name ?? a.name,
+        section: roster?.section ?? null,
+        room: roster?.room ?? null,
+        gps: roster?.gps ?? null,
+        registry: roster?.registry ?? null,
+      } : null,
     };
   }
 
@@ -310,9 +439,25 @@ export function createApp(opts = {}) {
     res.end(data);
   }
 
+  // A live change notification never carries the identity of a ticket the
+  // client may not see. The version still bumps, so the client refetches its
+  // own filtered state (a whole-school alert reaches a teacher as a task).
+  function viewerForAccount(accountId) {
+    const acc = accountById(accountId);
+    return acc ? userFromAccount(acc) : null;
+  }
+
   function broadcast(evt) {
-    const payload = `event: change\ndata: ${JSON.stringify({ version: store.db.version, ...evt })}\n\n`;
     for (const c of sseClients) {
+      // A per-ticket event reaches ONLY that ticket's audience. Everyone else
+      // gets the version bump alone: no event type, no id, no status, no title.
+      let safe = evt;
+      if (evt && evt.id) {
+        const inc = store.db.incidents.find((i) => i.id === evt.id);
+        const viewer = viewerForAccount(c.accountId);
+        if (!inc || !viewer || (!canSee(inc, viewer) && !headcountAccess(inc, viewer).visible)) safe = {};
+      }
+      const payload = `event: change\ndata: ${JSON.stringify({ version: store.db.version, ...safe })}\n\n`;
       try { c.res.write(payload); } catch { sseClients.delete(c); }
     }
   }
@@ -326,6 +471,87 @@ export function createApp(opts = {}) {
     }
   }
 
+  // ------------------------------------------------- archive (never delete)
+  // ARCHIVE = organisation-wide "leave the live views": sessions die, sign-in is
+  // blocked with the generic message, rosters and role lists hide the account.
+  // Reversible through restore. Used by the Principal's roster and the Admin console.
+  function archiveAccount(acc, { by = null, role = null, reason = "", req = null }) {
+    if (acc.status === "archived") throw new HttpError(409, "already_archived", "That account is already archived.");
+    if (acc.status === "purged") throw new HttpError(409, "already_purged", "That account has been purged.");
+    if (acc.id === by) throw bad("You cannot archive your own account.");
+    if (acc.role === "super_admin" && !store.db.accounts.some((a) => a.id !== acc.id && a.role === "super_admin" && a.status === "active"))
+      throw new HttpError(409, "last_admin", "At least one Super Admin account must stay active.");
+    const t = now();
+    acc.status = "archived";
+    acc.archivedAt = t;
+    acc.archivedBy = by ?? null;
+    acc.archiveReason = clean(reason, 200) || null;
+    const revoked = revokeSessions(acc.id);
+    store.save();
+    audit("account_archived", {
+      by, role, org: orgOf(acc), target: acc.id, reason: acc.archiveReason,
+      detail: `${revoked} session(s) revoked`, req,
+    });
+    return revoked;
+  }
+
+  /** Admin restore: active again and forced to set a new password at next sign-in. */
+  function restoreAccount(acc, { by = null, role = null, req = null }) {
+    if (acc.status !== "archived") throw bad("Only an archived account can be restored.");
+    acc.status = "active";
+    acc.mustChange = true;
+    acc.archivedAt = null;
+    acc.archivedBy = null;
+    acc.archiveReason = null;
+    store.save();
+    audit("account_restored", { by, role, org: orgOf(acc), target: acc.id, req, detail: "password change required at next sign-in" });
+    return acc;
+  }
+
+  /**
+   * PURGE — irreversible, Admin only, typed confirmation. Personal data is
+   * erased; the id and role/organisation are kept so audit entries and timelines
+   * still resolve. `byRoute` enforces the retention eligibility that a data
+   * request deliberately bypasses.
+   */
+  function purgeAccount(acc, { by = null, role = null, reason = "", confirm = null, req = null, byRoute = true }) {
+    if (confirm !== "PURGE") throw bad("Type PURGE to confirm. This cannot be undone.", "confirm_required");
+    if (byRoute && acc.status !== "archived")
+      throw new HttpError(409, "not_eligible", "Only an archived account can be purged.");
+    if (byRoute && !accountExpired(acc, now(), retention.accountDays))
+      throw new HttpError(409, "not_eligible", `This account is still inside its ${retention.accountDays}-day retention period.`);
+    const t = now();
+    const roster = acc.teacherId ? store.db.roster.find((r) => r.id === acc.teacherId) : null;
+    // Personal data out — a non-identifying tombstone stays where the email was.
+    acc.name = "Purged account";
+    acc.email = `purged-${acc.id}@removed.invalid`;
+    acc.section = null;
+    acc.grade = "";
+    acc.sectionName = "";
+    acc.pwSalt = "";
+    acc.pwHash = "";
+    acc.mustChange = false;
+    acc.temp = false;
+    acc.failed = 0;
+    acc.lockedUntil = 0;
+    acc.hiddenIncidentIds = [];
+    acc.status = "purged";
+    acc.purgedAt = t;
+    if (roster) {
+      roster.name = "Purged account";
+      roster.room = "";
+    }
+    const sessions = store.db.sessions.filter((s) => s.accountId === acc.id).length;
+    store.db.sessions = store.db.sessions.filter((s) => s.accountId !== acc.id);
+    closeStreamsFor(acc.id);
+    store.save();
+    audit("account_purged", {
+      by, role, org: orgOf(acc), target: acc.id, reason: clean(reason, 200) || null,
+      detail: `${sessions} session(s) erased`, req,
+    });
+    return acc;
+  }
+
 
   function commit(evt) {
     store.prune(now(), historyDays);
@@ -336,12 +562,105 @@ export function createApp(opts = {}) {
   // ------------------------------------------------------------ role views
   const isHiddenFor = (i, user) => (i.hiddenBy || []).includes(user.id);
 
+  /**
+   * ONE description of who a ticket belongs to. Every list, stream and
+   * notification is derived from this; the client is never the privacy boundary.
+   */
+  function audienceOf(i) {
+    return {
+      drill: Boolean(i.drill),
+      scope: drillScopeOf(i),
+      reporters: Array.isArray(i.reporterIds) ? i.reporterIds : i.reporterId ? [i.reporterId] : [],
+      section: ownerSectionOf(i),
+      wholeSchool: i.linkedSection === "ALL",
+      active: i.status !== "RESOLVED" && !i.archivedAt,
+    };
+  }
+
   function canSee(i, user) {
     if (user.role === "super_admin") return false; // console-only role: accounts + audit, never incident data
-    if (user.role === "principal" || user.role === "responder") return true;
-    if (user.role === "teacher") return i.reporterIds.includes(user.id) || i.linkedSection === user.section || i.linkedSection === "ALL";
-    if (i.drill) return false; // parents are not alarmed by drills
-    return i.linkedSection === user.section || i.linkedSection === "ALL";
+    if (user.role === "principal") return true;
+    const a = audienceOf(i);
+    // A school-only drill is staff-only: responders never see it. A simulation
+    // drill does reach them, so they can rehearse acknowledge and on-site.
+    if (user.role === "responder") return !a.drill || a.scope === "simulation";
+    if (user.role === "teacher") {
+      // Drill tickets stay with the teachers who took part, never the whole section.
+      if (a.drill) return a.reporters.includes(user.id);
+      if (a.reporters.includes(user.id)) return true;
+      // The owner of the room/class the ticket concerns. A whole-school alert is
+      // never a report in a teacher's list — it reaches them only as a live
+      // Headcount task (see headcountTasksFor).
+      return Boolean(user.section) && a.section === user.section;
+    }
+    // Parents: the class their child is in (the affected class, never the
+    // reporter's), and a whole-school alert ONLY while it is active. Drills
+    // never reach a parent.
+    if (a.drill) return false;
+    if (a.wholeSchool) return a.active;
+    return Boolean(user.section) && a.section === user.section;
+  }
+
+  /**
+   * The class a ticket belongs to. A classroom inherits the section of the
+   * teacher who owns that room (stamped on the ticket at creation); a common
+   * area keeps the class chosen on the report. Whole floor/school stays "ALL".
+   */
+  /** "school" (staff only) or "simulation" (responders take part). */
+  function drillScopeOf(i) {
+    return i.drillScope === "simulation" ? "simulation" : "school";
+  }
+
+  function ownerSectionOf(i) {
+    if (i.linkedSection) return i.linkedSection;
+    const owner = i.room ? store.db.roster.find((r) => r.status === "active" && r.room === i.room) : null;
+    return owner?.section || null;
+  }
+
+  /**
+   * ONE function of (ticket, viewer) for headcount rights and visibility.
+   * Only the owner of the class counts (the Principal may count any section);
+   * a reporter who is not the owner sees NO headcount UI at all, not even
+   * read-only. Closed tickets stay readable to the owner but are read-only.
+   */
+  function headcountAccess(i, user) {
+    const sections = expectedSections(i);
+    const required = sections.length > 0;
+    const open = i.status !== "RESOLVED" && !i.archivedAt;
+    let section = null;
+    if (required && user.role === "teacher" && user.section && sections.includes(user.section)) section = user.section;
+    if (required && user.role === "principal") section = sections.length === 1 ? sections[0] : null;
+    const registry = section ? (store.db.roster.find((r) => r.section === section)?.registry ?? null) : null;
+    const visible = required && (user.role === "principal" || (user.role === "teacher" && Boolean(user.section) && sections.includes(user.section)));
+    return {
+      required,
+      visible,
+      canRecord: visible && open && Boolean(section || user.role === "principal"),
+      ownerSection: sections.length === 1 ? sections[0] : null,
+      sections,
+      section,
+      // The OWNER's registry — never the reporter's.
+      registry,
+    };
+  }
+
+  /**
+   * A teacher's headcount work: their own class, plus a whole-school alert
+   * while it is active. A count they submitted stays readable after closing.
+   */
+  function headcountTasksFor(user) {
+    if (user.role !== "teacher" || !user.section) return [];
+    return store.db.incidents
+      .filter((i) => !i.archivedAt && !isHiddenFor(i, user))
+      .filter((i) => {
+        const access = headcountAccess(i, user);
+        if (!access.visible) return false;
+        if (i.status !== "RESOLVED") return true;
+        return i.headcounts.some((h) => h.section === user.section);
+      })
+      .sort((a, b) => b.createdAt - a.createdAt)
+      .slice(0, 60)
+      .map((i) => publicIncident(i, user));
   }
 
   // A reporter may cancel their own ticket until a responder is on site, unless other people also reported it.
@@ -355,14 +674,22 @@ export function createApp(opts = {}) {
     );
   }
 
-  // Which class sections must report a headcount for this incident.
-  function expectedSections(i) {
-    if (i.linkedSection !== "ALL") return [i.linkedSection];
+  // Headcount verification applies only to group-scope reports: an individual
+  // report needs none, a classroom report needs its own section, and a
+  // whole-school report needs every active section.
+  function activeSections() {
     return [...new Set(store.db.roster.filter((r) => r.status === "active").map((r) => r.section))];
+  }
+  function expectedSections(i) {
+    const pop = D.populationIdOf(i);
+    if (pop === "individual") return [];
+    if (pop === "classroom" && i.linkedSection && i.linkedSection !== "ALL") return [i.linkedSection];
+    return activeSections();
   }
 
   function accountabilityOf(i) {
     const need = expectedSections(i);
+    if (need.length === 0) return { status: "not_required", reported: 0, total: 0 };
     const have = need.filter((sec) => i.headcounts.some((h) => h.section === sec));
     const mismatch = i.headcounts.some((h) => h.present !== h.expected);
     let status = "pending";
@@ -385,6 +712,107 @@ export function createApp(opts = {}) {
     };
   }
 
+  // ---------------------------------------------------- records & analytics
+  // The records screen is read-only for the Principal and the Admin. Its rows
+  // never carry a reporter name or id — only the role label.
+  const REPORTER_ROLE_LABEL = {
+    teacher: "Teacher",
+    principal: "Principal",
+    super_admin: "Admin",
+    responder: "Responder",
+    parent: "Parent/PTA",
+  };
+
+  function reporterRoleLabel(id) {
+    if (store.db.roster.some((r) => r.id === id)) return "Teacher";
+    const acc = accountById(id);
+    return (acc && REPORTER_ROLE_LABEL[acc.role]) || "Unknown";
+  }
+
+  /** One anonymised record row: no reporter name, id, email or password data. */
+  function recordEntry(i) {
+    const log = Array.isArray(i.log) ? i.log : [];
+    return {
+      id: i.id,
+      category: i.category,
+      categoryLabel: i.categoryLabel,
+      subLabel: i.subLabel,
+      room: i.room,
+      zone: R.zoneOf(i.room),
+      tier: R.recordTier(i),
+      createdAt: i.createdAt,
+      resolvedAt: i.resolvedAt ?? null,
+      status: i.status,
+      outcome: i.outcome,
+      drill: Boolean(i.drill),
+      populationLabel: i.populationLabel ?? null,
+      confirmedBy: i.confirmedBy ?? 1,
+      reporterRole: i.anonymizedAt ? "Anonymised" : reporterRoleLabel(i.reporterId),
+      escalationLevel: i.escalationLevel ?? 0,
+      escalated: (i.escalationLevel ?? 0) > 0 || log.some((l) => l.action === "escalated"),
+      ackMs: i.enRouteAt ? i.enRouteAt - i.createdAt : null,
+      onSiteMs: i.onSiteAt ? i.onSiteAt - i.createdAt : null,
+      timeOfDay: R.timeBucket(i.createdAt),
+      // The hazard log is the only historical evidence that Hazard Mode applied
+      // to this ticket; a later OFF entry must not erase that fact.
+      hazardMode: log.some((l) => l.action === "hazard" && !/\bOFF\b/.test(String(l.note ?? ""))),
+      headcounts: (i.headcounts ?? []).map((h) => ({ section: h.section, expected: h.expected, present: h.present, at: h.at })),
+      timeline: log.map((l) => ({ at: l.at, action: l.action, role: l.role, note: l.note ?? "" })),
+      archivedAt: i.archivedAt ?? null,
+      archivedAuto: Boolean(i.archivedAuto),
+      archiveReason: i.archiveReason ?? null,
+      anonymized: Boolean(i.anonymizedAt),
+      // Read-only detail on the records screen: how the place was set and each
+      // responder organization's own progress (never a person's name).
+      locationSetBy: i.locationSetBy || "saved_room",
+      locationNote: i.locationNote || null,
+      responses: publicResponses(i),
+      // An Admin may purge any archived record they still hold; the typed
+      // confirmation and a reason are the gate (the retention dates are only
+      // reported as guidance). An already anonymised record is not offered again.
+      purgeEligible: Boolean(i.archivedAt) && !i.anonymizedAt,
+      readOnly: true,
+    };
+  }
+
+  function drillEntry(d) {
+    return {
+      id: d.id,
+      label: d.label,
+      startedAt: d.startedAt,
+      endedAt: d.endedAt,
+      scope: d.scope === "simulation" ? "simulation" : "school",
+      incidents: d.incidents,
+      avgToReportMs: d.avgToReportMs ?? null,
+      avgToAckMs: d.avgToAckMs ?? null,
+      avgToOnSiteMs: d.avgToOnSiteMs ?? null,
+      avgToHeadcountMs: d.avgToHeadcountMs ?? null,
+      avgInteractions: d.avgInteractions ?? null,
+      rows: Array.isArray(d.rows)
+        ? d.rows.map((r) => ({
+            id: r.id,
+            subLabel: r.subLabel,
+            toReportMs: r.toReportMs ?? null,
+            toAckMs: r.toAckMs ?? null,
+            toOnSiteMs: r.toOnSiteMs ?? null,
+            toHeadcountMs: r.toHeadcountMs ?? null,
+            interactions: r.interactions ?? 0,
+          }))
+        : [],
+    };
+  }
+
+  /** Every organization's response, always both keys (null until the org acts). */
+  function publicResponses(i) {
+    const rs = i.responses && typeof i.responses === "object" ? i.responses : {};
+    const out = {};
+    for (const o of D.RESPONDER_ORGS) {
+      const r = rs[o.id];
+      out[o.id] = r ? { ...r, org: o.id, orgLabel: o.label } : null;
+    }
+    return out;
+  }
+
   function publicIncident(i, user) {
     const role = user.role;
     const acc = accountabilityOf(i);
@@ -397,8 +825,15 @@ export function createApp(opts = {}) {
       room: i.room,
       createdAt: i.createdAt,
       status: i.status,
+      drillScope: i.drill ? drillScopeOf(i) : null,
+      // Step timestamps — audit facts, never rewritten once recorded.
+      seenAt: i.seenAt ?? null,
+      acknowledgedAt: i.acknowledgedAt ?? null,
+      enRouteAt: i.enRouteAt ?? null,
+      onSiteAt: i.onSiteAt ?? null,
       confirmedBy: i.confirmedBy,
       linkedSection: i.linkedSection,
+      populationId: D.populationIdOf(i),
       populationLabel: i.populationLabel,
       outcome: i.outcome,
       resolvedAt: i.resolvedAt,
@@ -406,6 +841,9 @@ export function createApp(opts = {}) {
       escalationLevel: i.escalationLevel,
       eta: i.eta,
       accountability: acc,
+      // One server-computed answer to "can this viewer count, and against which
+      // registry?" — the client never decides headcount visibility on its own.
+      headcount: headcountAccess(i, user),
       // Parents only ever see aggregate counts for their own section.
       headcounts: role === "parent" ? i.headcounts.filter((h) => h.section === user.section).map((h) => ({ section: h.section, expected: h.expected, present: h.present, at: h.at })) : i.headcounts,
     };
@@ -416,49 +854,96 @@ export function createApp(opts = {}) {
       locationRisk: i.locationRisk,
       baseLocationRisk: i.baseLocationRisk,
       timeSensitivity: i.timeSensitivity,
-      hazardApplied: D.scoreIncident(i, { hazardActive: store.db.modes.hazard.active }).hazardApplied,
+      tier: D.bandFor(i.score, i.status, i.overrideReasons),
+      hazardApplied: D.scoreIncident(i, { hazardActive: store.db.modes.hazard.active, config: cfgFor(i) }).hazardApplied,
       drill: i.drill,
       reporterName: i.reporterName,
       reporterId: i.reporterId,
+      // A teacher only needs their own reporter list to label the relation on a row.
+      reporterIds: role === "teacher" ? [...(i.reporterIds ?? [])] : undefined,
       acknowledgedBy: i.acknowledgedBy,
+      // Which org first acknowledged (the headline status names it) and every
+      // org's own response, ETA included. Legacy rows have no responses yet.
+      acknowledgedByOrg: i.acknowledgedByOrg ?? null,
+      responses: publicResponses(i),
       resolvedBy: i.resolvedBy,
-      log: i.log,
+      resolvedByOrg: i.resolvedByOrg ?? null,
+      // The operational timeline only — archive bookkeeping stays internal.
+      log: keepsInternal(user) ? i.log : operationalLog(i),
       metrics: metricsOf(i),
       canCancel: canCancel(i, user),
+      // Configuration version that scored this ticket (weights themselves never ship).
+      configId: i.configId || null,
+      configVersion: i.configVersion || null,
+      // Final location of the ticket and how it was established (GPS-detected,
+      // selected by the reporter, or the saved room).
+      locationKind: i.locationKind || "saved",
+      locationSetBy: i.locationSetBy || "saved_room",
+      locationNote: i.locationNote || null,
     };
     return { ...base, ...extra };
   }
 
   function publicModes(user) {
     const m = store.db.modes;
-    const out = { hazard: m.hazard, route: m.route, drill: { active: m.drill.active, label: m.drill.label, startedAt: m.drill.startedAt } };
+    const scope = m.drill.scope === "simulation" ? "simulation" : "school";
+    // Drills are never announced to parents. A school-only drill is not
+    // announced to responders either — the notification audience is the ticket
+    // audience.
+    const drillVisible = user.role !== "parent" && (user.role !== "responder" || scope === "simulation");
+    const out = {
+      hazard: m.hazard,
+      route: m.route,
+      drill: {
+        active: drillVisible && m.drill.active,
+        label: drillVisible ? m.drill.label : "",
+        startedAt: drillVisible ? m.drill.startedAt : null,
+        scope,
+      },
+    };
     if (user.role === "parent") out.route = { status: m.route.status };
     return out;
   }
 
   function stateFor(user) {
     const db = store.db;
-    const list = db.incidents.filter((i) => canSee(i, user) && !isHiddenFor(i, user));
+    // Archived tickets are excluded from the live state for EVERY role (they live
+    // behind GET /api/incidents/archive), and hidden ones from that user's lists.
+    const list = db.incidents.filter((i) => !i.archivedAt && canSee(i, user) && !isHiddenFor(i, user));
     const incidents = [...list].sort((a, b) => b.createdAt - a.createdAt).map((i) => publicIncident(i, user));
+    // Records this user hid: delivered separately so the "Hidden" chip can offer Unhide.
+    const hiddenIncidents = db.incidents
+      .filter((i) => !i.archivedAt && isHiddenFor(i, user) && canSee(i, user))
+      .sort((a, b) => b.createdAt - a.createdAt)
+      .map((i) => publicIncident(i, user));
     let roster = [];
-    if (user.role === "principal") roster = db.roster;
+    // Archived accounts leave every roster and role list (they stay readable in the Admin console).
+    const archivedTeachers = new Set(db.accounts.filter((a) => (a.status === "archived" || a.status === "purged") && a.teacherId).map((a) => a.teacherId));
+    if (user.role === "principal") roster = db.roster.filter((r) => !archivedTeachers.has(r.id));
     if (user.role === "teacher") roster = db.roster.filter((r) => r.id === user.id);
     return {
       version: db.version,
       serverTime: now(),
       me: user,
       incidents,
+      // Teachers only: live headcount work, including whole-school alerts that
+      // deliberately stay out of their lists.
+      headcountTasks: headcountTasksFor(user),
+      hidden: hiddenIncidents,
       roster,
       sections: user.role === "principal" ? sections() : [],
       modes: publicModes(user),
       drills: user.role === "principal" ? db.drills.slice(-10).reverse() : [],
-      rules: { escalationMinutes, tiers: D.ESCALATION_TIERS, hazardBoost: D.HAZARD_LOCATION_BOOST },
+      // Scoring internals (weights, thresholds) are deliberately absent: they are only
+      // available to Super Admin through /api/admin/config.
     };
   }
 
   // Single place where score / location risk / time sensitivity / override flags are (re)computed.
+  // A ticket always uses the configuration version stamped on it at creation, so a later
+  // configuration change can never alter an existing ticket's score.
   function rescore(inc) {
-    const r = D.scoreIncident(inc, { hazardActive: store.db.modes.hazard.active });
+    const r = D.scoreIncident(inc, { hazardActive: store.db.modes.hazard.active, config: cfgFor(inc) });
     inc.locationRisk = r.locationRisk;
     inc.timeSensitivity = r.timeSensitivity;
     inc.score = r.score;
@@ -473,8 +958,9 @@ export function createApp(opts = {}) {
     for (const inc of store.db.incidents) {
       if (inc.status !== "SENT" && inc.status !== "SEEN") continue;
       const age = t - inc.createdAt;
+      const limits = cfgFor(inc).escalationMinutes;
       let level = 0;
-      escalationMinutes.forEach((m, idx) => { if (age >= m * 60000) level = idx + 1; });
+      limits.forEach((m, idx) => { if (age >= m * 60000) level = idx + 1; });
       if (level > inc.escalationLevel) {
         const before = inc.score;
         inc.escalationLevel = level;
@@ -482,7 +968,7 @@ export function createApp(opts = {}) {
         rescore(inc);
         inc.log.push({
           at: t, by: "System", role: "system", action: "escalated",
-          note: `No acknowledgement after ${escalationMinutes[level - 1]} min — escalated to ${D.ESCALATION_TIERS[level]} (score ${before.toFixed(2)} → ${inc.score.toFixed(2)})`,
+          note: `No acknowledgement after ${limits[level - 1]} min — escalated to ${D.ESCALATION_TIERS[level]} (score ${before.toFixed(2)} → ${inc.score.toFixed(2)})`,
         });
         changed = true;
       }
@@ -517,31 +1003,71 @@ export function createApp(opts = {}) {
       reporter = { id: user.id, name: user.name, room: PRINCIPAL_ROOM, section: null };
     }
 
-    // Location: only after the reporter confirms where they are does Location Risk change.
+    // Location: the reporter's chosen place decides Location Risk and whether the
+    // ticket is low-lying. Location kind "room" keeps the same Location Risk as a
+    // saved room; only the floor of the chosen room drives Hazard Mode.
     const kind = body.locationKind || "saved";
     let room = reporter.room;
     let locationRisk = D.LOCATION_RISK_SAVED_ROOM;
-    const lowLying = D.isLowLying({ locationKind: body.locationKind || "saved", areaId: body.areaId, savedRoom: reporter.room });
+    let locationSetBy = "saved_room";
+    let locationNote = "Saved room";
+    let lowLyingRoom = reporter.room;
     if (kind === "area") {
       const area = D.NON_CLASSROOM_AREAS.find((a) => a.id === body.areaId);
       if (!area) throw bad("Unknown area.");
       room = `${area.label} (reassigned from ${reporter.room})`;
       locationRisk = area.risk;
+      locationSetBy = "selected_area";
+      locationNote = `Selected area · ${area.label}`;
     } else if (kind === "unverified") {
       room = `Unverified location (saved room: ${reporter.room})`;
       locationRisk = D.LOCATION_RISK_UNVERIFIED;
+      locationSetBy = "unverified";
+      locationNote = "Location not verified";
+    } else if (kind === "room") {
+      const selected = C.roomById(body.roomId || "");
+      if (!selected) throw bad("Unknown room.");
+      room = selected.legacy;
+      locationRisk = D.LOCATION_RISK_SAVED_ROOM;
+      // A classroom the reporter picked, or one the phone's GPS pinned down.
+      const byGps = body.locationSetBy === "gps_detected";
+      locationSetBy = byGps ? "gps_detected" : "selected_room";
+      locationNote = byGps ? `Detected by GPS · ${selected.legacy}` : `Selected by reporter · ${selected.legacy}`;
+      lowLyingRoom = selected.legacy;
     } else if (kind !== "saved") {
       throw bad("Unknown locationKind.");
     }
+    const lowLying = D.isLowLying({ locationKind: kind, areaId: body.areaId, savedRoom: lowLyingRoom });
 
-    // Which parents see it: the reporter's section, everyone for whole floor/school.
+    // Canonical place identity for merging: a classroom uses its legacy room
+    // string, a chosen common area uses "area:<id>" (the display string embeds
+    // the reporter's own saved room), and an unverified place is per-reporter so
+    // it never merges.
+    const isClassroomPlace = kind === "saved" || kind === "room";
+    const locationKey =
+      kind === "area" ? `area:${clean(body.areaId, 40)}`
+        : kind === "unverified" ? `unverified:${reporter.id}`
+          : room;
+
+    // Which class/parents this ticket belongs to:
+    //  1. Whole Floor/School → everyone ("ALL").
+    //  2. A classroom place → the section of the active teacher whose default
+    //     room is that room, else the reporter's own section.
+    //  3. A common area / unverified place with Individual or Classroom → the
+    //     class chosen in the report (the reporter's own is preselected; the
+    //     Principal has none and must choose).
+    const chosenSection = clean(body.section, 60);
     let linkedSection;
     if (pop.id === "wholeschool") linkedSection = "ALL";
-    else if (reporter.section) linkedSection = reporter.section;
-    else {
-      const s = clean(body.section, 60);
-      if (!sections().includes(s)) throw bad("Choose which section is affected.", "section_required");
-      linkedSection = s;
+    else if (isClassroomPlace) {
+      const owner = store.db.roster.find((r) => r.status === "active" && r.room === room);
+      linkedSection = owner?.section || reporter.section || (sections().includes(chosenSection) ? chosenSection : "");
+    } else if (sections().includes(chosenSection)) {
+      linkedSection = chosenSection;
+    } else if (reporter.section) {
+      linkedSection = reporter.section;
+    } else {
+      throw bad("Which class is affected? Choose the class before sending.", "section_required");
     }
 
     const t = now();
@@ -554,7 +1080,8 @@ export function createApp(opts = {}) {
         i.status !== "RESOLVED" &&
         Boolean(i.drill) === Boolean(drillMode.active) &&
         i.category === cat.categoryId &&
-        i.room === room &&
+        i.locationKey === locationKey &&
+        kind !== "unverified" &&
         (i.linkedSection === linkedSection || i.linkedSection === "ALL" || linkedSection === "ALL") &&
         t - i.createdAt < D.MERGE_WINDOW_MS,
     );
@@ -563,6 +1090,14 @@ export function createApp(opts = {}) {
       if (!dup.reporterIds.includes(reporter.id)) dup.reporterIds.push(reporter.id);
       dup.clientIds.push(clientId);
       dup.log.push({ at: t, by: reporter.name, role: user.role, action: "merged", note: `Corroborating report #${dup.confirmedBy}` });
+      // A corroboration with a wider population raises the ticket's scope
+      // (individual → classroom → whole school), which also widens who must headcount.
+      const scope = { individual: 0, classroom: 1, wholeschool: 2 };
+      if (scope[pop.id] > scope[D.populationIdOf(dup)]) {
+        dup.populationId = pop.id;
+        dup.populationLabel = pop.label;
+        dup.log.push({ at: t, by: "System", role: "system", action: "merged", note: `Scope raised to ${pop.label} — headcount now applies` });
+      }
       if (linkedSection === "ALL") dup.linkedSection = "ALL";
       const before = dup.score;
       const higherSeverity = cat.severity > dup.severity;
@@ -580,8 +1115,13 @@ export function createApp(opts = {}) {
       return { incident: dup, merged: true };
     }
 
+    const cfg = config.active();
     const incident = {
       id: store.nextId("INC-"),
+      // Stamp the version that scores this ticket; the score is never recomputed
+      // against a newer configuration.
+      configId: cfg.id,
+      configVersion: cfg.version,
       clientId,
       clientIds: [clientId],
       category: cat.categoryId,
@@ -602,23 +1142,35 @@ export function createApp(opts = {}) {
       firstHeadcountAt: null,
       drill: Boolean(drillMode.active),
       drillId: drillMode.active ? drillMode.id : null,
+      drillScope: drillMode.active ? (drillMode.scope === "simulation" ? "simulation" : "school") : null,
       interactions,
       eta: null,
+      // Step timestamps: written once, then locked (see transition()).
+      seenAt: null,
       enRouteAt: null,
       onSiteAt: null,
       room,
+      locationKey,
+      populationId: pop.id,
       populationLabel: pop.label,
       reporterId: reporter.id,
       reporterIds: [reporter.id],
       reporterName: reporter.name,
       linkedSection,
+      locationKind: kind,
+      locationSetBy,
+      locationNote,
       createdAt: t,
       status: "SENT",
       confirmedBy: 1,
       acknowledgedBy: null,
+      acknowledgedByOrg: null,
+      // Per-organization response records: both orgs respond independently.
+      responses: { barangay: null, cdrrmo: null },
       outcome: null,
       resolvedAt: null,
       resolvedBy: null,
+      resolvedByOrg: null,
       hiddenBy: [],
       log: [{ at: t, by: reporter.name, role: user.role, action: "reported", note: `${cat.categoryLabel} – ${cat.subLabel}${drillMode.active ? " (DRILL)" : ""}` }],
     };
@@ -634,20 +1186,82 @@ export function createApp(opts = {}) {
     return { incident, merged: false };
   }
 
+  // ---------------------------------------------------- responder organizations
+  // Each organization responds to a ticket on its own: acknowledge, on site and
+  // resolve are recorded per org, so the two orgs never block each other. The
+  // ticket's status is the furthest progress of either org, and the first org to
+  // act owns the headline ETA (Details lists both).
+  function responsesOf(inc) {
+    const rs = inc.responses && typeof inc.responses === "object" ? inc.responses : {};
+    for (const id of D.RESPONDER_ORG_IDS) if (!(id in rs)) rs[id] = null;
+    inc.responses = rs;
+    return rs;
+  }
+
+  function ticketStatus(inc) {
+    if (inc.status === "RESOLVED") return "RESOLVED";
+    const rs = Object.values(inc.responses || {}).filter(Boolean);
+    if (rs.some((r) => r.status === "on_site")) return "ON_SITE";
+    if (rs.some((r) => r.status === "en_route")) return "EN_ROUTE";
+    return inc.status; // SENT / SEEN — nobody has responded yet
+  }
+
+  const etaView = (e) => ({
+    mode: e.mode, distanceKm: e.distanceKm, routeStatus: e.routeStatus, blocked: Boolean(e.blocked),
+    minutes: e.minutes ?? null, startedAt: e.startedAt ?? null, arriveBy: e.arriveBy ?? null,
+  });
+
   function transition(user, id, action, body = {}) {
     const inc = store.db.incidents.find((i) => i.id === id);
     if (!inc) throw new HttpError(404, "not_found", "Incident not found.");
+    // A responder cannot act on a ticket that is not theirs, including a
+    // school-only drill they never saw.
+    if (user.role === "responder" && !canSee(inc, user))
+      throw new HttpError(404, "not_found", "Incident not found.");
     if (inc.status === "RESOLVED") {
       if (action === "seen") return { incident: inc, changed: false };
+      if (action === "resolve" && inc.resolvedByOrg)
+        throw new HttpError(409, "already_resolved", `Already resolved by ${D.orgLabel(inc.resolvedByOrg)}`);
       throw new HttpError(409, "already_resolved", "This incident is already closed.");
     }
+    // The acting organization ALWAYS comes from the authenticated account.
+    if (user.role === "responder" && !D.orgById(user.org))
+      throw new HttpError(409, "org_unassigned", "Your organization is not assigned. Ask the System Administrator.");
     const t = now();
-    const push = (act, note) => inc.log.push({ at: t, by: user.name, role: user.role, action: act, note });
+    // Timestamps are audit facts: the first write wins and no later click or API
+    // call may move them, so the recorded durations stay true.
+    const stamp = (field) => {
+      if (inc[field] == null) inc[field] = t;
+      return inc[field];
+    };
+    // Which organization (if any) is acting — responders always carry one.
+    const org = user.role === "responder" && D.orgById(user.org) ? user.org : null;
+    // The Principal acts for the school, never as a responder organization.
+    const actor = org ? D.orgLabel(org) : user.role === "principal" ? "School (Principal)" : user.name;
+    const push = (act, note) => inc.log.push({ at: t, by: actor, role: user.role, action: act, note, ...(org ? { org } : {}) });
+    const rs = responsesOf(inc);
+    const mine = org ? rs[org] : null;
     let changed = false;
     if (action === "seen" && inc.status === "SENT") {
+      inc.seenAt = stamp("seenAt");
       inc.status = "SEEN"; push("seen"); changed = true;
-    } else if (action === "ack" && (inc.status === "SENT" || inc.status === "SEEN")) {
-      // Validate everything first so a rejected request never leaves the ticket half-updated.
+    } else if (action === "ack") {
+      // The Principal acknowledges FOR THE SCHOOL: a school track stamp, SENT →
+      // SEEN. The Principal is never en route or on site — only responders are.
+      if (user.role === "principal") {
+        if (inc.status !== "SENT" && inc.status !== "SEEN") return { incident: inc, changed: false };
+        inc.seenAt = stamp("seenAt");
+        inc.acknowledgedAt = stamp("acknowledgedAt");
+        inc.acknowledgedBy = "School (Principal)";
+        inc.status = "SEEN";
+        push("acknowledged", "Acknowledged");
+        return { incident: inc, changed: true };
+      }
+      // Any open ticket can be acknowledged by either org, even while the other is
+      // already on site. Acknowledging is one-way per actor: an org that already
+      // acknowledged cannot trigger it again, and the ticket never steps back.
+      if (mine) return { incident: inc, changed: false };
+      if (!org && inc.status !== "SENT" && inc.status !== "SEEN") return { incident: inc, changed: false };
       let eta = null;
       let note = "Acknowledged";
       if (body.mode) {
@@ -656,34 +1270,116 @@ export function createApp(opts = {}) {
         if (!mode) throw bad("Unknown transport mode.");
         if (!(km > 0 && km <= 50)) throw bad("Enter the distance to the school in km (0–50).");
         const route = store.db.modes.route.status;
-        const r = D.computeEta({ mode: mode.id, distanceKm: km, route });
+        const r = D.computeEta({ mode: mode.id, distanceKm: km, route, speeds: config.active().responderSpeeds });
         eta = { mode: mode.id, distanceKm: km, routeStatus: route, blocked: Boolean(r.blocked), minutes: r.minutes, startedAt: t, arriveBy: r.blocked ? null : t + r.minutes * 60000 };
         note = r.blocked ? `Acknowledged — ${mode.label}, ${km} km, route BLOCKED (no ETA)` : `Acknowledged — ${mode.label}, ${km} km, ETA ${r.minutes} min (route ${route})`;
       }
-      inc.status = "EN_ROUTE"; inc.acknowledgedBy = user.name; inc.enRouteAt = t; inc.eta = eta;
+      if (org) {
+        const etaFields = eta ? etaView(eta) : { mode: null, distanceKm: null, routeStatus: null, blocked: false, minutes: null, startedAt: null, arriveBy: null };
+        rs[org] = {
+          org, orgLabel: D.orgLabel(org), status: "en_route",
+          ackAt: t, acknowledgedAt: t, enRouteAt: t, onSiteAt: null, resolvedAt: null,
+          byName: user.name, by: user.id, etaMinutes: etaFields.minutes,
+          ...etaFields,
+        };
+      }
+      inc.enRouteAt = stamp("enRouteAt");
+      if (!inc.acknowledgedByOrg && org) inc.acknowledgedByOrg = org;
+      inc.acknowledgedBy = inc.acknowledgedBy || actor;
+      // Headline ETA = the first org that acked (per-org ETAs live in `responses`).
+      if (!inc.eta && eta) inc.eta = eta;
+      inc.status = ticketStatus(inc);
+      // An acknowledgement is an En route step even for an actor with no org
+      // response record (a principal, or a responder account without an org):
+      // the ticket must never stay at Seen after it was acknowledged.
+      if (inc.status === "SENT" || inc.status === "SEEN") inc.status = "EN_ROUTE";
       push("en_route", note); changed = true;
-    } else if (action === "onsite" && inc.status !== "ON_SITE") {
-      inc.status = "ON_SITE"; inc.acknowledgedBy = inc.acknowledgedBy || user.name; inc.onSiteAt = t; inc.enRouteAt = inc.enRouteAt || t;
+    } else if (action === "onsite") {
+      // On site is a responder organization's step. The Principal never gets it.
+      if (user.role === "principal")
+        throw new HttpError(403, "forbidden", "Only responders mark a ticket on site.");
+      // On site follows En route at the ticket level: it can never be the first
+      // step, so the recorded report → acknowledged → on site order stays true.
+      if (inc.status === "SENT" || inc.status === "SEEN") {
+        throw new HttpError(409, "out_of_order", "Acknowledge this ticket before marking on site.");
+      }
+      if (org && !mine) throw new HttpError(409, "out_of_order", "Acknowledge this ticket before marking on site.");
+      if (org ? mine?.status === "on_site" : inc.status === "ON_SITE") return { incident: inc, changed: false };
+      if (org) {
+        rs[org] = {
+          ...mine,
+          org, orgLabel: D.orgLabel(org), status: "on_site",
+          ackAt: mine.ackAt, acknowledgedAt: mine.acknowledgedAt ?? mine.ackAt, enRouteAt: mine.enRouteAt ?? mine.ackAt,
+          onSiteAt: t, resolvedAt: null, byName: user.name, by: user.id,
+          // The org has arrived: its own countdown stops.
+          ...etaView({ ...mine, blocked: false, minutes: null, arriveBy: null }), etaMinutes: null,
+        };
+      }
+      inc.onSiteAt = stamp("onSiteAt");
+      inc.enRouteAt = stamp("enRouteAt");
+      if (!inc.acknowledgedByOrg && org) inc.acknowledgedByOrg = org;
+      inc.acknowledgedBy = inc.acknowledgedBy || actor;
+      inc.status = org ? ticketStatus(inc) : "ON_SITE";
       push("on_site", `Report → on site in ${Math.max(0, Math.round((t - inc.createdAt) / 60000))} min`); changed = true;
     } else if (action === "resolve") {
+      // One resolution closes the ticket for everyone; the other org's timeline stays.
       const falseAlarm = body.outcome === "false_alarm";
+      // An org may only resolve once its OWN track reached on site.
+      if (org && (!mine || mine.status !== "on_site"))
+        throw new HttpError(409, "out_of_order", "Mark your own response on site before resolving this ticket.");
+      if (org) {
+        rs[org] = {
+          ...mine,
+          org, orgLabel: D.orgLabel(org), status: "resolved",
+          ackAt: mine.ackAt, acknowledgedAt: mine.acknowledgedAt ?? mine.ackAt, enRouteAt: mine.enRouteAt ?? mine.ackAt,
+          onSiteAt: mine.onSiteAt, resolvedAt: t, byName: user.name, by: user.id,
+          ...etaView({ ...mine, blocked: false, minutes: null, arriveBy: null }), etaMinutes: null,
+        };
+      }
       inc.status = "RESOLVED";
       inc.outcome = falseAlarm ? "false_alarm" : "resolved";
-      inc.resolvedAt = t;
-      inc.resolvedBy = user.name;
+      inc.resolvedAt = stamp("resolvedAt");
+      inc.resolvedBy = actor;
+      inc.resolvedByOrg = org;
       push(falseAlarm ? "false_alarm" : "resolved", falseAlarm ? "Cancelled as false alarm" : "Marked resolved");
       changed = true;
     }
     return { incident: inc, changed };
   }
 
-  function applyTeacherEdit(entry, values) {
+  // One edit path for BOTH the teacher's own profile save and the Principal's roster edit.
+  // `by`/`req` only feed the audit entry – never a password, hash or token.
+  function applyTeacherEdit(entry, values, { by = null, req = null } = {}) {
     const oldSection = entry.section;
+    const newSection = values.section;
+    const sectionChanged = newSection !== undefined && newSection !== oldSection;
     Object.assign(entry, values);
+    // Today's registry was (re)set: stamp it so the report page can offer a refresh.
+    if (values.registry !== undefined) entry.registryUpdatedAt = now();
     for (const inc of store.db.incidents) {
-      if (inc.reporterId !== entry.id) continue;
-      inc.reporterName = entry.name;
-      if (values.section && inc.linkedSection === oldSection) inc.linkedSection = values.section;
+      if (inc.reporterId === entry.id) inc.reporterName = entry.name;
+      if (sectionChanged && inc.linkedSection === oldSection) inc.linkedSection = newSection;
+      if (sectionChanged) for (const h of inc.headcounts || []) if (h.section === oldSection) h.section = newSection;
+    }
+    if (sectionChanged) {
+      // Keep the structured fields in step with the stored string.
+      const structured = parseSection(newSection);
+      entry.grade = structured.grade;
+      entry.sectionName = structured.sectionName;
+      // A section rename must not orphan the data hanging off the old string.
+      for (const acc of store.db.accounts) {
+        if (acc.role === "parent" && acc.section === oldSection) {
+          acc.section = newSection;
+          acc.grade = structured.grade;
+          acc.sectionName = structured.sectionName;
+        }
+      }
+      audit("section_changed", {
+        by,
+        target: entry.id,
+        detail: `section changed: ${oldSection} → ${newSection}`,
+        req,
+      });
     }
   }
 
@@ -693,7 +1389,13 @@ export function createApp(opts = {}) {
     const section = clean(body.section, 60);
     const room = clean(body.room, 80);
     if (!partial || body.name !== undefined) { if (!name) throw bad("Name is required."); out.name = name; }
-    if (!partial || body.section !== undefined) { if (!section) throw bad("Grade / section is required."); out.section = section; }
+    if (!partial || body.section !== undefined) {
+      if (!section) throw bad("Grade / section is required.");
+      out.section = section;
+      const structured = parseSection(section);
+      out.grade = structured.grade;
+      out.sectionName = structured.sectionName;
+    }
     if (!partial || body.room !== undefined) { if (!room) throw bad("Default room is required."); out.room = room; }
     if (body.registry !== undefined && body.registry !== null && body.registry !== "") {
       const n = Number(body.registry);
@@ -707,18 +1409,33 @@ export function createApp(opts = {}) {
     const db = store.db;
     if (db.incidents.length) return;
     const t = now();
+    const cfg = config.active();
     db.incidents.push({
-      id: store.nextId("INC-"), clientId: "seed-1", clientIds: ["seed-1"], category: "flood", categoryLabel: "Flooding/Natural",
+      id: store.nextId("INC-"), configId: cfg.id, configVersion: cfg.version,
+      clientId: "seed-1", clientIds: ["seed-1"], category: "flood", categoryLabel: "Flooding/Natural",
       subLabel: "Flash Flood", severity: 4, vulnerability: 4, locationRisk: 2, timeSensitivity: 3,
       baseLocationRisk: 2, baseTimeSensitivity: 3, lowLying: true, escalationLevel: 0, escalatedAt: null, headcounts: [], overrideReasons: [],
-      firstHeadcountAt: null, drill: false, drillId: null, interactions: 3, eta: null, enRouteAt: t - 3 * 60000, onSiteAt: null,
-      score: D.computeScore(4, 4, 2, 3), room: "Bldg B | Flr 1 | Rm 105", populationLabel: "Classroom / Section",
+      firstHeadcountAt: null, drill: false, drillId: null, interactions: 3, enRouteAt: t - 3 * 60000, onSiteAt: null,
+      // Headline ETA: the first org to acknowledge (Barangay here).
+      eta: { mode: "motorcycle", distanceKm: 1.4, routeStatus: "passable", blocked: false, minutes: 4, startedAt: t - 3 * 60000, arriveBy: t + 60000 },
+      score: D.computeScore(4, 4, 2, 3), room: "Bldg B | Flr 1 | Rm 105",      populationId: "classroom",
+      populationLabel: "Classroom / Section",
       reporterId: "t3", reporterIds: ["t3"], reporterName: "Ms. Bautista", linkedSection: "Grade 5 - Sec A",
-      createdAt: t - 6 * 60000, status: "EN_ROUTE", confirmedBy: 2, acknowledgedBy: "Brgy. Sinalhan / CDRRMO",
-      outcome: null, resolvedAt: null, resolvedBy: null, hiddenBy: [],
+      createdAt: t - 6 * 60000, status: "EN_ROUTE", confirmedBy: 2, acknowledgedBy: "Barangay Sinalhan",
+      acknowledgedByOrg: "barangay",
+      responses: {
+        barangay: {
+          org: "barangay", orgLabel: "Barangay Sinalhan", status: "en_route",
+          ackAt: t - 3 * 60000, onSiteAt: null, resolvedAt: null, byName: "Barangay Sinalhan",
+          mode: "motorcycle", distanceKm: 1.4, routeStatus: "passable", blocked: false,
+          minutes: 4, startedAt: t - 3 * 60000, arriveBy: t + 60000,
+        },
+        cdrrmo: null,
+      },
+      outcome: null, resolvedAt: null, resolvedBy: null, resolvedByOrg: null, hiddenBy: [],
       log: [
         { at: t - 6 * 60000, by: "Ms. Bautista", role: "teacher", action: "reported", note: "Flooding/Natural – Flash Flood" },
-        { at: t - 3 * 60000, by: "Brgy. Sinalhan / CDRRMO", role: "responder", action: "en_route", note: "Acknowledged" },
+        { at: t - 3 * 60000, by: "Barangay Sinalhan", role: "responder", org: "barangay", action: "en_route", note: "Acknowledged — Motorcycle, 1.4 km, ETA 4 min (route passable)" },
       ],
     });
     store.save();
@@ -735,17 +1452,22 @@ export function createApp(opts = {}) {
       mk(`${r.id}@sinalhanes.deped.ph`, "teacher", r.name, { teacherId: r.id, section: r.section });
     }
     mk("principal@sinalhanes.deped.ph", "principal", "Dr. Santos", {}, "principal");
-    mk("responder@sinalhanes.deped.ph", "responder", "Brgy. Sinalhan / CDRRMO", {}, "responder");
+    // Two responder accounts, one per organization — never a shared account.
+    mk("barangay@sinalhanes.deped.ph", "responder", "Barangay Sinalhan", { org: "barangay" }, "responder-barangay");
+    mk("cdrrmo@sinalhanes.deped.ph", "responder", "CDRRMO", { org: "cdrrmo" }, "responder-cdrrmo");
     for (const sec of sections()) mk(`parent-${slugify(sec)}@sinalhanes.deped.ph`, "parent", "Parent / PTA Representative", { section: sec });
     audit("account_seeded", { detail: `${store.db.accounts.length} demo accounts seeded (demo mode)` });
   }
   if (seedDemoAccounts) seedDemoAccountsFn();
 
   // First Super Admin: created once from the environment (one-time bootstrap).
-  // The password must be changed at first sign-in; it is never written to the audit log.
+  // The bootstrap password obeys the same policy as every other account and must be
+  // changed at first sign-in; it is never written to the audit log.
   if (superAdminEmail && superAdminPassword) {
     const email = normEmail(superAdminEmail);
-    if (!emailOk(email)) log("AGAP_SUPER_ADMIN_EMAIL is not a valid email – no Super Admin account created.");
+    const problem = passwordProblem(superAdminPassword, { email, name: "Super Admin" });
+    if (!emailOk(email)) log("ASPIRE_SUPER_ADMIN_EMAIL is not a valid email – no Super Admin account created.");
+    else if (problem) log(`ASPIRE_SUPER_ADMIN_PASSWORD does not meet the password policy (${problem}) – no Super Admin account created.`);
     else if (!findAccount(email)) {
       newAccount({ email, role: "super_admin", name: "Super Admin", password: superAdminPassword, mustChange: true, id: "super-admin" });
       audit("account_created", { by: "bootstrap", target: email, detail: "initial Super Admin (env bootstrap)" });
@@ -754,6 +1476,32 @@ export function createApp(opts = {}) {
   }
 
   // ------------------------------------------------------------------- API
+  // Retention sweep: runs once at boot and then hourly. It archives — never
+  // deletes — closed tickets older than archiveAfterDays, and writes ONE audit
+  // entry listing the ids. `archiveExpired` is pure over an injected clock, and
+  // tests can call runArchiveSweep() directly.
+  function runArchiveSweep() {
+    const ids = archiveExpired({
+      incidents: store.db.incidents,
+      now: now(),
+      archiveAfterDays: retention.archiveAfterDays,
+    });
+    if (!ids.length) return ids;
+    store.save();
+    audit("incident_auto_archived", {
+      by: "system",
+      role: "system",
+      org: D.SCHOOL.name,
+      target: ids.join(","),
+      detail: `${ids.length} closed ticket(s) older than ${retention.archiveAfterDays} days moved to the archive`,
+    });
+    broadcast({ type: "archive_changed" }); // payload carries no incident id
+    return ids;
+  }
+  runArchiveSweep();
+  const archiveTimer = autoTick ? setInterval(() => { try { runArchiveSweep(); } catch (err) { log("Archive sweep failed:", err.message); } }, 60 * 60 * 1000) : null;
+  if (archiveTimer) archiveTimer.unref();
+
   async function api(req, res, url) {
     const p = url.pathname;
     const m = req.method;
@@ -761,13 +1509,16 @@ export function createApp(opts = {}) {
     if (p === "/api/health" && m === "GET") return send(res, 200, { ok: true, version: store.db.version, uptime: Math.round(process.uptime()) });
 
     if (p === "/api/config" && m === "GET")
-      return send(res, 200, { accessCodeRequired: Boolean(accessCode), demoReset: Boolean(allowReset), passwordMin: PASSWORD_MIN, school: D.SCHOOL });
+      return send(res, 200, { accessCodeRequired: Boolean(accessCode), demoReset: Boolean(allowReset) && process.env.NODE_ENV !== "production", passwordMin: PASSWORD_MIN, passwordPolicy: POLICY_TEXT, school: { ...D.SCHOOL, phone: schoolPhone } });
 
     if (p === "/api/login" && m === "POST") {
       rateLimit(req, "login", 30);
       const body = await readJson(req);
-      if (accessCode && !safeEqual(clean(body.code, 100), accessCode)) throw new HttpError(401, "bad_code", "Incorrect access code.");
       const email = normEmail(body.email);
+
+      // Access code check first when one is configured.
+      if (accessCode && !safeEqual(clean(body.code, 100), accessCode)) throw new HttpError(401, "bad_code", "Incorrect access code.");
+
       const password = String(body.password ?? "");
       // One generic error for "unknown email / wrong password / deactivated" – no account enumeration.
       const generic = () => new HttpError(401, "invalid_credentials", "Invalid email or password.");
@@ -818,6 +1569,19 @@ export function createApp(opts = {}) {
       acc.lockedUntil = 0;
       acc.lastLoginAt = t;
       const token = issueSession(acc, req);
+
+      // Enforce the CURRENT password policy on the password the user just typed.
+      // A legacy/weak password that still matches the stored hash is not allowed to
+      // continue — the user is sent to the forced-change screen. The plaintext is used
+      // once here and is never stored or written to the audit log.
+      const policyIssue = passwordProblem(password, { email: acc.email, name: acc.name });
+      if (policyIssue) {
+        acc.mustChange = true;
+        store.save();
+        audit("login_policy", { by: acc.email, target: acc.email, detail: "entered password does not meet current policy", req });
+        return send(res, 200, { token, user, mustChange: true, policy: POLICY_TEXT });
+      }
+
       store.save();
       audit("login_success", { by: acc.email, target: acc.email, req });
       return send(res, 200, { token, user, mustChange: Boolean(acc.mustChange) });
@@ -832,12 +1596,35 @@ export function createApp(opts = {}) {
       return send(res, 200, { ok: true });
     }
 
-    // Single password field: used for the forced change after a rollover / temporary credentials.
+    // Forced change after a rollover / temporary credentials: only the new password.
+    // A voluntary change (Account screen) must prove the current password.
     if (p === "/api/password" && m === "POST") {
       const { session, account } = authenticate(req, url, p);
       const body = await readJson(req);
-      const problem = validatePassword(body.password);
+      if (!account.mustChange) {
+        const t = now();
+        if (account.lockedUntil > t) {
+          const mins = Math.max(1, Math.ceil((account.lockedUntil - t) / 60000));
+          throw new HttpError(429, "account_locked", `Too many failed attempts. This account is locked for ${mins} more minute${mins === 1 ? "" : "s"}.`);
+        }
+        if (typeof body.currentPassword !== "string" || !body.currentPassword || !checkPassword(body.currentPassword, account.pwSalt, account.pwHash)) {
+          account.failed += 1;
+          if (account.failed >= lockoutFailures) {
+            account.lockedUntil = t + lockoutMinutes * 60000;
+            audit("account_locked", { target: account.email, detail: `${account.failed} failed password changes`, req });
+          }
+          store.save();
+          audit("password_change_failed", { target: account.email, detail: "wrong current password", req });
+          throw new HttpError(401, "invalid_password", "Your current password is incorrect.");
+        }
+        account.failed = 0;
+        account.lockedUntil = 0;
+      }
+      const problem = passwordProblem(body.password, account);
       if (problem) throw bad(problem, "weak_password");
+      // "Must differ from the current password" is only provable against the stored hash.
+      if (account.pwHash && checkPassword(String(body.password ?? ""), account.pwSalt, account.pwHash))
+        throw bad("Your new password must be different from your current password.", "weak_password");
       const cred = hashPassword(body.password);
       account.pwSalt = cred.salt;
       account.pwHash = cred.hash;
@@ -848,13 +1635,52 @@ export function createApp(opts = {}) {
       account.lockedUntil = 0;
       revokeSessions(account.id, session.id); // every other device is signed out
       store.save();
-      audit("password_change", { by: account.email, target: account.email, detail: firstSet ? "temporary password replaced" : "", req });
+      audit("password_change", { by: account.email, target: account.email, detail: firstSet ? "temporary password replaced" : "voluntary change", req });
       return send(res, 200, { ok: true });
     }
 
     if (p === "/api/me" && m === "GET") {
       const { account, user } = authenticate(req, url, p);
-      return send(res, 200, { user, mustChange: Boolean(account.mustChange) });
+      return send(res, 200, { user, mustChange: Boolean(account.mustChange), policy: POLICY_TEXT });
+    }
+
+    // HIDE — a per-user "remove from my list" for Teachers, Parents and
+    // Responders. The record itself never changes and stays visible to everyone
+    // else; each responder account hides independently.
+    if (p === "/api/me/hidden" && m === "POST") {
+      const { account, user } = authenticate(req, url, p);
+      need(user, "teacher", "parent", "responder"); // principals archive instead
+      rateLimit(req, "write", 120);
+      const body = await readJson(req);
+      const inc = store.db.incidents.find((i) => i.id === String(body.incidentId ?? ""));
+      if (!inc || !canSee(inc, user)) throw new HttpError(404, "not_found", "Incident not found.");
+      if (user.role === "teacher" && !inc.reporterIds.includes(user.id))
+        throw new HttpError(403, "forbidden", "You can only hide your own reports.");
+      if (inc.status !== "RESOLVED" && !inc.archivedAt)
+        throw bad("Only resolved, cancelled or archived records can be hidden.", "not_closed");
+      const hide = body.hidden !== false;
+      const list = Array.isArray(account.hiddenIncidentIds) ? account.hiddenIncidentIds : (account.hiddenIncidentIds = []);
+      const already = list.includes(inc.id);
+      if (hide && !already) {
+        if (list.length >= 500) throw bad("You have hidden the maximum of 500 records. Unhide one first.", "hide_limit");
+        list.push(inc.id);
+      }
+      if (!hide) account.hiddenIncidentIds = list.filter((x) => x !== inc.id);
+      const visible = inc.hiddenBy || [];
+      if (hide && !visible.includes(user.id)) inc.hiddenBy = [...visible, user.id];
+      if (!hide) inc.hiddenBy = visible.filter((x) => x !== user.id);
+      // Per-user bookkeeping — internal, never part of anyone's timeline.
+      inc.log.push({
+        at: now(), by: user.name, role: user.role, internal: true,
+        action: hide ? "hidden" : "unhidden",
+        note: hide ? "Removed from their own list" : "Restored to their own list",
+      });
+      store.save();
+      audit(hide ? "incident_hidden" : "incident_unhidden", {
+        by: account.id, role: user.role, org: orgOf(account), target: inc.id, req,
+      });
+      commit({ type: "hidden_changed" });
+      return send(res, 200, { ok: true, hidden: hide, incidentId: inc.id });
     }
 
     if (p === "/api/stream" && m === "GET") {
@@ -874,7 +1700,7 @@ export function createApp(opts = {}) {
     }
 
     // Everything below needs a signed-in user.
-    const { user } = authenticate(req, url, p);
+    const { user, account } = authenticate(req, url, p);
     if (m !== "GET") rateLimit(req, "write", 120);
     runEscalations(); // deterministic, time-based escalation (also runs on a timer)
 
@@ -894,7 +1720,13 @@ export function createApp(opts = {}) {
       if (findAccount(email)) throw new HttpError(409, "email_taken", "An account with that email already exists.");
       const role = clean(body.role, 20);
       if (!ACCOUNT_ROLES.has(role)) throw bad("Choose which role this account gets.");
-      const name = clean(body.name, 80) || ({ responder: "Brgy. Sinalhan / CDRRMO", parent: "Parent / PTA Representative", super_admin: "Super Admin" }[role] || "");
+      // A responder answers for exactly one organization — the admin picks it.
+      let org = null;
+      if (role === "responder") {
+        org = clean(body.org, 20);
+        if (!ACCOUNT_ORGS.has(org)) throw bad("Choose the organization this responder answers for: Barangay Sinalhan or CDRRMO.", "org_required");
+      }
+      const name = clean(body.name, 80) || ({ responder: D.orgLabel(org), parent: "Parent / PTA Representative", super_admin: "Super Admin" }[role] || "");
       if (!name) throw bad("Name is required.");
       let section = null;
       if (role === "parent") {
@@ -905,8 +1737,8 @@ export function createApp(opts = {}) {
       let password = body.password === undefined || body.password === null || body.password === "" ? "" : String(body.password);
       let temp = false;
       let mustChange = false;
-      if (!password) { password = makeTempPassword(); temp = true; mustChange = true; }
-      else { const problem = validatePassword(password); if (problem) throw bad(problem, "weak_password"); }
+      if (!password) { password = makeTempPassword({ email, name }); temp = true; mustChange = true; }
+      else { const problem = passwordProblem(password, { email, name }); if (problem) throw bad(problem, "weak_password"); }
 
       let teacherId = null;
       if (role === "teacher") {
@@ -917,14 +1749,101 @@ export function createApp(opts = {}) {
         teacherId = entry.id;
         section = entry.section;
       }
-      const acc = newAccount({ email, role, name, password, mustChange, temp, teacherId, section });
+      const acc = newAccount({ email, role, name, password, mustChange, temp, teacherId, section, org });
       store.save();
-      audit("account_created", { by: user.email, target: email, detail: `role ${role}${temp ? " (temporary credentials)" : ""}`, req });
+      audit("account_created", { by: user.email, target: email, detail: `role ${role}${org ? ` (${D.orgLabel(org)})` : ""}${temp ? " (temporary credentials)" : ""}`, req });
       if (teacherId) commit({ type: "roster_updated", id: teacherId });
       return send(res, 201, { account: publicAccount(acc), tempPassword: temp ? password : null, teacherId });
     }
 
-    let mact = p.match(/^\/api\/admin\/accounts\/([\w-]+)\/(reset-password|deactivate|activate|unlock)$/);
+    // Edit an existing account. The Super Admin owns the email and display name;
+    // a teacher's class fields use the same roster edit path as the Principal's
+    // form, a Parent/PTA account moves section, and a responder gets its org.
+    let medit = p.match(/^\/api\/admin\/accounts\/([\w-]+)$/);
+    if (medit && m === "PUT") {
+      need(user, "super_admin");
+      const acc = accountById(medit[1]);
+      if (!acc) throw new HttpError(404, "not_found", "Account not found.");
+      if (acc.status === "purged") throw new HttpError(409, "purged", "This account was purged and can no longer be edited.");
+      const body = await readJson(req);
+      const changed = [];
+
+      // Email: unique (case-insensitive), validated, and a change revokes every session.
+      let email = acc.email;
+      if (body.email !== undefined) {
+        email = normEmail(body.email);
+        if (!email) throw bad("Email is required.", "email_required");
+        if (!emailOk(email)) throw bad("Enter a valid email address.", "invalid_email");
+        if (email !== acc.email && store.db.accounts.some((a) => a.id !== acc.id && a.email.toLowerCase() === email.toLowerCase()))
+          throw new HttpError(409, "email_taken", "An account with that email already exists.");
+      }
+
+      let name = acc.name;
+      if (body.name !== undefined) {
+        name = clean(body.name, 80);
+        if (!name) throw bad("Name is required.");
+      }
+      // A responder always answers for exactly one org — assigning it is the point.
+      let org = acc.org ?? null;
+      if (acc.role === "responder") {
+        if (body.org !== undefined) org = clean(body.org, 20);
+        if (!ACCOUNT_ORGS.has(org)) throw bad("Choose the organization this responder answers for: Barangay Sinalhan or CDRRMO.", "org_required");
+      }
+      let section = acc.section;
+      if (acc.role === "parent" && body.section !== undefined) {
+        section = clean(body.section, 60);
+        if (!section) throw bad("Grade / section is required for a Parent/PTA account.");
+      }
+      // A teacher's section, room and registry live on the roster row.
+      if (acc.role === "teacher" && acc.teacherId) {
+        const entry = store.db.roster.find((r) => r.id === acc.teacherId);
+        if (entry) {
+          const fields = parseTeacherFields(body, { partial: true });
+          delete fields.name;
+          if (Object.keys(fields).length) {
+            applyTeacherEdit(entry, fields, { by: user.email, req });
+            changed.push(...Object.keys(fields));
+            section = entry.section;
+          }
+        }
+      }
+
+      const oldEmail = acc.email;
+      if (name !== acc.name) { acc.name = name; changed.push("name"); }
+      if (acc.role === "responder" && org !== acc.org) { acc.org = org; changed.push("org"); }
+      if (acc.role === "parent" && section !== acc.section) {
+        acc.section = section;
+        const structured = parseSection(section);
+        acc.grade = structured.grade;
+        acc.sectionName = structured.sectionName;
+        changed.push("section");
+      }
+      if (email !== acc.email) { acc.email = email; changed.push("email"); }
+      // A teacher's name IS the roster entry's name: keep the two in step.
+      if (changed.includes("name") && acc.teacherId) {
+        const entry = store.db.roster.find((r) => r.id === acc.teacherId);
+        if (entry) {
+          entry.name = acc.name;
+          for (const inc of store.db.incidents) if (inc.reporterId === entry.id) inc.reporterName = entry.name;
+        }
+      }
+      if (changed.includes("email")) {
+        const revoked = revokeSessions(acc.id);
+        closeStreamsFor(acc.id);
+        audit("email_changed", {
+          by: account.id, role: user.role, org: orgOf(acc), target: acc.id,
+          detail: `email ${maskEmail(oldEmail)} → ${maskEmail(email)} · ${revoked} session(s) revoked`, req,
+        });
+      }
+      if (changed.length) {
+        store.save();
+        audit("account_updated", { by: user.email, role: user.role, org: orgOf(acc), target: acc.email, detail: `changed ${changed.join(", ")}`, req });
+        if (acc.teacherId) commit({ type: "roster_updated", id: acc.teacherId });
+      }
+      return send(res, 200, { ok: true, account: publicAccount(acc), changed });
+    }
+
+    let mact = p.match(/^\/api\/admin\/accounts\/([\w-]+)\/(reset-password|deactivate|activate|unlock|archive|restore)$/);
     if (mact && m === "POST") {
       need(user, "super_admin");
       const acc = accountById(mact[1]);
@@ -932,11 +1851,14 @@ export function createApp(opts = {}) {
       const action = mact[2];
       const t = now();
       if (action === "reset-password") {
-        const pw = makeTempPassword();
+        const pw = makeTempPassword(acc);
         const cred = hashPassword(pw);
-        acc.pwSalt = cred.salt; acc.pwHash = cred.hash;
-        acc.mustChange = true; acc.temp = true; acc.failed = 0; acc.lockedUntil = 0;
-        const revoked = revokeSessions(acc.id);
+            acc.pwSalt = cred.salt;
+            acc.pwHash = cred.hash;
+            acc.mustChange = true;
+            acc.temp = true;
+            acc.failed = 0;
+            acc.lockedUntil = 0;        const revoked = revokeSessions(acc.id);
         store.save();
         audit("password_reset", { by: user.email, target: acc.email, detail: `${revoked} session(s) revoked, temporary credentials issued`, req });
         return send(res, 200, { ok: true, tempPassword: pw });
@@ -959,6 +1881,17 @@ export function createApp(opts = {}) {
         if (acc.teacherId) commit({ type: "roster_updated", id: acc.teacherId });
         return send(res, 200, { ok: true });
       }
+      if (action === "archive") {
+        const body = await readJson(req);
+        archiveAccount(acc, { by: account.id, role: user.role, reason: body.reason, req });
+        if (acc.teacherId) commit({ type: "roster_updated", id: acc.teacherId });
+        return send(res, 200, { ok: true, account: publicAccount(acc) });
+      }
+      if (action === "restore") {
+        restoreAccount(acc, { by: account.id, role: user.role, req });
+        if (acc.teacherId) commit({ type: "roster_updated", id: acc.teacherId });
+        return send(res, 200, { ok: true, account: publicAccount(acc) });
+      }
       // unlock – Super Admin can release a locked account early
       const wasLocked = acc.lockedUntil > t;
       acc.failed = 0; acc.lockedUntil = 0;
@@ -967,10 +1900,167 @@ export function createApp(opts = {}) {
       return send(res, 200, { ok: true, wasLocked });
     }
 
+    // -------------------------------------------------- retention / purge (Admin)
+    // Read-only eligibility card. Every period here is a PLACEHOLDER set by the
+    // school's data protection contact (see server/retention.js).
+    if (p === "/api/admin/retention" && m === "GET") {
+      need(user, "super_admin");
+      const t = now();
+      const archivedIncidents = store.db.incidents.filter((i) => i.archivedAt);
+      const eligibleIncidents = archivedIncidents.filter((i) => !i.anonymizedAt && incidentExpired(i, t, retention.incidentDays));
+      const archivedAccounts = store.db.accounts.filter((a) => a.status === "archived");
+      const eligibleAccounts = archivedAccounts.filter((a) => accountExpired(a, t, retention.accountDays));
+      const expiredDrills = store.db.drills.filter((d) => drillExpired(d, t, retention.drillDays));
+      return send(res, 200, {
+        placeholder: retention.placeholder,
+        label: "Placeholder periods",
+        periods: {
+          archiveAfterDays: retention.archiveAfterDays,
+          incidents: retention.incidentDays,
+          accounts: retention.accountDays,
+          drills: retention.drillDays,
+          notifications: retention.notificationDays,
+        },
+        counts: {
+          archivedIncidents: archivedIncidents.length,
+          anonymizedIncidents: archivedIncidents.filter((i) => i.anonymizedAt).length,
+          eligibleIncidents: eligibleIncidents.length,
+          archivedAccounts: archivedAccounts.length,
+          eligibleAccounts: eligibleAccounts.length,
+          expiredDrills: expiredDrills.length,
+        },
+        // Types with no persistent store are reported, never silently periodised.
+        skipped: retention.skipped,
+      });
+    }
+
+    /** Replace a person's name with a role/organisation label (purge, timeline, headcounts). */
+    const actorLabel = (role, org = null) => (role === "responder"
+      ? (D.orgLabel(org) || "Responder")
+      : ({ teacher: "Teacher", principal: "Principal", super_admin: "Admin", parent: "Parent/PTA", system: "System" }[role] || "Unknown"));
+
+    /** Anonymise a ticket: identifiers and free-text notes out, statistics kept. */
+    function anonymizeIncident(inc) {
+      const labelFor = (actions) => {
+        const e = (inc.log || []).find((l) => actions.includes(l.action) && l.role && l.role !== "system");
+        return e ? actorLabel(e.role, e.org) : null;
+      };
+      const ackBy = labelFor(["en_route"]);
+      const closedBy = labelFor(["resolved", "false_alarm", "cancelled", "drill_end"]);
+      inc.reporterId = null;
+      inc.reporterName = null;
+      inc.reporterIds = [];
+      inc.acknowledgedBy = ackBy;
+      inc.resolvedBy = closedBy;
+      inc.locationNote = null; // free text
+      for (const h of inc.headcounts || []) h.by = h.byRole ? actorLabel(h.byRole) : "Headcount taken";
+      for (const l of inc.log || []) {
+        l.by = actorLabel(l.role, l.org); // actor names → role/organisation label
+        l.note = ""; // free-text notes are erased
+      }
+      inc.anonymizedAt = now();
+      return inc;
+    }
+
+    if (p === "/api/admin/incidents/purge" && m === "POST") {
+      need(user, "super_admin");
+      const body = await readJson(req);
+      const reason = clean(body.reason, 200);
+      if (!reason) throw bad("A reason is required.", "reason_required");
+      if (body.confirm !== "PURGE") throw bad("Type PURGE to confirm. This cannot be undone.", "confirm_required");
+      const t = now();
+      let targets;
+      if (body.expired === true) {
+        targets = store.db.incidents.filter((i) => i.archivedAt && !i.anonymizedAt && incidentExpired(i, t, retention.incidentDays));
+      } else {
+        const ids = Array.isArray(body.ids) ? body.ids.map(String) : [];
+        if (!ids.length) throw bad("Choose at least one record, or pass expired: true.", "ids_required");
+        targets = ids.map((id) => store.db.incidents.find((i) => i.id === id) || null);
+        if (targets.some((i) => !i)) throw new HttpError(404, "not_found", "One or more records were not found.");
+        const notArchived = targets.filter((i) => !i.archivedAt);
+        if (notArchived.length) throw bad("Only archived records can be purged. Archive them first.", "not_eligible");
+        const alreadyPurged = targets.filter((i) => i.anonymizedAt);
+        if (alreadyPurged.length) throw new HttpError(409, "not_eligible", "That record was already purged; its personal data is gone.");
+      }
+      if (!targets.length) throw bad("Nothing is eligible for a purge yet.", "not_eligible");
+      for (const i of targets) anonymizeIncident(i);
+      // Expired drill summaries are removed entirely (they hold no personal data).
+      const beforeDrills = store.db.drills.length;
+      if (body.expired === true) store.db.drills = store.db.drills.filter((d) => !drillExpired(d, t, retention.drillDays));
+      const removedDrills = beforeDrills - store.db.drills.length;
+      store.save();
+      audit("incidents_purged", {
+        by: account.id, role: user.role, org: orgOf(account), reason,
+        target: targets.map((i) => i.id).join(","),
+        detail: `${targets.length} record(s) anonymised${removedDrills ? `, ${removedDrills} expired drill record(s) removed` : ""}`,
+        req,
+      });
+      commit({ type: "purged" });
+      return send(res, 200, { ok: true, count: targets.length, removedDrills });
+    }
+
+    let mpurge = p.match(/^\/api\/admin\/accounts\/([\w-]+)\/purge$/);
+    if (mpurge && m === "POST") {
+      need(user, "super_admin");
+      const acc = accountById(mpurge[1]);
+      if (!acc) throw new HttpError(404, "not_found", "Account not found.");
+      const body = await readJson(req);
+      purgeAccount(acc, { by: account.id, role: user.role, reason: body.reason, confirm: body.confirm, req, byRoute: true });
+      if (acc.teacherId) commit({ type: "roster_updated", id: acc.teacherId });
+      return send(res, 200, { ok: true, account: publicAccount(acc) });
+    }
+
+    // Data requests (restrict / erase) — reference and reason are mandatory.
+    if (p === "/api/admin/data-requests" && m === "POST") {
+      need(user, "super_admin");
+      const body = await readJson(req);
+      const type = clean(body.type, 20);
+      if (type !== "restrict" && type !== "erase") throw bad("Type must be restrict or erase.", "type_required");
+      const reference = clean(body.reference, 80);
+      const reason = clean(body.reason, 200);
+      if (!reference) throw bad("A request reference is required.", "reference_required");
+      if (!reason) throw bad("A reason is required.", "reason_required");
+      const acc = accountById(String(body.accountId ?? ""));
+      if (!acc) throw new HttpError(404, "not_found", "Account not found.");
+      if (type === "erase" && body.confirm !== "ERASE") throw bad("Type ERASE to confirm. Personal data cannot be recovered.", "confirm_required");
+      if (type === "restrict") {
+        if (acc.status === "active" || acc.status === "inactive") {
+          archiveAccount(acc, { by: account.id, role: user.role, reason: `Data request ${reference} — ${reason}`, req });
+        }
+      } else {
+        // erase: archive (unless that already happened), purge, then anonymise
+        // every incident this account reported — whatever retention says.
+        if (acc.status !== "purged") {
+          if (acc.status !== "archived") {
+            archiveAccount(acc, { by: account.id, role: user.role, reason: `Data request ${reference} — ${reason}`, req });
+          }
+          purgeAccount(acc, { by: account.id, role: user.role, reason: `Data request ${reference} — ${reason}`, confirm: "PURGE", req, byRoute: false });
+        }
+        const ids = new Set([acc.id, acc.teacherId].filter(Boolean));
+        const mine = store.db.incidents.filter((i) => ids.has(i.reporterId) || (i.reporterIds || []).some((x) => ids.has(x)));
+        for (const i of mine) if (!i.anonymizedAt) anonymizeIncident(i);
+        store.save();
+        if (acc.teacherId) commit({ type: "roster_updated", id: acc.teacherId });
+      }
+      audit("data_request_processed", {
+        by: account.id, role: user.role, org: orgOf(account), target: acc.id, reason,
+        detail: `${type} · reference ${reference}`,
+        req,
+      });
+      commit({ type: "account_changed" });
+      return send(res, 200, { ok: true, type, account: publicAccount(acc) });
+    }
+
     if (p === "/api/admin/audit" && m === "GET") {
       need(user, "super_admin"); // read-only view of the audit log
       const limit = Math.min(500, Math.max(1, Number(url.searchParams.get("limit")) || 200));
-      return send(res, 200, { entries: store.db.audit.slice(-limit).reverse(), total: store.db.audit.length });
+      const entries = store.db.audit.slice(-limit).reverse().map((e) => ({
+        ...e,
+        // Ids stay stored; the console reads them as actors and targets.
+        actorLabel: actorLabelFor(e.by),
+        targetLabel: targetLabelFor(e.target),
+      }));
+      return send(res, 200, { entries, total: store.db.audit.length });
     }
 
     if (p === "/api/admin/school-year" && m === "GET") {
@@ -984,7 +2074,7 @@ export function createApp(opts = {}) {
       const issued = [];
       for (const acc of store.db.accounts) {
         if (acc.role === "super_admin") continue; // admins are not rolled over
-        const pw = makeTempPassword();
+        const pw = makeTempPassword(acc);
         const cred = hashPassword(pw);
         acc.pwSalt = cred.salt; acc.pwHash = cred.hash;
         acc.mustChange = true; acc.temp = true; acc.failed = 0; acc.lockedUntil = 0;
@@ -997,6 +2087,105 @@ export function createApp(opts = {}) {
       commit({ type: "school_year" });
       // Temporary credentials are returned ONCE to the Super Admin for distribution and are never logged.
       return send(res, 200, { year: store.db.schoolYear.count, startedAt: t, accounts: issued });
+    }
+
+    // ---- Admin configuration (Super Admin only). The weights and thresholds exist
+    // ONLY behind this role guard; /api/config and /api/state never carry them.
+    if (p === "/api/admin/config" && m === "GET") {
+      need(user, "super_admin");
+      const open = openRealTickets();
+      return send(res, 200, { activeId: config.active().id, versions: config.list().slice().reverse(), openTickets: open });
+    }
+
+    if (p === "/api/admin/config" && m === "PUT") {
+      need(user, "super_admin");
+      const body = await readJson(req);
+      requireReentry(account, body.password, req, "config_save");
+      const open = openRealTickets();
+      if (open > 0 && body.confirmOpenTickets !== true)
+        throw new HttpError(409, "open_tickets", `${open} real incident${open === 1 ? " is" : "s are"} still open. New values only apply to tickets created after saving — confirm to continue.`, { openTickets: open });
+      let saved;
+      try {
+        saved = config.save(body.config, { by: account.email });
+      } catch (err) {
+        if (err instanceof ConfigError) throw new HttpError(400, "invalid_config", "Some configuration values are not valid.", { fields: err.fields });
+        throw err;
+      }
+      audit("config_saved", {
+        by: account.email, target: saved.id, req,
+        detail: `v${saved.version} activated — weights ${saved.weights.severity}/${saved.weights.vulnerability}/${saved.weights.locationRisk}/${saved.weights.timeSensitivity} %, CR ${saved.consistency.cr}, panel ${saved.panelValidationDate}${saved.panelReference ? ` (${saved.panelReference})` : ""}`,
+      });
+      commit({ type: "config_saved", id: saved.id });
+      return send(res, 200, { active: saved, versions: config.list(), openTickets: openRealTickets() });
+    }
+
+    const mcfg = p.match(/^\/api\/admin\/config\/([\w-]+)\/restore$/);
+    if (mcfg && m === "POST") {
+      need(user, "super_admin");
+      const body = await readJson(req);
+      requireReentry(account, body.password, req, "config_restore");
+      const source = config.list().find((v) => v.id === mcfg[1]);
+      if (!source) throw new HttpError(404, "not_found", "Configuration version not found.");
+      const open = openRealTickets();
+      if (open > 0 && body.confirmOpenTickets !== true)
+        throw new HttpError(409, "open_tickets", `${open} real incident${open === 1 ? " is" : "s are"} still open. Restoring only affects tickets created after saving — confirm to continue.`, { openTickets: open });
+      let saved;
+      try {
+        saved = config.restore(source.id, { by: account.email });
+      } catch (err) {
+        if (err instanceof ConfigError) throw new HttpError(400, "invalid_config", "That stored version is not valid.", { fields: err.fields });
+        throw err;
+      }
+      if (!saved) throw new HttpError(404, "not_found", "Configuration version not found.");
+      // Restoring never rewrites the old record – it appends a new version with the same values.
+      audit("config_restored", { by: account.email, target: saved.id, req, detail: `v${saved.version} created from v${source.version} — panel ${saved.panelValidationDate ?? "default values"}${saved.panelReference ? ` (${saved.panelReference})` : ""}` });
+      commit({ type: "config_saved", id: saved.id });
+      return send(res, 200, { active: saved, versions: config.list(), openTickets: openRealTickets() });
+    }
+
+    // ---- Incident records (Principal + Admin, read-only)
+    // One anonymised payload powers the three tabs: real incidents (resolved +
+    // archived, non-drill), drill records, and the system archive. Analytics are
+    // aggregated server-side for the chosen period; no personal data is returned.
+    if (p === "/api/records" && m === "GET") {
+      need(user, "principal", "super_admin");
+      const period = R.resolvePeriod({
+        period: url.searchParams.get("period") || "sy",
+        from: url.searchParams.get("from") || "",
+        to: url.searchParams.get("to") || "",
+        now: now(),
+        schoolYearStartedAt: store.db.schoolYear?.startedAt ?? null,
+      });
+      const real = store.db.incidents
+        .filter((i) => !i.drill && i.status === "RESOLVED")
+        .map(recordEntry)
+        .sort((a, b) => b.createdAt - a.createdAt);
+      const archived = store.db.incidents
+        .filter((i) => i.archivedAt)
+        .map(recordEntry)
+        .sort((a, b) => (b.archivedAt || 0) - (a.archivedAt || 0));
+      const dm = store.db.modes.drill;
+      const accounts = user.role === "super_admin"
+        ? store.db.accounts
+            .filter((a) => a.status === "archived" || a.status === "purged")
+            .map((a) => publicAccount(a))
+            .sort((a, b) => (b.archivedAt || 0) - (a.archivedAt || 0))
+        : [];
+      return send(res, 200, {
+        period,
+        incidents: real,
+        analytics: R.summarizeRecords(real, period),
+        drills: {
+          ongoing: dm.active
+            ? { id: dm.id, label: dm.label, startedAt: dm.startedAt, active: true, scope: dm.scope === "simulation" ? "simulation" : "school" }
+            : null,
+          // Drill scheduling is not part of the drill-mode data model yet; the
+          // section exists so a future scheduled drill can appear there.
+          scheduled: [],
+          past: store.db.drills.slice().reverse().map(drillEntry),
+        },
+        archives: { incidents: archived, accounts },
+      });
     }
 
     if (p === "/api/state" && m === "GET") return send(res, 200, stateFor(user));
@@ -1012,9 +2201,16 @@ export function createApp(opts = {}) {
     let mt = p.match(/^\/api\/incidents\/([\w-]+)\/(seen|ack|onsite|resolve)$/);
     if (mt && m === "POST") {
       need(user, "principal", "responder");
-      const body = mt[2] === "resolve" || mt[2] === "ack" ? await readJson(req) : {};
-      const { incident, changed } = transition(user, mt[1], mt[2], body);
-      if (changed) commit({ type: "incident_updated", id: incident.id, status: incident.status });
+      const transitionalBody = mt[2] === "resolve" || mt[2] === "ack" ? await readJson(req) : {};
+      const { incident, changed } = transition(user, mt[1], mt[2], transitionalBody);
+      if (changed) {
+        // Responder actions are audit-logged with the organization that acted.
+        if (user.role === "responder") {
+          const action = { ack: "incident_acknowledged", onsite: "incident_on_site", resolve: "incident_resolved" }[mt[2]];
+          if (action) audit(action, { by: account.id, role: user.role, org: orgOf(account), target: incident.id, req, detail: incident.status });
+        }
+        commit({ type: "incident_updated", id: incident.id, status: incident.status });
+      }
       return send(res, 200, { incident: publicIncident(incident, user), changed });
     }
 
@@ -1030,53 +2226,160 @@ export function createApp(opts = {}) {
       const t = now();
       inc.status = "RESOLVED";
       inc.outcome = "cancelled";
-      inc.resolvedAt = t;
+      inc.resolvedAt = inc.resolvedAt ?? t;
       inc.resolvedBy = user.name;
       inc.log.push({ at: t, by: user.name, role: user.role, action: "cancelled", note: "Cancelled by the reporter" });
       commit({ type: "incident_updated", id: inc.id, status: inc.status });
       return send(res, 200, { incident: publicIncident(inc, user), changed: true });
     }
 
-    // History: only closed incidents can be removed.
-    // Principal = permanent delete for everyone. Other roles = remove from their own history only.
-    if (p === "/api/history" && m === "DELETE") {
-      need(user, "teacher", "principal", "parent", "responder");
-      const db = store.db;
-      const mine = db.incidents.filter((i) => i.status === "RESOLVED" && canSee(i, user) && !isHiddenFor(i, user));
-      if (user.role === "principal") {
-        const ids = new Set(mine.map((i) => i.id));
-        db.incidents = db.incidents.filter((i) => !ids.has(i.id));
-      } else {
-        for (const i of mine) (i.hiddenBy = i.hiddenBy || []).push(user.id);
+    // Records are never deleted through the API. The only remove-like verbs are
+    // POST /api/me/hidden (per-user, reversible), POST /api/incidents/:id/archive
+    // (organization-wide) and the Admin purge routes — all added below.
+
+
+    // ---- ARCHIVE (Principal): the record leaves the live views but stays readable
+    // and audit-logged. There is no delete path — see /api/admin/*/purge for erasure.
+    const archiveRoleLabel = (id) => {
+      const entry = store.db.roster.find((r) => r.id === id);
+      if (entry) return "Teacher";
+      const acc = accountById(id);
+      if (!acc) return "Unknown";
+      return { teacher: "Teacher", principal: "Principal", super_admin: "Admin", responder: "Responder", parent: "Parent/PTA" }[acc.role] || "Unknown";
+    };
+
+    /** Read-only archive row: the reporter is shown as a role label, never a name/id. */
+    const archiveEntry = (i, forUser) => {
+      const view = publicIncident(i, forUser);
+      delete view.reporterName;
+      delete view.reporterId;
+      return {
+        ...view,
+        reporterRole: archiveRoleLabel(i.reporterId),
+        // Archive metadata is internal: only the Principal and the Admin see it.
+        ...(keepsInternal(forUser)
+          ? { archivedAt: i.archivedAt, archivedAuto: Boolean(i.archivedAuto), archiveReason: i.archiveReason ?? null }
+          : {}),
+        anonymizedAt: i.anonymizedAt ?? null,
+        readOnly: true,
+        hidden: isHiddenFor(i, forUser),
+      };
+    };
+
+    const canArchiveTicket = (i) => {
+      if (i.status !== "RESOLVED")
+        throw bad("Only closed tickets can be archived — resolve or cancel it first. Active tickets are never archived.", "active_ticket");
+    };
+
+    if (p === "/api/incidents/archive-resolved" && m === "POST") {
+      need(user, "principal");
+      const body = await readJson(req);
+      const reason = clean(body.reason, 200);
+      const t = now();
+      const targets = store.db.incidents.filter((i) => !i.archivedAt && i.status === "RESOLVED");
+      for (const inc of targets) {
+        inc.archivedAt = t;
+        inc.archivedBy = account.id;
+        inc.archiveReason = reason || null;
+        inc.archivedAuto = false;
+        inc.log.push({ at: t, by: user.name, role: user.role, action: "archived", internal: true, note: reason ? `Archived — ${reason}` : "Archived" });
       }
-      if (mine.length) commit({ type: "history_changed" });
-      return send(res, 200, { ok: true, count: mine.length, mode: user.role === "principal" ? "permanent" : "hidden" });
+      if (targets.length) {
+        store.save();
+        // One audit entry listing the ids — never a name.
+        audit("incident_archived", {
+          by: account.id, role: user.role, org: orgOf(account), target: targets.map((i) => i.id).join(","),
+          reason: reason || null, detail: `${targets.length} closed ticket(s) archived at once`, req,
+        });
+        commit({ type: "archive_changed" }); // no incident id in the SSE payload
+      }
+      return send(res, 200, { ok: true, count: targets.length });
     }
 
-    let md = p.match(/^\/api\/incidents\/([\w-]+)$/);
-    if (md && m === "DELETE") {
-      need(user, "teacher", "principal", "parent", "responder");
-      const inc = store.db.incidents.find((i) => i.id === md[1] && canSee(i, user));
+    let mar = p.match(/^\/api\/incidents\/([\w-]+)\/(archive|restore)$/);
+    if (mar && m === "POST") {
+      need(user, "principal");
+      const inc = store.db.incidents.find((i) => i.id === mar[1]);
       if (!inc) throw new HttpError(404, "not_found", "Incident not found.");
-      if (inc.status !== "RESOLVED") throw new HttpError(409, "not_closed", "Only closed incidents can be deleted from history.");
-      if (user.role === "principal") store.db.incidents = store.db.incidents.filter((i) => i.id !== inc.id);
-      else if (!isHiddenFor(inc, user)) (inc.hiddenBy = inc.hiddenBy || []).push(user.id);
-      commit({ type: "history_changed", id: inc.id });
-      return send(res, 200, { ok: true, mode: user.role === "principal" ? "permanent" : "hidden" });
+      const body = await readJson(req);
+      const t = now();
+      if (mar[2] === "archive") {
+        if (inc.archivedAt) throw new HttpError(409, "already_archived", "This ticket is already archived.");
+        canArchiveTicket(inc);
+        const reason = clean(body.reason, 200);
+        inc.archivedAt = t;
+        inc.archivedBy = account.id;
+        inc.archiveReason = reason || null;
+        inc.archivedAuto = false;
+        inc.log.push({ at: t, by: user.name, role: user.role, action: "archived", internal: true, note: reason ? `Archived — ${reason}` : "Archived" });
+        store.save();
+        audit("incident_archived", {
+          by: account.id, role: user.role, org: orgOf(account), target: inc.id,
+          reason: reason || null, req,
+        });
+        commit({ type: "archive_changed" });
+        return send(res, 200, { ok: true, incident: archiveEntry(inc, user) });
+      }
+      // restore
+      if (!inc.archivedAt) throw bad("This ticket is not archived.");
+      const reason = clean(body.reason, 200);
+      inc.archivedAt = null;
+      inc.archivedBy = null;
+      inc.archiveReason = null;
+      inc.archivedAuto = false;
+      inc.log.push({ at: t, by: user.name, role: user.role, action: "restored", internal: true, note: reason ? `Restored to live view — ${reason}` : "Restored to live view" });
+      store.save();
+      audit("incident_restored", {
+        by: account.id, role: user.role, org: orgOf(account), target: inc.id,
+        reason: reason || null, req,
+      });
+      commit({ type: "archive_changed" });
+      return send(res, 200, { ok: true, incident: publicIncident(inc, user) });
     }
 
+    // Paginated archive: Principal + Admin see every archived ticket, a Teacher only
+    // their own reports, a Responder the records of every ticket they can work with,
+    // every other role is refused.
+    if (p === "/api/incidents/archive" && m === "GET") {
+      if (!['principal', 'super_admin', 'teacher', 'responder'].includes(user.role))
+        throw new HttpError(403, "forbidden", "Your role cannot read the archive.");
+      const limit = Math.min(50, Math.max(1, Number(url.searchParams.get("limit")) || 50));
+      const page = Math.max(1, Number(url.searchParams.get("page")) || 1);
+      let items = store.db.incidents.filter((i) => i.archivedAt);
+      if (user.role === "teacher") items = items.filter((i) => canSee(i, user));
+      // A responder's archive is the organization's own work: a ticket their org
+      // took part in, and never a drill they could not see.
+      if (user.role === "responder") {
+        const org = user.org;
+        items = items.filter((i) => canSee(i, user) && Boolean(org && (i.responses?.[org] || i.acknowledgedByOrg === org || i.resolvedByOrg === org)));
+      }
+      items = [...items].sort((a, b) => (b.archivedAt || 0) - (a.archivedAt || 0));
+      const total = items.length;
+      const start = (page - 1) * limit;
+      return send(res, 200, {
+        items: items.slice(start, start + limit).map((i) => archiveEntry(i, user)),
+        total, limit, page, pages: Math.max(1, Math.ceil(total / limit)),
+      });
+    }
 
     // ---- Headcount verification (aggregate numbers only – no pupil names or personal data)
     let mh = p.match(/^\/api\/incidents\/([\w-]+)\/headcount$/);
     if (mh && m === "POST") {
       need(user, "teacher", "principal");
-      const inc = store.db.incidents.find((i) => i.id === mh[1] && canSee(i, user));
+      const inc = store.db.incidents.find((i) => i.id === mh[1]);
       if (!inc) throw new HttpError(404, "not_found", "Incident not found.");
+      const access = headcountAccess(inc, user);
+      if (user.role === "teacher" && !canSee(inc, user) && !access.visible)
+        throw new HttpError(404, "not_found", "Incident not found.");
       if (inc.status === "RESOLVED") throw new HttpError(409, "already_resolved", "This incident is already closed.");
+      if (!access.required) throw new HttpError(403, "forbidden", "This incident has no class to count.");
+      // Only the owner of the class (or the Principal) may record or update it.
+      if (user.role === "teacher" && !access.canRecord)
+        throw new HttpError(403, "forbidden", "Only the teacher who owns this class can record its headcount.");
       const body = await readJson(req);
-      const need_ = expectedSections(inc);
-      const section = user.role === "teacher" ? user.section : clean(body.section, 60);
-      if (!need_.includes(section)) throw new HttpError(403, "forbidden", "That section is not part of this incident.");
+      const need_ = access.sections;
+      const section = user.role === "teacher" ? access.section : (clean(body.section, 60) || access.section || "");
+      if (!section || !need_.includes(section)) throw new HttpError(403, "forbidden", "That section is not part of this incident.");
       const roster = store.db.roster.find((r) => r.section === section && r.status === "active") || store.db.roster.find((r) => r.section === section);
       const expected = body.expected !== undefined && body.expected !== null && body.expected !== "" ? Number(body.expected) : roster ? roster.registry : NaN;
       const present = Number(body.present);
@@ -1133,7 +2436,10 @@ export function createApp(opts = {}) {
       const t = now();
       let summary = null;
       if (body.active && !dm.active) {
-        Object.assign(dm, { active: true, id: store.nextId("DRL-"), label: clean(body.label, 80) || "Campus disaster drill", startedAt: t, by: user.name });
+        // The scope is chosen when the drill starts: "school" keeps responders
+        // out entirely, "simulation" sends them the drill tickets.
+        const scope = body.scope === "simulation" ? "simulation" : "school";
+        Object.assign(dm, { active: true, id: store.nextId("DRL-"), label: clean(body.label, 80) || "Campus disaster drill", startedAt: t, by: user.name, scope });
       } else if (!body.active && dm.active) {
         summary = endDrill(user, t);
       }
@@ -1148,16 +2454,38 @@ export function createApp(opts = {}) {
       const t = now();
       const rt = store.db.modes.route;
       Object.assign(rt, { status: body.status, note: clean(body.note, 140), updatedAt: t, by: user.name });
-      for (const inc of store.db.incidents) {
-        if (!inc.eta || inc.status !== "EN_ROUTE") continue; // arrived or closed: nothing to re-estimate
-        const e = inc.eta;
+      // Re-estimate every org still on the way — each has its own ETA — plus the
+      // headline ETA of the org that owns it.
+      const restimate = (e) => {
         const oldMs = e.blocked || !e.minutes ? null : e.minutes * 60000;
-        const remainingFrac = oldMs ? Math.max(0, 1 - (t - e.startedAt) / oldMs) : 1;
-        const r = D.computeEta({ mode: e.mode, distanceKm: e.distanceKm, route: body.status });
+        const frac = oldMs ? Math.max(0, 1 - (t - e.startedAt) / oldMs) : 1;
+        const r = D.computeEta({ mode: e.mode, distanceKm: e.distanceKm, route: body.status, speeds: config.active().responderSpeeds });
         const oldMin = e.blocked ? "blocked" : `${Math.max(0, Math.ceil((e.arriveBy - t) / 60000))} min left`;
-        if (r.blocked) inc.eta = { ...e, routeStatus: body.status, blocked: true, minutes: null, arriveBy: null };
-        else inc.eta = { ...e, routeStatus: body.status, blocked: false, minutes: r.minutes, startedAt: t - (1 - remainingFrac) * r.minutes * 60000, arriveBy: t + remainingFrac * r.minutes * 60000 };
-        const newMin = inc.eta.blocked ? "no usable route — reroute" : `${Math.max(0, Math.ceil((inc.eta.arriveBy - t) / 60000))} min left`;
+        const next = r.blocked
+          ? { ...e, routeStatus: body.status, blocked: true, minutes: null, arriveBy: null }
+          : { ...e, routeStatus: body.status, blocked: false, minutes: r.minutes, startedAt: t - (1 - frac) * r.minutes * 60000, arriveBy: t + frac * r.minutes * 60000 };
+        const newMin = next.blocked ? "no usable route — reroute" : `${Math.max(0, Math.ceil((next.arriveBy - t) / 60000))} min left`;
+        return { next, oldMin, newMin };
+      };
+      for (const inc of store.db.incidents) {
+        if (inc.status !== "EN_ROUTE") continue; // arrived or closed: nothing to re-estimate
+        const rs = inc.responses && typeof inc.responses === "object" ? inc.responses : {};
+        const moving = D.RESPONDER_ORG_IDS.filter((id) => rs[id] && rs[id].status === "en_route" && rs[id].mode);
+        if (moving.length) {
+          for (const id of moving) {
+            const { next, oldMin, newMin } = restimate(rs[id]);
+            rs[id] = next;
+            const label = D.orgLabel(id);
+            inc.log.push({ at: t, by: label, role: user.role, org: id, action: "route", note: `Approach route ${body.status} (${label}): ETA ${oldMin} → ${newMin}` });
+          }
+          const owner = inc.acknowledgedByOrg;
+          if (owner && rs[owner] && rs[owner].status === "en_route") inc.eta = { ...etaView(rs[owner]) };
+          continue;
+        }
+        // Legacy ticket scored before per-org responses existed.
+        if (!inc.eta) continue;
+        const { next, oldMin, newMin } = restimate(inc.eta);
+        inc.eta = next;
         inc.log.push({ at: t, by: user.name, role: user.role, action: "route", note: `Approach route ${body.status}: ETA ${oldMin} → ${newMin}` });
       }
       commit({ type: "route_status", status: body.status });
@@ -1168,54 +2496,81 @@ export function createApp(opts = {}) {
       need(user, "teacher");
       const entry = store.db.roster.find((r) => r.id === user.id);
       if (!entry) throw new HttpError(401, "unauthorized", "Please sign in again.");
-      applyTeacherEdit(entry, parseTeacherFields(await readJson(req)));
+      applyTeacherEdit(entry, parseTeacherFields(await readJson(req)), { by: account.email, req });
       const acc = teacherAccount(entry.id);
-      if (acc) { acc.name = entry.name; acc.section = entry.section; } // keep the account record in step with the roster
+      if (acc) { acc.name = entry.name; acc.section = entry.section; acc.grade = entry.grade; acc.sectionName = entry.sectionName; } // keep the account record in step with the roster
       commit({ type: "roster_updated", id: entry.id });
-      return send(res, 200, { user: userFromAccount(acc) || { id: entry.id, role: "teacher", name: entry.name, section: entry.section, room: entry.room, gps: entry.gps, registry: entry.registry, subtitle: `Teacher · ${entry.section}` } });
+      return send(res, 200, { user: userFromAccount(acc) || { id: entry.id, role: "teacher", name: entry.name, section: entry.section, room: entry.room, gps: entry.gps, registry: entry.registry, registryUpdatedAt: entry.registryUpdatedAt ?? null, subtitle: `Teacher · ${entry.section}` } });
+    }
+
+    if (p === "/api/profile/room" && m === "PUT") {
+      need(user, "teacher");
+      const entry = store.db.roster.find((r) => r.id === user.id);
+      if (!entry) throw new HttpError(401, "unauthorized", "Please sign in again.");
+      const body = await readJson(req);
+      const room = C.roomById(String(body.roomId || ""));
+      if (!room) throw bad("Unknown room.");
+      entry.room = room.legacy;
+      // The saved coordinate follows the new room (one anchor per building).
+      const anchor = C.gpsForRoom(room);
+      if (anchor) entry.gps = anchor;
+      const acc = teacherAccount(entry.id);
+      if (acc) acc.name = entry.name;
+      store.save();
+      audit("saved_room_changed", { by: user.email, target: entry.id, detail: room.legacy, req });
+      commit({ type: "roster_updated", id: entry.id });
+      return send(res, 200, { ok: true, room: entry.room });
     }
 
     if (p === "/api/roster" && m === "POST") {
       need(user, "principal");
       const body = await readJson(req);
+      // The Principal supplies the sign-in email. The server never invents one.
+      const email = normEmail(body.email);
+      if (!email) throw bad("Email is required.", "email_required");
+      if (!emailOk(email)) throw bad("Enter a valid email address.", "invalid_email");
+      if (findAccount(email)) throw new HttpError(409, "email_taken", "An account with that email already exists.");
       const fields = parseTeacherFields(body);
       const gps = /^-?\d{1,3}\.\d+, ?-?\d{1,3}\.\d+$/.test(String(body.gps || "")) ? String(body.gps) : DEFAULT_GPS;
       const entry = { id: store.nextId("t"), registry: 30, ...fields, gps, status: body.status === "inactive" ? "inactive" : "active" };
       store.db.roster.push(entry);
       // No self-registration: creating a roster row also provisions its sign-in account.
-      const email = `${entry.id}@sinalhanes.deped.ph`;
-      const tempPassword = makeTempPassword();
+      const tempPassword = makeTempPassword({ email, name: entry.name });
       const acc = newAccount({ email, role: "teacher", name: entry.name, password: tempPassword, mustChange: true, temp: true, teacherId: entry.id, section: entry.section });
       store.save();
       audit("account_created", { by: user.email, target: email, detail: "teacher (via roster)", req });
       commit({ type: "roster_updated", id: entry.id });
-      return send(res, 201, { teacher: entry, account: publicAccount(acc), tempPassword });
+      return send(res, 201, { teacher: entry, account: publicAccount(acc), tempPassword, email });
+    }
+
+    mt = p.match(/^\/api\/roster\/([\w-]+)\/archive$/);
+    if (mt && m === "POST") {
+      need(user, "principal");
+      const body = await readJson(req);
+      const entry = store.db.roster.find((r) => r.id === mt[1]);
+      if (!entry) throw new HttpError(404, "not_found", "Teacher not found.");
+      const acc = teacherAccount(entry.id);
+      if (!acc) throw new HttpError(404, "not_found", "That teacher has no sign-in account to archive.");
+      archiveAccount(acc, { by: account.id, role: user.role, reason: body.reason, req });
+      commit({ type: "roster_updated", id: entry.id });
+      return send(res, 200, { ok: true, account: publicAccount(acc) });
     }
 
     mt = p.match(/^\/api\/roster\/([\w-]+)$/);
-    if (mt && (m === "PUT" || m === "DELETE")) {
+    if (mt && m === "PUT") {
       need(user, "principal");
       const entry = store.db.roster.find((r) => r.id === mt[1]);
       if (!entry) throw new HttpError(404, "not_found", "Teacher not found.");
-      if (m === "DELETE") {
-        store.db.roster = store.db.roster.filter((r) => r.id !== entry.id);
-        const acc = teacherAccount(entry.id);
-        if (acc) {
-          acc.status = "inactive";
-          revokeSessions(acc.id);
-          audit("account_deactivated", { by: user.email, target: acc.email, detail: "removed from roster", req });
-        }
-        commit({ type: "roster_updated", id: entry.id });
-        return send(res, 200, { ok: true });
-      }
       const body = await readJson(req);
       const values = parseTeacherFields(body, { partial: true });
       if (body.status === "active" || body.status === "inactive") values.status = body.status;
-      applyTeacherEdit(entry, values);
+      applyTeacherEdit(entry, values, { by: account.email, req });
       const acc = teacherAccount(entry.id);
       if (acc) {
         acc.name = entry.name;
         acc.section = entry.section;
+        acc.grade = entry.grade;
+        acc.sectionName = entry.sectionName;
         if (values.status && acc.status !== (values.status === "active" ? "active" : "inactive")) {
           acc.status = values.status === "active" ? "active" : "inactive";
           if (acc.status === "inactive") { revokeSessions(acc.id); audit("account_deactivated", { by: user.email, target: acc.email, detail: "roster status set to off duty", req }); }
@@ -1229,6 +2584,9 @@ export function createApp(opts = {}) {
     if (p === "/api/admin/reset" && m === "POST") {
       need(user, "principal");
       if (!allowReset) throw new HttpError(403, "forbidden", "Demo reset is disabled on this server.");
+      // Never available in production, even when the demo flag is switched on.
+      if (process.env.NODE_ENV === "production")
+        throw new HttpError(403, "forbidden", "Demo reset is disabled on this server.");
       store.reset({ keepRoster: false });
       if (seedDemoIncident) seedDemo();
       commit({ type: "reset" });
@@ -1242,16 +2600,27 @@ export function createApp(opts = {}) {
   function endDrill(user, t) {
     const db = store.db;
     const dm = db.modes.drill;
+    const scope = dm.scope === "simulation" ? "simulation" : "school";
     const items = db.incidents.filter((i) => i.drillId === dm.id);
     for (const inc of items) {
       if (inc.status === "RESOLVED") continue;
-      inc.status = "RESOLVED"; inc.outcome = "drill"; inc.resolvedAt = t; inc.resolvedBy = user.name;
+      inc.status = "RESOLVED"; inc.outcome = "drill"; inc.resolvedAt = inc.resolvedAt ?? t; inc.resolvedBy = user.name;
       inc.log.push({ at: t, by: user.name, role: user.role, action: "drill_end", note: "Drill ended" });
     }
     const avg = (arr) => { const v = arr.filter((x) => x !== null && x !== undefined); return v.length ? Math.round(v.reduce((a, b) => a + b, 0) / v.length) : null; };
-    const rows = items.map((i) => ({ id: i.id, subLabel: i.subLabel, toReportMs: i.createdAt - dm.startedAt, toAckMs: i.enRouteAt ? i.enRouteAt - i.createdAt : null, toOnSiteMs: i.onSiteAt ? i.onSiteAt - i.createdAt : null, toHeadcountMs: i.firstHeadcountAt ? i.firstHeadcountAt - i.createdAt : null, interactions: i.interactions }));
+    // A school-only drill records no responder metrics at all.
+    const rows = items.map((i) => ({
+      id: i.id,
+      subLabel: i.subLabel,
+      toReportMs: i.createdAt - dm.startedAt,
+      toAckMs: scope === "simulation" && i.enRouteAt ? i.enRouteAt - i.createdAt : null,
+      toOnSiteMs: scope === "simulation" && i.onSiteAt ? i.onSiteAt - i.createdAt : null,
+      toHeadcountMs: i.firstHeadcountAt ? i.firstHeadcountAt - i.createdAt : null,
+      interactions: i.interactions,
+    }));
     const summary = {
       id: dm.id, label: dm.label, startedAt: dm.startedAt, endedAt: t, startedBy: dm.by, endedBy: user.name,
+      scope,
       incidents: rows.length,
       avgToReportMs: avg(rows.map((r) => r.toReportMs)),
       avgToAckMs: avg(rows.map((r) => r.toAckMs)),
@@ -1262,7 +2631,7 @@ export function createApp(opts = {}) {
     };
     db.drills.push(summary);
     if (db.drills.length > 30) db.drills.shift();
-    Object.assign(dm, { active: false, id: null, label: "", startedAt: null, by: null });
+    Object.assign(dm, { active: false, id: null, label: "", startedAt: null, by: null, scope: "school" });
     return summary;
   }
 
@@ -1321,7 +2690,7 @@ export function createApp(opts = {}) {
       return serveStatic(req, res, url.pathname);
     } catch (err) {
       if (res.headersSent) return res.end();
-      if (err instanceof HttpError) return send(res, err.status, { error: err.code, message: err.message });
+      if (err instanceof HttpError) return send(res, err.status, { error: err.code, message: err.message, ...(err.details || {}) });
       log("Unhandled error:", err);
       return send(res, 500, { error: "server_error", message: "Something went wrong on the server." });
     }
@@ -1335,8 +2704,11 @@ export function createApp(opts = {}) {
     server,
     store,
     runEscalations,
+    runArchiveSweep,
+    retention,
     close() {
       if (tickTimer) clearInterval(tickTimer);
+      if (archiveTimer) clearInterval(archiveTimer);
       store.flush();
       for (const c of sseClients) { try { c.res.end(); } catch { /* ignore */ } }
       sseClients.clear();

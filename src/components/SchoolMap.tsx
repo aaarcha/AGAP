@@ -1,8 +1,18 @@
 import { useRef } from "react";
 import { NON_CLASSROOM_AREAS } from "../../shared/domain.js";
+import { roomByLegacy } from "../../shared/campus.js";
 
 type Area = { id: string; label: string; risk: number };
 export type MapPoint = { x: number; y: number };
+export type RoomMarker = {
+  x: number;
+  y: number;
+  label?: string;
+  active?: boolean;
+  /** Set on incident pins so the map can report a tap back to its screen. */
+  id?: string;
+  tier?: "CRITICAL" | "HIGH" | "MODERATE";
+};
 
 export const SCHOOL_MAP_POINTS: Record<string, MapPoint> = {
   canteen: { x: 12, y: 61 },
@@ -13,6 +23,10 @@ export const SCHOOL_MAP_POINTS: Record<string, MapPoint> = {
 };
 
 export function pointForSavedRoom(room?: string): { x: number; y: number } {
+  // The campus layout is the source of truth; the fallback keeps older room
+  // strings (and rooms outside the layout) on the map.
+  const known = room ? roomByLegacy(room) : null;
+  if (known) return known.point;
   return room?.toLowerCase().includes("bldg b") || room?.toLowerCase().includes("building b")
     ? { x: 70, y: 29 }
     : { x: 29, y: 29 };
@@ -41,12 +55,24 @@ export function SchoolMap({
   showDetected = false,
   detectedPosition,
   onDetectedPositionChange,
+  selectedPoint,
+  roomMarkers,
+  onRoomMarkerClick,
+  showSavedRoom = true,
 }: {
   room?: string;
   compact?: boolean;
   showDetected?: boolean;
   detectedPosition?: { x: number; y: number } | null;
   onDetectedPositionChange?: (point: { x: number; y: number }) => void;
+  /** The place the reporter chose – drawn apart from the saved room. */
+  selectedPoint?: MapPoint | null;
+  /** Classroom dots of the floor being picked (Building → Floor → Room). */
+  roomMarkers?: RoomMarker[];
+  /** Called with `marker.id` when a marker is tapped. Without it markers are inert. */
+  onRoomMarkerClick?: (id: string) => void;
+  /** Hide the "saved room" dot when the map shows incidents instead of a picker. */
+  showSavedRoom?: boolean;
 }) {
   const savedPoint = pointForSavedRoom(room);
   const detectedPoint = showDetected ? (detectedPosition ?? { x: 91, y: 12 }) : null;
@@ -105,6 +131,7 @@ export function SchoolMap({
           onPointerMove={moveDrag}
           onPointerUp={endDrag}
           onPointerCancel={endDrag}
+          onPointerLeave={endDrag}
           style={{ touchAction: "none" }}
         >
           <rect width="100" height="100" fill="#E0F2FE" />
@@ -161,10 +188,49 @@ export function SchoolMap({
             <text x="88.5" y="51" textAnchor="middle" fontSize="2.5" fill="#334155" fontWeight="800">CR</text>
           </g>
 
+          {/* Classroom / incident dots. Only the ones with an id + handler are tappable. */}
+          {roomMarkers?.map((m, i) => {
+            const clickable = Boolean(onRoomMarkerClick && m.id);
+            const fill = m.tier === "CRITICAL" ? "#C2415C" : m.tier === "HIGH" ? "#B45309" : m.active ? "#16A34A" : "#64748B";
+            const activate = () => { if (m.id) onRoomMarkerClick?.(m.id); };
+            return (
+              <g
+                key={m.id ?? `room-${i}`}
+                data-pin-id={m.id}
+                role={clickable ? "button" : undefined}
+                tabIndex={clickable ? 0 : undefined}
+                aria-label={clickable ? `Incident pin: ${m.label ?? "room"}` : undefined}
+                onClick={clickable ? activate : undefined}
+                onKeyDown={clickable ? (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); activate(); } } : undefined}
+                style={clickable ? { cursor: "pointer" } : undefined}
+              >
+                {clickable && <circle cx={m.x} cy={m.y} r="4.5" fill="transparent" />}
+                {m.active && <circle cx={m.x} cy={m.y} r="4" fill="none" stroke={fill} strokeWidth=".6" opacity=".8" />}
+                <circle cx={m.x} cy={m.y} r={m.active ? 2.2 : 1.5} fill={fill} opacity={m.active ? 1 : 0.8} />
+                {m.label && (
+                  <text x={m.x} y={m.y - 2.6} textAnchor="middle" fontSize="2.2" fill={m.active ? "#166534" : "#475569"} fontWeight="700">{m.label}</text>
+                )}
+              </g>
+            );
+          })}
+
           {/* Saved classroom marker */}
-          <circle cx={savedPoint.x} cy={savedPoint.y} r="5" fill="#425B9A" opacity=".15" />
-          <circle cx={savedPoint.x} cy={savedPoint.y} r="2.4" fill="#425B9A" stroke="white" strokeWidth="1" />
-          <text x={savedPoint.x} y={savedPoint.y - 4.5} textAnchor="middle" fontSize="2.7" fill="#34487D" fontWeight="800">SAVED ROOM</text>
+          {showSavedRoom && (
+            <>
+              <circle cx={savedPoint.x} cy={savedPoint.y} r="5" fill="#425B9A" opacity=".15" />
+              <circle cx={savedPoint.x} cy={savedPoint.y} r="2.4" fill="#425B9A" stroke="white" strokeWidth="1" />
+              <text x={savedPoint.x} y={savedPoint.y - 4.5} textAnchor="middle" fontSize="2.7" fill="#34487D" fontWeight="800">SAVED ROOM</text>
+            </>
+          )}
+
+          {/* The place the reporter chose on the map */}
+          {selectedPoint && (
+            <>
+              <circle cx={selectedPoint.x} cy={selectedPoint.y} r="6" fill="#16A34A" opacity=".18" />
+              <circle cx={selectedPoint.x} cy={selectedPoint.y} r="2.6" fill="#16A34A" stroke="white" strokeWidth="1" />
+              <text x={selectedPoint.x} y={selectedPoint.y - 4.5} textAnchor="middle" fontSize="2.7" fill="#166534" fontWeight="800">SELECTED</text>
+            </>
+          )}
 
           {/* Detected device GPS marker; drag it to adjust the map-confirmed position */}
           {detectedPoint && (
@@ -206,7 +272,8 @@ export function SchoolMap({
       </div>
 
       <div className="flex items-center gap-3 px-2.5 py-1.5 border-t border-slate-100 text-xs text-slate-500">
-        <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-brand-600" /> Saved classroom</span>
+        {showSavedRoom && <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-brand-600" /> Saved classroom</span>}
+        {selectedPoint && <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-emerald-600" /> Selected</span>}
         {showDetected && <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-blush" /> Detected GPS</span>}
       </div>
     </div>

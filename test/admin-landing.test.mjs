@@ -1,0 +1,684 @@
+/**
+ * Super Admin layout: the landing is a dashboard + user roster (the retention
+ * policy table moved to About ASPIRE), More is a plain menu of row links, and
+ * the consolidated Incidents & Records view owns the archives.
+ *
+ * Same harness as back-bar.test.mjs / filter-screens.test.mjs: the full App is
+ * compiled with esbuild with src/lib/store.tsx swapped for the fake context in
+ * test/fixtures/store-stub.ts, so each screen runs in jsdom with no server.
+ */
+import test from "node:test";
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { build } from "esbuild";
+import { JSDOM } from "jsdom";
+
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const outDir = path.join(root, "node_modules/.cache/aspire-test");
+const outfile = path.join(outDir, "admin-landing.mjs");
+const storeStub = path.join(root, "test/fixtures/store-stub.ts");
+
+fs.mkdirSync(outDir, { recursive: true });
+await build({
+  stdin: {
+    contents:
+      `export * from ${JSON.stringify(storeStub)};\n` +
+      `export { default as App } from ${JSON.stringify(path.join(root, "src/App.tsx"))};\n` +
+      `export { clearSessionStates } from ${JSON.stringify(path.join(root, "src/lib/filters.ts"))};`,
+    resolveDir: root,
+    sourcefile: "admin-landing-entry.ts",
+    loader: "tsx",
+  },
+  outfile,
+  bundle: true,
+  format: "esm",
+  platform: "browser",
+  target: "es2020",
+  jsx: "automatic",
+  logLevel: "silent",
+  external: ["react", "react-dom", "react-dom/client", "react/jsx-runtime"],
+  plugins: [
+    {
+      name: "alias-store",
+      setup(b) {
+        b.onResolve({ filter: /lib\/store$/ }, () => ({ path: storeStub }));
+      },
+    },
+  ],
+});
+
+const dom = new JSDOM("<!doctype html><html><body></body></html>", { url: "http://localhost/", pretendToBeVisual: true });
+const w = dom.window;
+const shared = [
+  "window", "document", "navigator", "HTMLElement", "HTMLInputElement", "HTMLButtonElement",
+  "Node", "Element", "Event", "KeyboardEvent", "MouseEvent", "PointerEvent", "MutationObserver", "SVGElement",
+  "DOMRect", "requestAnimationFrame", "cancelAnimationFrame", "dispatchEvent",
+  "addEventListener", "removeEventListener", "history", "localStorage",
+];
+for (const key of shared) {
+  if (w[key] === undefined) continue;
+  Object.defineProperty(globalThis, key, { value: w[key], configurable: true, writable: true });
+}
+Object.defineProperty(globalThis, "getComputedStyle", { value: (...args) => w.getComputedStyle(...args), configurable: true, writable: true });
+globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+
+const viewportWidth = 1280;
+w.matchMedia = (query) => {
+  const m = /min-width:\s*(\d+)px/.exec(query);
+  return {
+    matches: m ? viewportWidth >= Number(m[1]) : false,
+    media: query,
+    onchange: null,
+    addEventListener() {},
+    removeEventListener() {},
+    addListener() {},
+    removeListener() {},
+    dispatchEvent: () => false,
+  };
+};
+
+/* --------------------------------------------------------------- fixtures */
+const NOW = Date.now();
+const HOUR = 3_600_000;
+const REC_DATE = new Date(NOW - 10 * HOUR);
+const REC_MONTH = new Intl.DateTimeFormat("en-PH", { month: "long", year: "numeric" }).format(REC_DATE);
+const REC_SY = `SY ${REC_DATE.getMonth() >= 5 ? REC_DATE.getFullYear() : REC_DATE.getFullYear() - 1}-${(REC_DATE.getMonth() >= 5 ? REC_DATE.getFullYear() : REC_DATE.getFullYear() - 1) + 1}`;
+
+const ACCOUNTS = [
+  { id: "a1", email: "reyes@school.test", role: "teacher", name: "Ms. Reyes", section: "Grade 3 - Sec A", grade: "3",
+    status: "active", mustChange: false, temp: false, locked: false, lockedUntil: 0, failed: 0,
+    lastLoginAt: 40, createdAt: 1 },
+  { id: "a2", email: "dizon@school.test", role: "teacher", name: "Mr. Dizon", section: "Grade 4 - Sec B", grade: "4",
+    status: "archived", mustChange: false, temp: false, locked: false, lockedUntil: 0, failed: 0,
+    lastLoginAt: 10, createdAt: 2, archivedAt: NOW - HOUR },
+  { id: "a3", email: "pta@test.test", role: "parent", name: "PTA Grade 3", section: "Grade 3 - Sec A", grade: "3",
+    status: "active", mustChange: true, temp: false, locked: false, lockedUntil: 0, failed: 0,
+    lastLoginAt: 20, createdAt: 3 },
+  { id: "a4", email: "tanod@barangay.test", role: "responder", name: "Brgy. Tanod", section: null, grade: "",
+    status: "active", mustChange: false, temp: false, locked: false, lockedUntil: 0, failed: 0,
+    lastLoginAt: 30, createdAt: 4 },
+];
+
+const RETENTION = {
+  placeholder: true,
+  label: "Placeholder periods",
+  periods: { archiveAfterDays: 7, incidents: 730, accounts: 365, drills: 180, notifications: 90 },
+  counts: {
+    archivedIncidents: 12, anonymizedIncidents: 3, eligibleIncidents: 4,
+    archivedAccounts: 2, eligibleAccounts: 1, expiredDrills: 5,
+  },
+  skipped: [{ type: "notifications", days: 90, note: "No persistent store." }],
+};
+
+const ARCHIVE = {
+  items: [{
+    id: "INC-old", category: "fire", categoryLabel: "Fire / explosion", subLabel: "Electrical fire",
+    score: 4.2, room: "Bldg A | Flr 2 | Rm 204", createdAt: NOW - 10 * HOUR, status: "RESOLVED",
+    confirmedBy: 1, linkedSection: "Grade 3 - Sec A", outcome: "resolved", resolvedAt: NOW - 9 * HOUR,
+    overrideReasons: [], escalationLevel: 0, eta: null,
+    accountability: { status: "not_required", reported: 0, total: 0 },
+    headcounts: [], drill: false, reporterRole: "Teacher",
+    archivedAt: NOW - 8 * HOUR, archivedAuto: true, archiveReason: null, anonymizedAt: null,
+    reporterName: undefined, reporterId: undefined,
+  }],
+  total: 1, limit: 50, page: 1, pages: 1,
+};
+
+const RECORD = (over = {}) => ({
+  id: "INC-rec", category: "fire", categoryLabel: "Fire", subLabel: "Electrical fire",
+  room: "Bldg A | Flr 2 | Rm 204",
+  zone: { id: "bldg-a-f2-rm-204", label: "Building A · Flr 2 · Rm 204", building: "Building A", floor: "Floor 2", area: "Rm 204" },
+  tier: "HIGH", createdAt: NOW - 10 * HOUR, resolvedAt: NOW - 9 * HOUR, status: "RESOLVED",
+  outcome: "resolved", drill: false, populationLabel: "Classroom / Section", confirmedBy: 1,
+  reporterRole: "Teacher", escalationLevel: 0, escalated: false, ackMs: null, onSiteMs: null,
+  timeOfDay: "class", hazardMode: false, headcounts: [], timeline: [],
+  archivedAt: null, archivedAuto: false, archiveReason: null, anonymized: false, readOnly: true,
+  ...over,
+});
+
+const RECORDS = {
+  period: { id: "sy", label: "SY 2026-2027", from: NOW - 100 * 24 * HOUR, to: NOW },
+  incidents: [RECORD()],
+  analytics: {
+    total: 1, tiers: { CRITICAL: 0, HIGH: 1, MODERATE: 0 },
+    avgAckMs: null, avgOnSiteMs: null, escalatedPct: 0, escalated: 0,
+    zones: [], times: [], hazards: [], hazardModes: [],
+  },
+  drills: { ongoing: null, scheduled: [], past: [] },
+  archives: {
+    incidents: [RECORD({ id: "INC-old", archivedAt: NOW - 8 * HOUR, archivedAuto: true })],
+    accounts: [{ ...ACCOUNTS[1], purgeEligible: true }],
+  },
+};
+
+const AUDIT = [
+  { at: NOW - HOUR, action: "account_locked", by: "acc1", target: "acc2", detail: "", ip: "127.0.0.1" },
+  { at: NOW - 40 * HOUR, action: "login_success", by: "acc1", target: "acc1", detail: "", ip: "127.0.0.1" },
+];
+
+/** Configuration versions the System Settings tab loads; tests set this per case. */
+let CONFIG_VERSIONS = [];
+const configVersion = (over = {}) => ({
+  id: "v1", version: 1, active: true,
+  weights: { severity: 50, vulnerability: 29, locationRisk: 11, timeSensitivity: 10 },
+  consistency: { cr: 0.006, lambdaMax: 4.31, ci: 0.0114, ri: 0.9, n: 4 },
+  panelValidationDate: null, panelReference: null,
+  hazardAdjustment: 2,
+  escalation: { barangayMinutes: 3, cdrrmoMinutes: 6 },
+  responderSpeeds: { walking: 4.5, motorcycle: 25, vehicle: 30 },
+  createdBy: "system", createdAt: NOW - 2 * HOUR,
+  ...over,
+});
+
+const jsonResponse = (json) => ({ ok: true, status: 200, json: async () => json });
+const fetched = [];
+/** Every request with its method and JSON body, for the edit/provision flow. */
+let calls = [];
+globalThis.fetch = async (url, init = {}) => {
+  const u = String(url);
+  const method = init.method ?? "GET";
+  fetched.push(u);
+  calls.push({ url: u, method, body: init.body ? JSON.parse(init.body) : null });
+  if (u.includes("/api/admin/config")) return jsonResponse({ versions: CONFIG_VERSIONS, openTickets: 0 });
+  if (u.includes("/api/admin/accounts") && method === "PUT") return jsonResponse({ ok: true, account: ACCOUNTS[3], changed: ["org"] });
+  if (u.includes("/api/admin/accounts")) return jsonResponse({ accounts: ACCOUNTS });
+  if (u.includes("/api/admin/retention")) return jsonResponse(RETENTION);
+  if (u.includes("/api/records")) return jsonResponse(RECORDS);
+  if (u.includes("/api/incidents/archive")) return jsonResponse(ARCHIVE);
+  if (u.includes("/api/admin/audit")) return jsonResponse({ entries: AUDIT, total: AUDIT.length });
+  return jsonResponse({});
+};
+
+const React = (await import("react")).default;
+const { App, __resetCtx, clearSessionStates } = await import(pathToFileURL(outfile).href);
+const { render, cleanup, fireEvent, waitFor } = await import("@testing-library/react");
+
+test.afterEach(() => {
+  cleanup();
+  clearSessionStates();
+  fetched.length = 0;
+  calls = [];
+  CONFIG_VERSIONS = [];
+});
+
+const USERS = {
+  principal: { id: "pr1", role: "principal", name: "Dr. Santos", subtitle: "principal@sinalhanes.deped.ph" },
+  super_admin: { id: "sa1", role: "super_admin", name: "Sys Admin", subtitle: "admin@sinalhanes.deped.ph" },
+};
+
+const text = () => document.body.textContent || "";
+
+function clickRail(label) {
+  const btn = [...document.querySelectorAll('aside nav[aria-label="Sections"] button')]
+    .find((b) => (b.getAttribute("aria-label") || "").trim() === label);
+  assert.ok(btn, `rail tab "${label}" exists`);
+  fireEvent.click(btn);
+}
+
+function clickButton(label) {
+  const btn = [...document.querySelectorAll("button")].find((b) => (b.textContent || "").includes(label));
+  assert.ok(btn, `button "${label}" exists`);
+  fireEvent.click(btn);
+  return btn;
+}
+
+/** A tab (the records tabs or an archive sub-tab), by its visible label. */
+function clickTab(label) {
+  const btn = [...document.querySelectorAll('[role="tab"]')]
+    .find((b) => (b.textContent || "").trim().startsWith(label));
+  assert.ok(btn, `tab "${label}" exists`);
+  fireEvent.click(btn);
+  return btn;
+}
+
+/** Click a folder card in the records browser (not a filter chip of the same name). */
+function clickFolder(label) {
+  const btn = [...document.querySelectorAll("[data-folder-label]")]
+    .find((b) => b.getAttribute("data-folder-label") === label);
+  assert.ok(btn, `folder "${label}" exists`);
+  fireEvent.click(btn);
+}
+
+/** The archive page's back bar names its destination ("Users", "History"). */
+function clickBack(label) {
+  const btn = document.querySelector('[data-testid="back-bar"] button');
+  assert.ok(btn, `the back bar exists (expected "${label}")`);
+  const shown = (btn.textContent || "").trim();
+  assert.ok(shown.includes(label), `the back bar says "${label}" (got "${shown}")`);
+  fireEvent.click(btn);
+  return btn;
+}
+
+/* ------------------------------------------------------------------ tests */
+
+test("the Super Admin landing is a dashboard + user roster, never the retention policy table", async () => {
+  __resetCtx({ user: USERS.super_admin });
+  render(React.createElement(App));
+
+  // quick metric cards
+  await waitFor(() => assert.ok(text().includes("Total users"), "Total users card is on the landing"));
+  assert.ok(text().includes("Active responders"), "Active responders card is on the landing");
+  assert.ok(text().includes("Recent security events"), "Recent security events card is on the landing");
+  assert.ok(text().includes("last 24 hours"), "the security card says its window");
+  // one security event inside the window (the other is 40h old)
+  const securityCard = [...document.querySelectorAll("div")].find((d) => d.textContent?.includes("Recent security events"));
+  assert.ok(securityCard.textContent.includes("1"), `security count rendered: ${securityCard.textContent}`);
+
+  // the roster follows the cards
+  await waitFor(() => assert.ok(text().includes("Users (4)"), "the roster heading is Users"));
+  assert.ok(text().includes("Ms. Reyes"), "the user roster is rendered");
+  assert.ok(text().includes("Provision"), "the provision action is there");
+
+  // renamed rail
+  assert.ok(text().includes("System Settings"), "Configuration is now System Settings");
+
+  // order: search + filters → metric cards → user roster.
+  const plain = text();
+  assert.ok(plain.indexOf("Total users") < plain.indexOf("Ms. Reyes"), "the metric cards come before the roster");
+  assert.equal(plain.includes("Records & Archives"), false, "no archive widget anywhere on Users or More");
+  assert.equal(plain.includes("Open archive"), false, "the redundant Open archive button is gone");
+
+  // the raw retention policy table is NOT the default view
+  assert.equal(text().includes("Placeholder periods"), false, "no retention policy table on the landing");
+  assert.equal(text().includes("Close → archive"), false, "no period table on the landing");
+  assert.equal(text().includes("Ticket retention (after archive)"), false);
+
+  // …and the leftover Records & Archives widget is gone from More: the
+  // Incidents & Records row is the single entry point.
+  clickRail("More");
+  await waitFor(() => assert.ok(text().includes("School year"), "the More menu rendered"));
+  assert.equal(text().includes("Records & Archives"), false, "the leftover archive widget was removed from More");
+  assert.equal(text().includes("Tickets eligible for purge"), false, "no stray archive counters on More");
+  assert.ok(text().includes("Incidents & Records"), "the row link to the consolidated view stays");
+  assert.equal(fetched.some((u) => u.includes("/api/incidents/archive")), false, "the archive page is not fetched until opened");
+});
+
+test("More → Incidents & Records opens the consolidated, read-only records view", async () => {
+  __resetCtx({ user: USERS.super_admin });
+  render(React.createElement(App));
+
+  await waitFor(() => assert.ok(text().includes("Total users")));
+  clickRail("More");
+  await waitFor(() => assert.ok(text().includes("Incidents & Records")));
+  clickButton("Incidents & Records");
+
+  await waitFor(() => assert.ok(text().includes("Incidents"), "the consolidated records view opened"));
+  assert.ok(fetched.some((u) => u.includes("/api/records")), "the records endpoint loads the view");
+
+  clickTab("Archive");
+  await waitFor(() => assert.ok(text().includes("Tickets"), "the archive tab is shown"));
+  assert.ok(text().includes("Electrical fire"), "the archived record is listed");
+  assert.ok(text().includes("reported by Teacher"), "the reporter is a role label, not a name");
+  assert.ok(text().includes("Read-only"), "archived records are read-only");
+
+  // back returns to More; the bar names that destination
+  clickBack("More");
+  await waitFor(() => assert.ok(text().includes("School year"), "back on the More menu"));
+});
+
+test("leaving More while the records view is open closes it instead of leaving it on another tab", async () => {
+  __resetCtx({ user: USERS.super_admin });
+  render(React.createElement(App));
+  await waitFor(() => assert.ok(text().includes("Total users")));
+
+  clickRail("More");
+  clickButton("Incidents & Records");
+  await waitFor(() => assert.ok(text().includes("Incidents"), "the records view opened"));
+
+  clickRail("Analytics");
+  await waitFor(() => assert.ok(text().includes("Aggregated and anonymised"), "the Analytics page rendered"));
+  assert.equal(document.querySelector("#records-tab-real"), null, "the records view does not stay on the Analytics tab");
+
+  // Returning to More shows the menu, not the old sub-screen.
+  clickRail("More");
+  await waitFor(() => assert.ok(text().includes("School year"), "back on the More menu"));
+  assert.equal(document.querySelector("#records-tab-real"), null, "the records view was closed by leaving More");
+});
+
+test("About ASPIRE holds the expandable retention & purge rules, off the landing", async () => {
+  __resetCtx({ user: USERS.super_admin });
+  render(React.createElement(App));
+
+  await waitFor(() => assert.ok(text().includes("Total users")));
+  const rulesOnLanding = [...document.querySelectorAll("summary")]
+    .some((s) => (s.textContent || "").includes("Retention and purge rules"));
+  assert.equal(rulesOnLanding, false, "the rules section is not on the landing");
+
+  clickRail("More");
+  await waitFor(() => assert.ok(text().includes("School year")));
+  clickButton("Account");
+  await waitFor(() => assert.ok(text().includes("About ASPIRE")));
+  clickButton("About ASPIRE");
+
+  await waitFor(() => assert.ok(text().includes("Retention and purge rules"), "the section exists under About ASPIRE"));
+  const summary = [...document.querySelectorAll("summary")].find((s) => (s.textContent || "").includes("Retention and purge rules"));
+  assert.ok(summary, "it is an expandable section");
+  assert.ok(text().includes("Placeholder periods"), "the periods are inside it (admin)");
+  assert.ok(text().includes("the Principal archives closed tickets"), "the archive rule is spelled out");
+  assert.ok(text().includes("typed confirmation"), "the purge rule is spelled out");
+});
+
+test("Principal: Analytics is its own tab, with the post-incident breakdowns", async () => {
+  __resetCtx({ user: USERS.principal, incidents: [] });
+  render(React.createElement(App));
+
+  clickRail("Analytics");
+  await waitFor(() => assert.ok(text().includes("Aggregated and anonymised"), "the Analytics page opened"));
+  await waitFor(() => assert.ok(text().includes("Total incidents"), "the metrics rendered"));
+  assert.ok(text().includes("Spatial zone"), "spatial-zone chart present");
+  assert.ok(text().includes("Time of day"), "time-of-day chart present");
+  assert.ok(text().includes("Hazard type"), "hazard-type chart present");
+  assert.ok(fetched.some((u) => u.includes("/api/records")), "analytics loads from the records endpoint");
+});
+
+test("Principal: More → Incidents & Records opens the read-only three-tab view", async () => {
+  __resetCtx({ user: USERS.principal, incidents: [] });
+  render(React.createElement(App));
+
+  clickRail("More");
+  await waitFor(() => assert.ok(text().includes("Incidents & Records"), "the More entry exists"));
+  clickButton("Incidents & Records");
+
+  await waitFor(() => assert.ok(text().includes("Incidents"), "the records view opened on Real Incidents"));
+  assert.ok(document.querySelector("#records-tab-real"), "the Incidents tab exists");
+  assert.ok(document.querySelector("#records-tab-drills"), "the Drills tab exists");
+  assert.ok(document.querySelector("#records-tab-archives"), "the Archive tab exists");
+  assert.ok(fetched.some((u) => u.includes("/api/records")), "the read-only records endpoint loads the view");
+
+  clickTab("Archive");
+  await waitFor(() => assert.ok(text().includes("Tickets"), "the archive tab is shown"));
+  assert.ok(text().includes("Electrical fire"));
+  assert.ok(text().includes("reported by Teacher"), "the reporter is a role label, not a name");
+  assert.ok(text().includes("Read-only"), "archived records are read-only");
+
+  clickBack("More");
+  await waitFor(() => assert.ok(text().includes("Teacher roster"), "back on the More menu"));
+});
+
+test("Principal: the records explorer drills Records → School Year → Month → Category → Zone", async () => {
+  __resetCtx({ user: USERS.principal, incidents: [] });
+  render(React.createElement(App));
+
+  clickRail("More");
+  await waitFor(() => assert.ok(text().includes("Incidents & Records")));
+  clickButton("Incidents & Records");
+  await waitFor(() => assert.ok(text().includes("Incidents"), "the records view opened on Real Incidents"));
+  assert.equal(text().includes("Spatial zone"), false, "the heavy charts are not on the records page");
+
+  clickFolder(REC_SY);
+  await waitFor(() => assert.ok(text().includes(REC_MONTH), "the school year opens its months"));
+  clickFolder(REC_MONTH);
+  await waitFor(() => assert.ok(text().includes("Fire"), "the month opens its categories"));
+  clickFolder("Fire");
+  await waitFor(() => assert.ok(text().includes("Building A · Flr 2 · Rm 204"), "the category opens its zones"));
+  clickFolder("Building A · Flr 2 · Rm 204");
+  await waitFor(() => assert.ok(text().includes("Electrical fire"), "the zone lists its records"));
+
+  // The first record is selected into the detail pane (master-detail).
+  await waitFor(() => assert.ok(document.querySelector("[data-record-detail]"), "the read-only detail opens"));
+  assert.ok(text().includes("Reported by"), "the detail labels the reporter by role");
+  assert.ok(text().includes("Teacher"));
+  assert.equal(text().includes("Ms. Reyes"), false, "no personal name in the record detail");
+});
+
+test("Admin: More → Incidents & Records is read-only, accounts included", async () => {
+  __resetCtx({ user: USERS.super_admin });
+  render(React.createElement(App));
+
+  await waitFor(() => assert.ok(text().includes("Total users")));
+  clickRail("More");
+  await waitFor(() => assert.ok(text().includes("Incidents & Records")));
+  clickButton("Incidents & Records");
+
+  await waitFor(() => assert.ok(text().includes("Incidents"), "the read-only records view opened"));
+  assert.ok(fetched.some((u) => u.includes("/api/records")));
+
+  // Two dedicated archives: tickets first, accounts on their own sub-tab.
+  clickTab("Archive");
+  await waitFor(() => assert.ok(text().includes("Tickets"), "the ticket archive is shown first"));
+  clickTab("Accounts");
+  await waitFor(() => assert.ok(text().includes("Mr. Dizon"), "the Admin sees the account archive"));
+  assert.ok(text().includes("Purge eligible"));
+  assert.ok(text().includes("Manage in Users"), "account mediation points at Users");
+
+  clickBack("More");
+  await waitFor(() => assert.ok(text().includes("School year"), "back on the More menu"));
+});
+
+test("the Super Admin can assign a responder's organization on the Users page", async () => {
+  __resetCtx({ user: USERS.super_admin });
+  render(React.createElement(App));
+  await waitFor(() => assert.ok(text().includes("Users (4)"), "the roster loaded"));
+
+  const row = [...document.querySelectorAll("[data-md-item]")].find((b) => (b.textContent || "").includes("Brgy. Tanod"));
+  assert.ok(row, "the responder is listed");
+  fireEvent.click(row);
+
+  await waitFor(
+    () => assert.ok(text().includes("not assigned — Edit to assign the responder")),
+    `the detail flags the missing org: ${text().slice(0, 500)}`,
+  );
+
+  clickButton("Edit");
+  await waitFor(() => assert.ok(text().includes("Edit user"), "the edit dialog opened"));
+  assert.equal(document.querySelector('input[aria-label="Account name"]').value, "Brgy. Tanod");
+
+  const trigger = document.querySelector('[role="dialog"] [aria-haspopup="listbox"]');
+  assert.ok(trigger, "the Organization field exists for a responder");
+  fireEvent.click(trigger);
+  const option = [...document.querySelectorAll('[role="option"]')].find((o) => (o.textContent || "").includes("CDRRMO"));
+  assert.ok(option, "both orgs are offered for an existing responder");
+  fireEvent.click(option);
+
+  clickButton("Save changes");
+  await waitFor(() => {
+    const put = calls.find((c) => c.method === "PUT" && /\/api\/admin\/accounts\/[\w-]+$/.test(c.url));
+    assert.ok(put, "saving PUTs the account");
+    assert.equal(put.url, "/api/admin/accounts/a4");
+    assert.equal(put.body.org, "cdrrmo", "the chosen org is sent");
+    assert.equal(put.body.name, "Brgy. Tanod");
+  });
+});
+
+test("the User Detail screen groups identity, notices, information and actions", async () => {
+  __resetCtx({ user: USERS.super_admin });
+  render(React.createElement(App));
+  await waitFor(() => assert.ok(text().includes("Users (4)")), "the roster loaded");
+
+  const row = [...document.querySelectorAll("[data-md-item]")].find((b) => (b.textContent || "").includes("Brgy. Tanod"));
+  assert.ok(row, "the responder is listed");
+  fireEvent.click(row);
+  await waitFor(() => assert.ok(text().includes("Account details")), "the detail opened");
+
+  // 1. Header: bold name with the status badge beside it, then muted email + role.
+  const name = [...document.querySelectorAll("h2")].find((h) => (h.textContent || "") === "Brgy. Tanod");
+  assert.ok(name, "the name is a heading");
+  const header = name.closest("header");
+  assert.ok(header, "the identity block is its own card");
+  assert.ok((header.textContent || "").includes("Active"), "the status badge sits next to the name");
+  assert.ok((header.textContent || "").includes("tanod@barangay.test"), "the email is under the name");
+  assert.ok((header.textContent || "").includes("Responder"), "the role is under the name");
+
+  // 2. The missing org is a notice banner, not a metadata line.
+  const banner = [...document.querySelectorAll('[role="alert"]')]
+    .find((el) => (el.textContent || "").includes("Organization: not assigned"));
+  assert.ok(banner, "the missing organization is flagged in a banner");
+  assert.ok(banner.className.includes("bg-amber-50"), "the banner has a subtle background");
+  assert.ok(banner.querySelector("svg"), "the banner carries an icon");
+
+  // 3. Information lives in labelled sections.
+  const shown = text();
+  for (const label of ["Account details", "System role", "Organization / Assignment", "Activity", "Last sign-in"]) {
+    assert.ok(shown.includes(label), `the detail shows ${label}`);
+  }
+
+  // 4. Actions are a tidy grid: primary pair, then data/account pair.
+  const button = (label) => [...document.querySelectorAll("button")]
+    .find((b) => (b.textContent || "").trim() === label);
+  for (const label of ["Edit Profile", "Reset Password", "Process Data Request", "Deactivate Account"]) {
+    assert.ok(button(label), `${label} is offered`);
+  }
+  const primaryGrid = button("Edit Profile").parentElement;
+  assert.ok(primaryGrid.className.includes("grid"), "the actions use a grid");
+  assert.equal(button("Reset Password").parentElement, primaryGrid, "the primary pair shares one row");
+  assert.equal(button("Reset Password").className.includes("w-full"), true, "buttons fill their cells");
+  assert.ok(button("Deactivate Account").className.includes("bg-blush-100"), "deactivation is soft red");
+  assert.equal(button("Deactivate Account").parentElement, button("Process Data Request").parentElement,
+    "the data actions share their own row");
+});
+
+test("provisioning a Teacher: all four fields, Create gated, section/room/registry sent", async () => {
+  __resetCtx({ user: USERS.super_admin });
+  render(React.createElement(App));
+  await waitFor(() => assert.ok(text().includes("Users (4)")), "the roster loaded");
+
+  clickButton("Provision");
+  await waitFor(() => assert.ok(text().includes("Provision new account")));
+  const modal = () => document.querySelector('[role="dialog"]');
+
+  // Teacher is the default role: Grade chips, Section, Default room, Registry.
+  const grades = [...modal().querySelectorAll('[role="radiogroup"][aria-label="Grade"] [role="radio"]')];
+  assert.deepEqual(grades.map((g) => g.textContent.trim()), ["Kinder", "Grade 1", "Grade 2", "Grade 3", "Grade 4", "Grade 5", "Grade 6"]);
+  assert.ok(modal().querySelector('input[aria-label="Section"]'), "Section is free text");
+  assert.equal(modal().querySelector('input[aria-label="Section"]').getAttribute("placeholder"), "A");
+  assert.ok(modal().querySelector('button[aria-label="Default room"]'), "Default room is a field");
+  assert.ok(modal().querySelector('input[aria-label="Today\'s registry"]'), "Today's registry is optional");
+
+  const create = () => [...modal().querySelectorAll("button")].find((b) => (b.textContent || "").trim() === "Create account");
+  fireEvent.change(modal().querySelector('input[placeholder="user@example.com"]'), { target: { value: "new.teacher@school.test" } });
+  fireEvent.change(modal().querySelector('input[placeholder="Juan Dela Cruz"]'), { target: { value: "Ms. Nueva" } });
+  assert.equal(create().disabled, true, "Create stays disabled until grade, section and room are set");
+
+  fireEvent.click(grades.find((g) => g.textContent.trim() === "Grade 3"));
+  assert.equal(create().disabled, true, "grade alone is not enough");
+  fireEvent.change(modal().querySelector('input[aria-label="Section"]'), { target: { value: "Sec A" } });
+  assert.equal(create().disabled, true, "room is still missing");
+
+  fireEvent.click(modal().querySelector('button[aria-label="Default room"]'));
+  await waitFor(() => assert.ok(document.querySelector('[role="dialog"]') && text().includes("Floor 1"), "the room picker opened"));
+  fireEvent.click([...document.querySelectorAll("button")].find((b) => (b.textContent || "").trim() === "Floor 2"));
+  fireEvent.click([...document.querySelectorAll("button")].find((b) => (b.textContent || "").trim() === "Rm 204"));
+  await waitFor(() => assert.ok(!text().includes("Common areas"), "rooms-only mode: no common areas"));
+  assert.ok(text().includes("Bldg A | Flr 2 | Rm 204"), "the field shows the chosen legacy room");
+  assert.equal(create().disabled, false, "Create unlocks once grade, section and room are valid");
+
+  fireEvent.change(modal().querySelector('input[aria-label="Today\'s registry"]'), { target: { value: "28" } });
+  fireEvent.click(create());
+  await waitFor(() => assert.ok(calls.some((c) => c.method === "POST" && c.url.includes("/api/admin/accounts")), "the create call was sent"));
+  const sent = calls.findLast((c) => c.method === "POST" && c.url.includes("/api/admin/accounts")).body;
+  assert.equal(sent.role, "teacher");
+  assert.equal(sent.section, "Grade 3 - Sec A", "the section is composed from grade + name");
+  assert.equal(sent.room, "Bldg A | Flr 2 | Rm 204", "the legacy room string is sent");
+  assert.equal(sent.registry, 28, "today's registry is sent");
+});
+
+test("provisioning a Parent/PTA shows Grade and Section only", async () => {
+  __resetCtx({ user: USERS.super_admin });
+  render(React.createElement(App));
+  await waitFor(() => assert.ok(text().includes("Users (4)")), "the roster loaded");
+
+  clickButton("Provision");
+  await waitFor(() => assert.ok(text().includes("Provision new account")));
+  const modal = () => document.querySelector('[role="dialog"]');
+
+  // Role → Parent/PTA reveals Grade and Section, but no room or registry.
+  fireEvent.click(modal().querySelector('[aria-haspopup="listbox"]'));
+  const parent = [...document.querySelectorAll('[role="option"]')].find((o) => (o.textContent || "").includes("Parent / PTA"));
+  assert.ok(parent, "the Parent/PTA role is offered");
+  fireEvent.click(parent);
+  await waitFor(() => assert.ok(modal().querySelector('[role="radiogroup"][aria-label="Grade"]'), "the grade chips appear"));
+  assert.ok(modal().querySelector('input[aria-label="Section"]'), "Section is free text");
+  assert.equal(modal().querySelector('button[aria-label="Default room"]'), null, "no room field for a parent");
+  assert.equal(modal().querySelector('input[aria-label="Today\'s registry"]'), null, "no registry field for a parent");
+
+  const create = () => [...modal().querySelectorAll("button")].find((b) => (b.textContent || "").trim() === "Create account");
+  fireEvent.change(modal().querySelector('input[placeholder="user@example.com"]'), { target: { value: "pta2@test.test" } });
+  fireEvent.change(modal().querySelector('input[placeholder="Juan Dela Cruz"]'), { target: { value: "PTA Grade 2" } });
+  assert.equal(create().disabled, true, "grade and section are required");
+  fireEvent.click([...modal().querySelectorAll('[role="radiogroup"][aria-label="Grade"] [role="radio"]')].find((g) => g.textContent.trim() === "Grade 2"));
+  fireEvent.change(modal().querySelector('input[aria-label="Section"]'), { target: { value: "B" } });
+  assert.equal(create().disabled, false);
+  fireEvent.click(create());
+  await waitFor(() => assert.ok(calls.some((c) => c.method === "POST" && c.url.includes("/api/admin/accounts"))));
+  const sent = calls.findLast((c) => c.method === "POST" && c.url.includes("/api/admin/accounts")).body;
+  assert.equal(sent.section, "Grade 2 - Sec B");
+  assert.equal(sent.room, undefined, "no room for a parent");
+});
+
+const settingsTab = (label) => {
+  const tab = [...document.querySelectorAll('[role="tab"]')].find((t) => (t.textContent || "").trim() === label);
+  assert.ok(tab, `settings tab "${label}" exists`);
+  return tab;
+};
+
+test("System Settings calls an unvalidated configuration what it is: Default values", async () => {
+  CONFIG_VERSIONS = [configVersion()];
+  __resetCtx({ user: USERS.super_admin });
+  render(React.createElement(App));
+
+  await waitFor(() => assert.ok(text().includes("Total users")));
+  clickRail("System Settings");
+  await waitFor(() => assert.ok(text().includes("System Settings") && text().includes("Scoring"),
+    `the configuration loaded: ${text().slice(0, 200)}`));
+
+  const shown = text();
+  assert.ok(shown.includes("Default values"), "the status chip says Default values");
+  assert.ok(shown.includes("Record validation"), "the inline line offers Record validation");
+  assert.equal(shown.includes("Default values. Not yet validated by the Expert Panel."), false,
+    "the long default-values banner is gone");
+  assert.equal(/panel not set/i.test(shown), false, "no \"panel not set\"");
+
+  // The version history lives on its own tab and says what the version is.
+  fireEvent.click(settingsTab("Versions"));
+  await waitFor(() => assert.ok(text().includes("v1")));
+  assert.ok(text().includes("Default values"), "the history row reads Default values");
+});
+
+test("System Settings credits the panel that validated the active version", async () => {
+  CONFIG_VERSIONS = [
+    configVersion({ active: false }),
+    configVersion({
+      id: "v2", version: 2, active: true, createdBy: "admin@sinalhanes.deped.ph", createdAt: NOW - HOUR,
+      panelValidationDate: "2026-10-01", panelReference: "AHP Expert Panel, SY 2026-2027",
+    }),
+  ];
+  __resetCtx({ user: USERS.super_admin });
+  render(React.createElement(App));
+
+  await waitFor(() => assert.ok(text().includes("Total users")));
+  clickRail("System Settings");
+  await waitFor(() => assert.ok(text().includes("System Settings") && text().includes("Scoring")));
+
+  const shown = text();
+  assert.ok(shown.includes("Validated 2026-10-01 by AHP Expert Panel, SY 2026-2027"), `the inline line credits the panel: ${shown.slice(0, 300)}`);
+  assert.equal(shown.includes("Not yet validated by the Expert Panel"), false,
+    "no default-values banner once the active version is validated");
+
+  // History: the seeded version reads Default values, the validated one its date and source.
+  fireEvent.click(settingsTab("Versions"));
+  await waitFor(() => assert.ok(text().includes("v2"), "the versions timeline rendered"));
+  assert.ok(text().includes("Default values"), "v1 is Default values");
+  assert.ok(text().includes("Validated 2026-10-01 · AHP Expert Panel, SY 2026-2027"), "v2 names its date and source");
+  assert.equal(/panel not set/i.test(text()), false);
+
+  // The editor keeps the field next to the date, and says what it is for.
+  fireEvent.click(settingsTab("Scoring"));
+  clickButton("Edit");
+  await waitFor(() => assert.ok(document.querySelector('input[aria-label="Panel or source"]'), "the panel source field exists"));
+  const ref = document.querySelector('input[aria-label="Panel or source"]');
+  assert.equal(ref.value, "AHP Expert Panel, SY 2026-2027");
+  assert.equal(ref.getAttribute("placeholder"), "AHP Expert Panel, SY 2026-2027");
+  assert.equal(ref.getAttribute("maxlength"), "120");
+  assert.ok(text().includes("Recorded only: who validated these values and when. It does not change scoring."),
+    "the field says it does not affect scoring");
+
+  // Changing it shows old → new in the review dialog.
+  fireEvent.change(ref, { target: { value: "AHP Expert Panel, SY 2026-2027 (revised)" } });
+  clickButton("Review changes");
+  await waitFor(() => assert.ok(text().includes("Review configuration change"), `the review dialog opened: ${text().slice(0, 300)}`));
+  const row = [...document.querySelectorAll("tr")].find((tr) => (tr.textContent || "").includes("Panel / source"));
+  assert.ok(row, "the review dialog compares the panel source");
+  assert.ok((row.textContent || "").includes("AHP Expert Panel, SY 2026-2027 (revised)"), `new value shown: ${row.textContent}`);
+});

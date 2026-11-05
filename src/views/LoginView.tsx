@@ -1,12 +1,26 @@
 import { useState } from "react";
 import { Eye, EyeOff } from "lucide-react";
-import { DISCLAIMERS, SCHOOL } from "../../shared/domain.js";
+import { SCHOOL } from "../../shared/domain.js";
 import { useApp } from "../lib/store";
+import { validatePassword } from "../lib/password";
 import { BRAND } from "../lib/brand";
-import { api } from "../lib/api";
+import { ChangePasswordForm } from "../components/ChangePassword";
+import { AboutSheet } from "./AboutView";
+
+/** Plain-language lead-in shown above the forced-change form when the server
+ *  forced the change because the typed password did not meet the current
+ *  policy. Derived from the login result only — the typed password itself is
+ *  never stored or logged.
+ */
+function reasonForForce(): string {
+  // The only forced-change trigger we currently raise at login is a policy
+  // failure, so point the user at the live checklist rather than echoing any
+  // password text.
+  return "Your password doesn't meet the current policy. Set a new one to continue.";
+}
 
 export default function LoginView() {
-  const { login, mustChange, changePassword, config } = useApp();
+  const { login, mustChange, changePassword, user } = useApp();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
@@ -14,17 +28,19 @@ export default function LoginView() {
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
 
-  // Forced password change form (after school-year rollover / temp credentials)
+  // Forced password change form (after school-year rollover / temp credentials / policy failure)
   const [newPassword, setNewPassword] = useState("");
   const [showNew, setShowNew] = useState(false);
   const [changing, setChanging] = useState(false);
-  const [changeError, setChangeError] = useState("");
+  const [changeError, setChangeError] = useState<string | null>(null);
   const [changed, setChanged] = useState(false);
+  const [about, setAbout] = useState(false);
 
   async function handlePasswordChange(e: React.FormEvent) {
     e.preventDefault();
-    if (newPassword.length < 8) { setChangeError("Password must be at least 8 characters."); return; }
-    setChanging(true); setChangeError("");
+    const issue = validatePassword(newPassword, {});
+    if (issue) { setChangeError(issue); return; }
+    setChanging(true); setChangeError(null);
     try {
       await changePassword(newPassword);
       setChanged(true);
@@ -52,60 +68,51 @@ export default function LoginView() {
     e.preventDefault();
     if (!validate()) return;
     setSubmitting(true); setError("");
-    try { await login(email, password); }
-    catch (e: any) { setError(e instanceof Error ? e.message : "Could not sign in."); }
+    try {
+      const isForced = await login(email, password);
+      if (isForced) {
+        // The server returned mustChange=true. The policy text is rendered live
+        // by ChangePasswordForm; this one-line lead-in tells the user why,
+        // without ever storing or logging the typed password.
+        setPolicyHint(reasonForForce());
+      }
+    } catch (e: any) { setError(e instanceof Error ? e.message : "Could not sign in."); }
     finally { setSubmitting(false); }
   };
 
-  // ── Forced password change screen (single field + toggle, no confirm field) ──
+  // Keep a plain-language hint (never the password) for the forced-change screen.
+  const [policyHint, setPolicyHint] = useState<string | null>(null);
+
+  // ── Forced password change screen (blocking full-screen step) ──
   if (mustChange && !changed) {
     return (
-      <div className="min-h-dvh flex flex-col text-white" style={{ background: "radial-gradient(ellipse 120% 60% at 50% 0%, #425B9A 0%, #1D2848 55%, #0F1830 100%)" }}>
-        <div className="flex-1 w-full max-w-md mx-auto px-5 pt-[max(2rem,env(safe-area-inset-top))] pb-6 flex flex-col">
-          <div className="flex flex-col items-center text-center pt-4 pb-6">
-            <div className="w-28 h-28 rounded-3xl overflow-hidden bg-cream border-2 border-white/10 shadow-2xl" style={{ boxShadow: "0 0 40px 12px rgba(118,192,236,.35)" }}>
-              <img src="/icons/logo-256.png" alt="" width={112} height={112} className="w-full h-full object-contain p-1" />
+      <div className="min-h-dvh overflow-y-auto flex flex-col text-white" style={{ background: "radial-gradient(ellipse 120% 60% at 50% 0%, #425B9A 0%, #1D2848 55%, #0F1830 100%)" }}>
+        <div className="flex-1 w-full max-w-sm mx-auto px-4 pt-[max(1.25rem,env(safe-area-inset-top))] pb-4 flex flex-col">
+          <div className="flex flex-col items-center text-center pt-3 pb-4">
+            <div className="w-10 h-10 rounded-xl overflow-hidden bg-cream border-2 border-white/10 shadow-sm" style={{ boxShadow: "0 0 12px 4px rgba(118,192,236,.25)" }}>
+              <img src="/icons/logo-256.png" alt="" width={40} height={40} className="w-full h-full object-contain p-0.5" />
             </div>
             <h1 className="text-2xl font-black tracking-tight mt-4">Set a new password</h1>
-            <p className="text-sm text-slate-300 font-medium mt-2">Your temporary credential must be replaced before you can continue.</p>
+            <p className="text-xs text-slate-400 font-medium mt-1">Your credential must be replaced before you can continue.</p>
+            {policyHint && <p className="mt-1 text-xs text-slate-400">{policyHint}</p>}
           </div>
 
-          <form onSubmit={handlePasswordChange} className="w-full space-y-4">
-            <div className="relative">
-              <label className="block text-sm font-medium text-slate-300 mb-1.5" htmlFor="new-password">New password</label>
-              <input
-                id="new-password"
-                type={showNew ? "text" : "password"}
-                autoComplete="new-password"
-                value={newPassword}
-                onChange={(e) => setNewPassword(e.target.value)}
-                disabled={changing}
-                required
-                placeholder="At least 8 characters"
-                className="w-full min-h-14 rounded-xl px-4 bg-white text-slate-900 text-base outline-none focus:ring-2 focus:ring-accent"
-              />
-              <button
-                type="button"
-                onClick={() => setShowNew(!showNew)}
-                className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 hover:text-brand-600"
-                aria-label={showNew ? "Hide password" : "Show password"}
-              >
-                {showNew ? <Eye size={18} /> : <EyeOff size={18} />}
-              </button>
-            </div>
+          <ChangePasswordForm
+            forced
+            tone="dark"
+            account={{ email, name: user?.name }}
+            value={newPassword}
+            onChange={setNewPassword}
+            show={showNew}
+            onToggle={() => setShowNew((s) => !s)}
+            submitting={changing}
+            error={changeError}
+            success={false}
+            onSubmit={handlePasswordChange}
+            submitLabel="Set password & continue"
+          />
 
-            {changeError && <p role="alert" className="text-sm text-blush-300">{changeError}</p>}
-
-            <button
-              type="submit"
-              disabled={changing}
-              className="w-full min-h-14 rounded-xl px-4 bg-brand-600 text-white font-bold text-base disabled:opacity-60"
-            >
-              {changing ? "Saving…" : "Set password & continue"}
-            </button>
-          </form>
-
-          <p className="text-xs text-slate-400 text-center mt-6">{DISCLAIMERS.noAutoDetect}</p>
+          <button type="button" onClick={() => setAbout(true)} className="mt-6 min-h-12 text-xs font-semibold text-slate-400 underline">About ASPIRE</button>
         </div>
       </div>
     );
@@ -114,11 +121,11 @@ export default function LoginView() {
   // ── Success screen after password change ──
   if (mustChange && changed) {
     return (
-      <div className="min-h-dvh flex flex-col text-white" style={{ background: "radial-gradient(ellipse 120% 60% at 50% 0%, #425B9A 0%, #1D2848 55%, #0F1830 100%)" }}>
+      <div className="min-h-dvh overflow-y-auto flex flex-col text-white" style={{ background: "radial-gradient(ellipse 120% 60% at 50% 0%, #425B9A 0%, #1D2848 55%, #0F1830 100%)" }}>
         <div className="flex-1 w-full max-w-md mx-auto px-5 pt-[max(2rem,env(safe-area-inset-top))] pb-6 flex flex-col items-center justify-center text-center">
           <p className="text-5xl mb-4" aria-hidden>✅</p>
-          <h1 className="text-2xl font-black tracking-tight">Password set!</h1>
-          <p className="text-sm text-slate-300 font-medium mt-2">You can now continue to the app.</p>
+          <h1 className="text-2xl font-black tracking-tight mt-4">Password set!</h1>
+          <p className="text-base text-slate-300 font-medium mt-1.5">You can now continue to the app.</p>
           <button
             onClick={() => window.location.reload()}
             className="mt-6 w-full min-h-14 rounded-xl px-4 bg-brand-600 text-white font-bold text-base"
@@ -131,15 +138,15 @@ export default function LoginView() {
   }
 
   return (
-    <div className="min-h-dvh flex flex-col text-white" style={{ background: "radial-gradient(ellipse 120% 60% at 50% 0%, #425B9A 0%, #1D2848 55%, #0F1830 100%)" }}>
-      <div className="flex-1 w-full max-w-md mx-auto px-5 pt-[max(2rem,env(safe-area-inset-top))] pb-6 flex flex-col">
+    <div className="min-h-dvh overflow-y-auto flex flex-col text-white" style={{ background: "radial-gradient(ellipse 120% 60% at 50% 0%, #425B9A 0%, #1D2848 55%, #0F1830 100%)" }}>
+      <div className="flex-1 w-full max-w-sm mx-auto px-4 pt-[max(1.25rem,env(safe-area-inset-top))] pb-4 flex flex-col">
         <div className="flex flex-col items-center text-center pt-4 pb-6">
-          <div className="w-28 h-28 rounded-3xl overflow-hidden bg-cream border-2 border-white/10 shadow-2xl" style={{ boxShadow: "0 0 40px 12px rgba(118,192,236,.35)" }}>
-            <img src="/icons/logo-256.png" alt="" width={112} height={112} className="w-full h-full object-contain p-1" />
+          <div className="w-10 h-10 rounded-xl overflow-hidden bg-cream border-2 border-white/10 shadow-sm" style={{ boxShadow: "0 0 12px 4px rgba(118,192,236,.25)" }}>
+            <img src="/icons/logo-256.png" alt="" width={40} height={40} className="w-full h-full object-contain p-0.5" />
           </div>
           <h1 className="text-2xl font-black tracking-tight mt-4">{BRAND.name}</h1>
-          <p className="text-sm text-slate-300 font-medium">Emergency reporting and incident prioritization</p>
-          <p className="text-xs text-slate-400 font-semibold mt-2">{SCHOOL.name} · DepEd ID {SCHOOL.depedId}</p>
+          <p className="text-sm text-slate-400 font-medium mt-1">Emergency reporting and incident prioritization</p>
+          <p className="text-xs text-slate-500 font-semibold mt-1.5">{SCHOOL.name} · DepEd ID {SCHOOL.depedId}</p>
         </div>
 
         {/* Login form – mobile-first, accessible, touch-target sized */}
@@ -148,7 +155,6 @@ export default function LoginView() {
           <div>
             <label className="block text-sm font-medium text-slate-300 mb-1.5" htmlFor="email" aria-label="Email or username">
               Email or username
-              <span className="text-slate-500 text-xs">required</span>
             </label>
             <input
               id="email"
@@ -159,58 +165,53 @@ export default function LoginView() {
               disabled={busy}
               required
               placeholder="Enter your email"
-              className="w-full min-h-14 rounded-xl px-4 bg-white text-slate-900 text-base outline-none focus:ring-2 focus:ring-accent focus:outline-none"
+              className="w-full min-h-12 rounded-xl px-3 bg-white text-slate-900 text-sm outline-none focus:ring-2 focus:ring-accent"
             />
           </div>
 
           {/* Password field – masked by default, show/hide toggle */}
-          <div className="relative">
+          <div>
             <label className="block text-sm font-medium text-slate-300 mb-1.5" htmlFor="password" aria-label="Password">
               Password
-              <span className="text-slate-500 text-xs">required</span>
             </label>
-            <input
-              id="password"
-              type={showPassword ? "text" : "password"}
-              autoComplete="current-password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              disabled={busy}
-              required
-              placeholder="Enter your password"
-              className="w-full min-h-14 rounded-xl px-4 bg-white text-slate-900 text-base outline-none focus:ring-2 focus:ring-accent focus:outline-none"
-              aria-label={showPassword ? "Password (visible)" : "Password (masked)"}
-            />
-            <button
-              type="button"
-              onClick={toggle}
-              className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 hover:text-brand-600 focus:outline-none focus:ring-2 focus:ring-accent focus:ring-opacity-50"
-              aria-label={showPassword ? "Hide password" : "Show password"}
-            >
-              {showPassword ? <Eye size={18} /> : <EyeOff size={18} />}
-            </button>
+            <div className="relative">
+              <input
+                id="password"
+                type={showPassword ? "text" : "password"}
+                autoComplete="current-password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                disabled={busy}
+                required
+                placeholder="Enter your password"
+                className="w-full min-h-12 rounded-lg px-3 pr-12 bg-white text-slate-900 text-sm outline-none focus:ring-2 focus:ring-accent"
+              />
+              <button
+                type="button"
+                onClick={toggle}
+                className="absolute inset-y-0 right-0 flex w-12 items-center justify-center text-slate-500 hover:text-brand-600 focus:outline-none focus:ring-2 focus:ring-accent focus:ring-opacity-50"
+                aria-label={showPassword ? "Hide password" : "Show password"}
+              >
+                {showPassword ? <Eye size={18} /> : <EyeOff size={18} />}
+              </button>
+            </div>
           </div>
 
           {/* Inline validation / server error message – announced to screen readers */}
           {error && <p role="alert" aria-live="assertive" className="text-sm text-blush-300">{error}</p>}
-
           <button
             type="submit"
             disabled={busy || submitting}
-            className="w-full min-h-14 rounded-xl px-4 bg-brand-600 text-white font-bold text-base disabled:opacity-60 transition-opacity"
+            className="w-full min-h-14 rounded-xl px-4 bg-brand-600 text-white font-bold text-base disabled:opacity-60"
           >
             {submitting ? "Signing in…" : "Sign In"}
           </button>
         </form>
 
-        <div className="mt-auto pt-8 space-y-1.5 text-center">
-          <p className="text-xs text-slate-400">{DISCLAIMERS.scope}</p>
-          <p className="text-xs text-slate-500">{DISCLAIMERS.noAutoDetect}</p>
-          <p className="text-xs text-slate-500">AHP weights and score bands shown are illustrative examples pending the real expert panel session — not final results.</p>
-          <p className="text-xs text-slate-600 pt-1">{DISCLAIMERS.footer}</p>
-        </div>
+        <button type="button" onClick={() => setAbout(true)} className="mt-6 min-h-12 text-xs font-semibold text-slate-400 underline">About ASPIRE</button>
       </div>
+
+      {about && <AboutSheet onClose={() => setAbout(false)} />}
     </div>
   );
 }
-

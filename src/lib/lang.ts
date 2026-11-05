@@ -1,6 +1,6 @@
 import { useSyncExternalStore } from "react";
 
-const KEY = "agap.lang";
+const KEY = "aspire.lang";
 type Lang = "en" | "fil";
 const listeners = new Set<() => void>();
 

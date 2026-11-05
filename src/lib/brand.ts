@@ -1,6 +1,6 @@
-// The product name is intentionally NOT set yet. Change it here when the final name is decided.
-// (Also update index.html <title>, public/manifest.webmanifest "name"/"short_name" and the icon.)
+// Product name. Keep index.html <title>, public/manifest.webmanifest "name"/"short_name"
+// and the icon in public/icons/ in sync when this changes.
 export const BRAND = {
-  name: "School Emergency Reporting",
-  short: "Emergency Reporting",
+  name: "ASPIRE",
+  short: "ASPIRE",
 } as const;

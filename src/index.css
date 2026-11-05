@@ -34,6 +34,10 @@
   --page: #fff6dc;
 }
 
+:root {
+  /* Height of the sticky app header, used by scroll-padding on long panes. */
+  --scroll-sticky-offset: 4.5rem;
+}
 html, body, #root { min-height: 100dvh; }
 body {
   margin: 0;
@@ -41,19 +45,79 @@ body {
   color: var(--ink);
   font-family: var(--font-sans);
   -webkit-font-smoothing: antialiased;
-  overscroll-behavior-y: none;
+  overscroll-behavior-y: auto;
   -webkit-tap-highlight-color: transparent;
+  text-rendering: optimizeLegibility;
 }
 button, a, input, select { touch-action: manipulation; }
 button { cursor: pointer; }
 button:disabled { cursor: not-allowed; }
 :focus-visible { outline: 3px solid #425b9a; outline-offset: 2px; }
 
+/* One reveal control per password field — hide the browser's built-in one. */
+input::-ms-reveal,
+input::-ms-clear { display: none; }
+
 @keyframes shrink-bar { from { width: 100%; } to { width: 0%; } }
 @keyframes slide-down { from { transform: translateY(-120%); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
 @keyframes pulse-ring { 0% { box-shadow: 0 0 0 0 rgba(255,149,165,.55); } 100% { box-shadow: 0 0 0 14px rgba(255,149,165,0); } }
 .animate-slide-down { animation: slide-down .3s ease-out; }
 .animate-pulse-ring { animation: pulse-ring 1.6s ease-out infinite; }
+
+/* Scroll area utility.
+   `overscroll-behavior` is deliberately left at `auto` at every width: a
+   bounded pane sits INSIDE a scrolling page, so when the pane reaches its end
+   the wheel/touch must chain to the page underneath instead of being swallowed
+   (and vice versa). */
+.scroll-area {
+  overflow-y: auto;
+  overscroll-behavior: auto;
+  scrollbar-width: thin;
+  scrollbar-color: rgb(100 116 139 / .45) transparent;
+  scroll-padding-top: var(--scroll-sticky-offset, 0px);
+}
+.scroll-area::-webkit-scrollbar { width: 8px; }
+.scroll-area::-webkit-scrollbar-thumb {
+  background: rgb(100 116 139 / .45);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+.scroll-area::-webkit-scrollbar-thumb:hover {
+  background: rgb(71 85 105 / .7);
+  background-clip: content-box;
+}
+.scroll-area::-webkit-scrollbar-track { background: transparent; }
+@media (hover: none) {
+  .scroll-area { scrollbar-width: none; }
+  .scroll-area::-webkit-scrollbar { display: none; }
+}
+
+/* Dropdown menu (src/components/Select.tsx) — a 150 ms fade, neutralised by the
+   prefers-reduced-motion rule at the bottom of this file. */
+@keyframes select-pop { from { opacity: 0; transform: translateY(-2px); } to { opacity: 1; transform: translateY(0); } }
+.select-pop { animation: select-pop .15s ease-out; }
+
+/* Subtle top/bottom fade */
+.scroll-fade {
+  mask-image: linear-gradient(to bottom, transparent 0, black 12px, black calc(100% - 12px), transparent 100%);
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0, black 12px, black calc(100% - 12px), transparent 100%);
+}
+
+/* Smooth scrolling only when the user has not asked for reduced motion. */
+.scroll-area,
+.overflow-y-auto,
+.overflow-auto {
+  -webkit-overflow-scrolling: touch;
+}
+@media (prefers-reduced-motion: no-preference) {
+  html,
+  .scroll-area,
+  .overflow-y-auto,
+  .overflow-auto {
+    scroll-behavior: smooth;
+  }
+}
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .001ms !important; animation-iteration-count: 1 !important; transition-duration: .001ms !important; }

@@ -1,4 +1,4 @@
-const TOKEN_KEY = "agap.token";
+const TOKEN_KEY = "aspire.token";
 
 export const getToken = () => localStorage.getItem(TOKEN_KEY);
 export const setToken = (t: string) => localStorage.setItem(TOKEN_KEY, t);
@@ -34,14 +34,19 @@ export async function api<T>(method: string, path: string, body?: unknown): Prom
     throw new ApiError(0, "network", "Can't reach the server.", true);
   }
   let json: any = null;
+  let jsonFailed = false;
   try {
     json = await res.json();
   } catch {
+    jsonFailed = true;
     /* empty body */
   }
   if (!res.ok) {
     // Render's proxy answers 502/503/504 while a sleeping free instance wakes up – treat as "no connection".
     const network = res.status === 502 || res.status === 503 || res.status === 504;
+    if (res.status === 500 && jsonFailed) {
+      throw new ApiError(res.status, json?.error || "error", "Can't reach the ASPIRE server. Is it running?", network);
+    }
     throw new ApiError(res.status, json?.error || "error", json?.message || `Request failed (${res.status})`, network);
   }
   return json as T;

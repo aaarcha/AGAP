@@ -1,19 +1,22 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { api, ApiError, clearToken, getToken, setToken } from "./api";
+import { POLICY_TEXT } from "./password";
 import { notificationsSupported, showSystemNotification } from "./pwa";
 import { STATUS_LABEL } from "../../shared/domain.js";
+import { splitLocation } from "./format";
 import { ESCALATION_TIERS, HAZARD_KINDS } from "../../shared/domain.js";
 import type {
   AlertItem, AppConfig, DrillSummary, Incident, LoginResult, Modes, QueuedReport, ReportPayload, RosterEntry, ServerState, Status, User,
 } from "./types";
 
-const QUEUE_KEY = "agap.queue";
-const CACHE_KEY = "agap.cache";
-const SIM_KEY = "agap.simulateOffline";
+const QUEUE_KEY = "aspire.queue";
+const CACHE_KEY = "aspire.cache";
 
 type SubmitResult = { status: "sent" | "queued"; merged?: boolean; confirmedBy?: number };
-export interface TeacherValues { name: string; section: string; room: string; status?: "active" | "inactive"; registry?: number }
+export interface TeacherValues { name: string; section: string; room: string; email?: string; status?: "active" | "inactive"; registry?: number }
 export interface AckInput { mode?: string; distanceKm?: number }
+
+export type LocationSetBy = "saved_room" | "gps_detected" | "selected_room" | "selected_area" | "unverified";
 const DEFAULT_MODES: Modes = {
   hazard: { active: false, kind: "flood", note: "", since: null, by: null },
   drill: { active: false, label: "", startedAt: null },
@@ -25,26 +28,32 @@ interface Ctx {
   ready: boolean;
   config: AppConfig | null;
   incidents: Incident[];
+  /** Teacher's dedicated Headcount work (their class + live whole-school alerts). */
+  headcountTasks: Incident[];
   roster: RosterEntry[];
   sections: string[];
   modes: Modes;
   drills: DrillSummary[];
-  escalationMinutes: number[];
+  /** Tickets this user hid from their own lists (POST /api/me/hidden, reversible). */
+  hidden: Incident[];
   now: number;
   online: boolean;
-  simulateOffline: boolean;
-  setSimulateOffline: (v: boolean) => void;
   connected: boolean;
   live: boolean;
   queue: QueuedReport[];
   alerts: AlertItem[];
   dismissAlert: (id: string) => void;
+  /** Raise a non-system toast (e.g. "password changed") from a UI action. */
+  notify: (a: Omit<AlertItem, "id">) => void;
   notifPermission: NotificationPermission | "unsupported";
   enableNotifications: () => Promise<void>;
   /** true while the signed-in account must set a new password (first sign-in / yearly rollover) */
   mustChange: boolean;
+  /** The shared password policy text from the server. */
+  passwordPolicy: string;
   login: (email: string, password: string, code?: string) => Promise<boolean>;
-  changePassword: (password: string) => Promise<void>;
+  changePassword: (password: string, currentPassword?: string) => Promise<void>;
+  changeSavedRoom: (roomId: string) => Promise<void>;
   logout: (message?: string) => void;
   refresh: () => Promise<void>;
   submit: (payload: ReportPayload, label: string) => Promise<SubmitResult>;
@@ -52,17 +61,23 @@ interface Ctx {
   act: (id: string, action: "ack" | "onsite" | "resolve", body?: { outcome?: "resolved" | "false_alarm" } & AckInput) => Promise<void>;
   recordHeadcount: (id: string, v: { present: number; expected?: number; section?: string }) => Promise<void>;
   setHazard: (active: boolean, kind?: string, note?: string) => Promise<void>;
-  setDrill: (active: boolean, label?: string) => Promise<DrillSummary | null>;
+  setDrill: (active: boolean, label?: string, scope?: "school" | "simulation") => Promise<DrillSummary | null>;
   setRoute: (status: string, note?: string) => Promise<void>;
   markSeen: (id: string) => void;
   cancelReport: (id: string) => Promise<void>;
-  deleteIncident: (id: string) => Promise<void>;
-  clearHistory: () => Promise<number>;
+  /** Archive a closed ticket for the whole organisation (Principal only). */
+  archiveIncident: (id: string, reason?: string) => Promise<void>;
+  /** Archive every currently closed ticket at once (Principal only). */
+  archiveResolved: (reason?: string) => Promise<number>;
+  /** Hide/unhide a closed ticket from THIS user's lists only. */
+  hideIncident: (id: string, hidden: boolean) => Promise<void>;
   saveProfile: (v: TeacherValues) => Promise<void>;
-  addTeacher: (v: TeacherValues) => Promise<void>;
+  /** Save today's class registry through the existing profile endpoint. */
+  updateRegistry: (registry: number) => Promise<void>;
+  addTeacher: (v: TeacherValues) => Promise<{ teacherId: string; email: string; tempPassword: string }>;
   editTeacher: (id: string, v: TeacherValues) => Promise<void>;
-  deleteTeacher: (id: string) => Promise<void>;
-  resetDemo: () => Promise<void>;
+  /** Archive a teacher (removes them from live rosters; reversible from the Admin console). */
+  archiveTeacher: (id: string, reason?: string) => Promise<void>;
 }
 
 const AppCtx = createContext<Ctx | null>(null);
@@ -86,14 +101,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [ready, setReady] = useState(false);
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [incidents, setIncidents] = useState<Incident[]>([]);
+  const [headcountTasks, setHeadcountTasks] = useState<Incident[]>([]);
   const [roster, setRoster] = useState<RosterEntry[]>([]);
   const [sections, setSections] = useState<string[]>([]);
   const [modes, setModes] = useState<Modes>(DEFAULT_MODES);
   const [drills, setDrills] = useState<DrillSummary[]>([]);
-  const [escalationMinutes, setEscalationMinutes] = useState<number[]>([3, 6]);
+  const [hidden, setHidden] = useState<Incident[]>([]);
   const [now, setNow] = useState(Date.now());
   const [online, setOnline] = useState(typeof navigator === "undefined" ? true : navigator.onLine);
-  const [simulateOffline, setSim] = useState(() => sessionStorage.getItem(SIM_KEY) === "1");
   const [live, setLive] = useState(false);
   const [queueAll, setQueueAll] = useState<QueuedReport[]>(readQueue);
   const [alerts, setAlerts] = useState<AlertItem[]>([]);
@@ -101,6 +116,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     notificationsSupported() ? Notification.permission : "unsupported",
   );
   const [mustChange, setMustChange] = useState(false);
+  const [passwordPolicy, setPasswordPolicy] = useState(POLICY_TEXT);
 
   const offset = useRef(0);
   const reqSeq = useRef(0);
@@ -112,7 +128,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const userRef = useRef<User | null>(null);
   userRef.current = user;
 
-  const connected = online && !simulateOffline;
+  const connected = online;
   const connectedRef = useRef(connected);
   connectedRef.current = connected;
 
@@ -142,19 +158,19 @@ export function AppProvider({ children }: { children: ReactNode }) {
               kind: "new",
               category: i.category,
               title: role === "parent" ? "🔔 NEW EMERGENCY ALERT" : "🚨 New incident reported",
-              body: `${i.categoryLabel} — ${i.subLabel} · ${i.room}`,
+              body: `${i.categoryLabel} — ${i.subLabel} · ${splitLocation(i.room).area}`,
             }, true);
           }
           continue;
         }
         if (role !== "parent" && i.escalationLevel > p.level && i.status !== "RESOLVED") {
-          pushAlert({ kind: "new", category: i.category, title: `⏫ Escalated to ${ESCALATION_TIERS[i.escalationLevel]}`, body: `${i.subLabel} · ${i.room} — not acknowledged in time` }, true);
+          pushAlert({ kind: "new", category: i.category, title: `⏫ Escalated to ${ESCALATION_TIERS[i.escalationLevel]}`, body: `${i.subLabel} · ${splitLocation(i.room).area} — not acknowledged in time` }, true);
         }
         if (role !== "parent" && i.accountability.status === "mismatch" && p.acc !== "mismatch" && i.status !== "RESOLVED") {
-          pushAlert({ kind: "new", category: i.category, title: "⚠ Headcount mismatch — Critical", body: `${i.subLabel} · ${i.room}: pupils not fully accounted for` }, true);
+          pushAlert({ kind: "new", category: i.category, title: "⚠ Headcount mismatch — Critical", body: `${i.subLabel} · ${splitLocation(i.room).area}: pupils not fully accounted for` }, true);
         }
         if (i.confirmedBy > p.confirmedBy && (role === "principal" || role === "responder") && !mine) {
-          pushAlert({ kind: "update", category: i.category, title: `Confirmed by ${i.confirmedBy} reports`, body: `${i.subLabel} · ${i.room}` });
+          pushAlert({ kind: "update", category: i.category, title: `Confirmed by ${i.confirmedBy} reports`, body: `${i.subLabel} · ${splitLocation(i.room).area}` });
         }
         if (i.status !== p.status) {
           if (i.status === "RESOLVED" && (role === "parent" || role === "teacher")) {
@@ -166,10 +182,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
               }, true);
             }
           } else if ((role === "parent" || role === "teacher") && i.status !== "SEEN") {
-            pushAlert({ kind: "update", category: i.category, title: `Update: ${STATUS_LABEL[i.status as Status]}`, body: `${i.subLabel} · ${i.room}` }, true);
+            pushAlert({ kind: "update", category: i.category, title: `Update: ${STATUS_LABEL[i.status as Status]}`, body: `${i.subLabel} · ${splitLocation(i.room).area}` }, true);
           } else if ((role === "principal" || role === "responder") && !mine && i.status !== "SEEN") {
             const closedTitle = i.outcome === "cancelled" ? "Cancelled by reporter" : i.outcome === "false_alarm" ? "False alarm" : "Resolved";
-            pushAlert({ kind: "update", category: i.category, title: `${i.status === "RESOLVED" ? closedTitle : STATUS_LABEL[i.status as Status]}: ${i.subLabel}`, body: i.room });
+            pushAlert({ kind: "update", category: i.category, title: `${i.status === "RESOLVED" ? closedTitle : STATUS_LABEL[i.status as Status]}: ${i.subLabel}`, body: splitLocation(i.room).area });
           }
         }
       }
@@ -182,10 +198,12 @@ export function AppProvider({ children }: { children: ReactNode }) {
     if (pm) {
       if (m.hazard.active !== pm.hazard.active) {
         const kind = HAZARD_KINDS.find((k: { id: string; label: string }) => k.id === m.hazard.kind)?.label ?? "Hazard";
-        pushAlert({ kind: m.hazard.active ? "new" : "clear", title: m.hazard.active ? `🌧 ${kind} — Hazard Mode ON` : "🟢 Hazard Mode OFF", body: m.hazard.active ? (role === "parent" ? "Stay safe. Avoid flooded roads." : "Location Risk raised for ground-floor and low-lying zones.") : "Normal scoring restored." }, true);
+        pushAlert({ kind: m.hazard.active ? "new" : "clear", title: m.hazard.active ? `🌧 ${kind} — Hazard Mode ON` : "🟢 Hazard Mode OFF", body: m.hazard.active ? (role === "parent" ? "Stay safe. Avoid flooded roads." : "Ground-floor and low-lying areas are now prioritised.") : "Back to normal priority." }, true);
       }
-      if (m.drill.active !== pm.drill.active) {
-        pushAlert({ kind: "info", title: m.drill.active ? "🧪 Drill started" : "Drill ended", body: m.drill.active ? (role === "parent" ? "A school safety drill is in progress. This is only a drill." : `${m.drill.label} — reports are recorded as drill data.`) : "Drill metrics were saved." });
+      // Drills are never announced to parents, or to responders in a school-only
+      // drill: the notification audience is the ticket audience.
+      if (m.drill.active !== pm.drill.active && role !== "parent" && (role !== "responder" || m.drill.scope === "simulation")) {
+        pushAlert({ kind: "info", title: m.drill.active ? "🧪 Drill started" : "Drill ended", body: m.drill.active ? `${m.drill.label} — reports are recorded as drill data.` : "Drill metrics were saved." });
       }
       if (role !== "parent" && m.route.status !== pm.route.status) {
         pushAlert({ kind: "info", title: `Approach route: ${m.route.status}`, body: "Responder ETAs were re-estimated." });
@@ -199,11 +217,12 @@ export function AppProvider({ children }: { children: ReactNode }) {
     diffAlerts(s);
     setUser(s.me);
     setIncidents(s.incidents);
+    setHeadcountTasks(s.headcountTasks ?? []);
     setRoster(s.roster);
     setSections(s.sections);
     setModes(s.modes ?? DEFAULT_MODES);
     setDrills(s.drills ?? []);
-    if (s.rules?.escalationMinutes) setEscalationMinutes(s.rules.escalationMinutes);
+    setHidden(s.hidden ?? []);
     setNow(s.serverTime);
     try { localStorage.setItem(CACHE_KEY, JSON.stringify(s)); } catch { /* storage full */ }
   }
@@ -213,7 +232,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     prev.current = null;
     prevModes.current = null;
     seenSent.current.clear();
-    setIncidents([]); setRoster([]); setSections([]); setLive(false);
+    setIncidents([]); setHeadcountTasks([]); setRoster([]); setSections([]); setHidden([]); setLive(false);
     localStorage.removeItem(CACHE_KEY);
   }, []);
 
@@ -252,13 +271,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
     setToken(r.token);
     setUser(r.user);
     setMustChange(Boolean(r.mustChange));
+    setPasswordPolicy(r.policy ?? POLICY_TEXT);
     if (!r.mustChange) await refresh();
     return Boolean(r.mustChange);
   }, [refresh, resetLocal]);
 
   // Single password field: no confirmation step, just the new password.
-  const changePassword = useCallback(async (password: string) => {
-    await api("POST", "/api/password", { password });
+  const changePassword = useCallback(async (password: string, currentPassword?: string) => {
+    await api("POST", "/api/password", { password, ...(currentPassword ? { currentPassword } : {}) });
     setMustChange(false);
     await refresh();
   }, [refresh]);
@@ -277,8 +297,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
         } catch { /* ignore bad cache */ }
         // Validate the persisted session: revoked/expired → sign out; pending password change → force screen.
         try {
-          const me = await api<{ user: User; mustChange: boolean }>("GET", "/api/me");
+          const me = await api<{ user: User; mustChange: boolean; policy?: string }>("GET", "/api/me");
           setMustChange(Boolean(me.mustChange));
+          setPasswordPolicy(me.policy ?? passwordPolicy);
           if (!me.mustChange) await refresh();
         } catch (e) {
           if (e instanceof ApiError && e.status === 401) {
@@ -343,7 +364,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   // ---- live updates: SSE + polling fallback -----------------------------------
   const refreshTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   useEffect(() => {
-    if (!user || simulateOffline) { setLive(false); return; }
+    if (!user) { setLive(false); return; }
     const token = getToken();
     if (!token) return;
     const soon = () => { clearTimeout(refreshTimer.current); refreshTimer.current = setTimeout(() => void refresh(), 80); };
@@ -359,14 +380,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
       document.removeEventListener("visibilitychange", onVisible);
       setLive(false);
     };
-  }, [user?.id, simulateOffline]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [user?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ---- actions -------------------------------------------------------------
-  const setSimulateOffline = useCallback((v: boolean) => {
-    setSim(v);
-    sessionStorage.setItem(SIM_KEY, v ? "1" : "0");
-  }, []);
-
   const submit = useCallback(async (payload: ReportPayload, label: string): Promise<SubmitResult> => {
     const me = userRef.current;
     if (!me) throw new Error("Not signed in.");
@@ -408,8 +424,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
     await refresh();
   }, [refresh]);
   const setHazard = useCallback(async (active: boolean, kind?: string, note?: string) => { await api("PUT", "/api/modes/hazard", { active, kind, note }); await refresh(); }, [refresh]);
-  const setDrill = useCallback(async (active: boolean, label?: string) => {
-    const r = await api<{ summary: DrillSummary | null }>("PUT", "/api/modes/drill", { active, label });
+  const setDrill = useCallback(async (active: boolean, label?: string, scope?: "school" | "simulation") => {
+    const r = await api<{ summary: DrillSummary | null }>("PUT", "/api/modes/drill", { active, label, scope });
     await refresh();
     return r.summary;
   }, [refresh]);
@@ -432,18 +448,29 @@ export function AppProvider({ children }: { children: ReactNode }) {
     await refresh();
   }, [pushAlert, refresh]);
 
-  const deleteIncident = useCallback(async (id: string) => {
-    try { await api("DELETE", `/api/incidents/${id}`); }
-    catch (e) { pushAlert({ kind: "error", title: "Could not delete", body: e instanceof Error ? e.message : "Unknown error" }); }
+  const archiveIncident = useCallback(async (id: string, reason?: string) => {
+    try {
+      await api("POST", `/api/incidents/${id}/archive`, reason ? { reason } : {});
+      pushAlert({ kind: "info", title: "Ticket archived", body: "It leaves the live lists but stays readable under History > View archive." });
+    } catch (e) { pushAlert({ kind: "error", title: "Could not archive", body: e instanceof Error ? e.message : "Unknown error" }); }
     await refresh();
   }, [pushAlert, refresh]);
 
-  const clearHistory = useCallback(async () => {
+  const archiveResolved = useCallback(async (reason?: string) => {
     let count = 0;
-    try { count = (await api<{ count: number }>("DELETE", "/api/history")).count; }
-    catch (e) { pushAlert({ kind: "error", title: "Could not clear history", body: e instanceof Error ? e.message : "Unknown error" }); }
+    try {
+      const r = await api<{ count: number }>("POST", "/api/incidents/archive-resolved", reason ? { reason } : {});
+      count = r.count;
+      pushAlert({ kind: "info", title: `${count} ticket${count === 1 ? "" : "s"} archived`, body: "They stay readable under History > View archive." });
+    } catch (e) { pushAlert({ kind: "error", title: "Could not archive", body: e instanceof Error ? e.message : "Unknown error" }); }
     await refresh();
     return count;
+  }, [pushAlert, refresh]);
+
+  const hideIncident = useCallback(async (id: string, hiddenNext: boolean) => {
+    try { await api("POST", "/api/me/hidden", { incidentId: id, hidden: hiddenNext }); }
+    catch (e) { pushAlert({ kind: "error", title: hiddenNext ? "Could not hide" : "Could not unhide", body: e instanceof Error ? e.message : "Unknown error" }); }
+    await refresh();
   }, [pushAlert, refresh]);
 
   const saveProfile = useCallback(async (v: TeacherValues) => {
@@ -451,10 +478,24 @@ export function AppProvider({ children }: { children: ReactNode }) {
     setUser(r.user);
     await refresh();
   }, [refresh]);
-  const addTeacher = useCallback(async (v: TeacherValues) => { await api("POST", "/api/roster", v); await refresh(); }, [refresh]);
+  const updateRegistry = useCallback(async (registry: number) => {
+    const me = userRef.current;
+    if (!me) throw new Error("Not signed in.");
+    const r = await api<{ user: User }>("PUT", "/api/profile", { name: me.name, section: me.section, room: me.room, registry });
+    setUser(r.user);
+    await refresh();
+  }, [refresh]);
+  const addTeacher = useCallback(async (v: TeacherValues) => {
+    const r = await api<{ teacher: { id: string }; account: { email: string }; tempPassword: string }>("POST", "/api/roster", v);
+    await refresh();
+    return { teacherId: r.teacher.id, email: r.account.email, tempPassword: r.tempPassword };
+  }, [refresh]);
+  const changeSavedRoom = useCallback(async (roomId: string) => { await api("PUT", "/api/profile/room", { roomId }); await refresh(); }, [refresh]);
   const editTeacher = useCallback(async (id: string, v: TeacherValues) => { await api("PUT", `/api/roster/${id}`, v); await refresh(); }, [refresh]);
-  const deleteTeacher = useCallback(async (id: string) => { await api("DELETE", `/api/roster/${id}`); await refresh(); }, [refresh]);
-  const resetDemo = useCallback(async () => { await api("POST", "/api/admin/reset"); await refresh(); }, [refresh]);
+  const archiveTeacher = useCallback(async (id: string, reason?: string) => {
+    await api("POST", `/api/roster/${id}/archive`, reason ? { reason } : {});
+    await refresh();
+  }, [refresh]);
 
   const enableNotifications = useCallback(async () => {
     if (!notificationsSupported()) return;
@@ -463,10 +504,13 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   const queue = useMemo(() => queueAll.filter((q) => q.userId === user?.id), [queueAll, user?.id]);
 
+  const notify = useCallback((a: Omit<AlertItem, "id">) => pushAlert(a, false), [pushAlert]);
+
   const value: Ctx = {
-    user, ready, config, incidents, roster, sections, modes, drills, escalationMinutes, now, online, simulateOffline, setSimulateOffline, connected, live,
-    queue, alerts, dismissAlert, notifPermission, enableNotifications, mustChange, login, changePassword, logout, refresh, submit, cancelQueued,
-    act, recordHeadcount, setHazard, setDrill, setRoute, markSeen, cancelReport, deleteIncident, clearHistory, saveProfile, addTeacher, editTeacher, deleteTeacher, resetDemo,
+    user, ready, config, incidents, headcountTasks, roster, sections, modes, drills, now, online, connected, live,
+    queue, alerts, dismissAlert, notifPermission, enableNotifications, mustChange, passwordPolicy, login, changePassword, logout, refresh, submit, cancelQueued,
+    act, recordHeadcount, setHazard, setDrill, setRoute, markSeen, cancelReport, archiveIncident, archiveResolved, hideIncident, hidden,
+    saveProfile, updateRegistry, addTeacher, editTeacher, archiveTeacher, changeSavedRoom, notify,
   };
   return <AppCtx.Provider value={value}>{children}</AppCtx.Provider>;
 }

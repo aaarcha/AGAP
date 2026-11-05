@@ -12,7 +12,7 @@ interface BeforeInstallPromptEvent extends Event {
   userChoice: Promise<{ outcome: "accepted" | "dismissed" }>;
 }
 
-const DISMISS_KEY = "agap.installDismissedAt";
+const DISMISS_KEY = "aspire.installDismissedAt";
 
 export function isStandalone(): boolean {
   return window.matchMedia("(display-mode: standalone)").matches || (navigator as any).standalone === true;

@@ -1,15 +1,22 @@
 export type Role = "teacher" | "principal" | "parent" | "responder" | "super_admin";
 export type Status = "SENT" | "SEEN" | "EN_ROUTE" | "ON_SITE" | "RESOLVED";
 
+/** A responder answers for exactly one organization — there are no shared accounts. */
+export type ResponderOrg = "barangay" | "cdrrmo";
+
 export interface User {
   id: string;
   role: Role;
   name: string;
   subtitle: string;
+  /** Responders only: the organization they dispatch for. */
+  org?: ResponderOrg | null;
   section?: string;
   room?: string;
   gps?: string;
   registry?: number;
+  /** When the registry above was last set (teacher only; null when never set). */
+  registryUpdatedAt?: number | null;
 }
 
 export interface LogEntry {
@@ -18,7 +25,37 @@ export interface LogEntry {
   role: string;
   action: string;
   note?: string;
+  /** Set when a responder org acted, so the timeline names the organization. */
+  org?: ResponderOrg | null;
 }
+
+/** One organization's response to a ticket (both orgs respond independently). */
+export interface OrgResponse {
+  org: ResponderOrg;
+  orgLabel: string;
+  status: "en_route" | "on_site" | "resolved";
+  ackAt: number;
+  /** Same instant as ackAt, kept as the spec'd track field names. */
+  acknowledgedAt?: number;
+  enRouteAt?: number;
+  /** The acting account id. */
+  by?: string | null;
+  /** Headline ETA in minutes for this org. */
+  etaMinutes?: number | null;
+  onSiteAt: number | null;
+  resolvedAt: number | null;
+  byName?: string;
+  mode: string | null;
+  distanceKm: number | null;
+  routeStatus: string | null;
+  blocked: boolean;
+  minutes: number | null;
+  startedAt: number | null;
+  arriveBy: number | null;
+}
+
+// How the final location of a ticket was established.
+export type LocationSetBy = "saved_room" | "gps_detected" | "selected_room" | "selected_area" | "unverified";
 
 export interface Incident {
   id: string;
@@ -32,8 +69,16 @@ export interface Incident {
   confirmedBy: number;
   linkedSection: string;
   populationLabel?: string;
+  /** Affected population id (individual | classroom | wholeschool); group scopes require a headcount. */
+  populationId?: string;
   outcome: "resolved" | "false_alarm" | "cancelled" | "drill" | null;
   resolvedAt: number | null;
+  /** Step timestamps, locked by the server once recorded — never rewritten. */
+  seenAt?: number | null;
+  /** The school track: the Principal acknowledged (never an en-route step). */
+  acknowledgedAt?: number | null;
+  enRouteAt?: number | null;
+  onSiteAt?: number | null;
   // Not sent to parents:
   severity?: number;
   vulnerability?: number;
@@ -41,20 +86,48 @@ export interface Incident {
   timeSensitivity?: number;
   reporterName?: string;
   reporterId?: string;
+  /** Everyone who reported this (merged) ticket — sent to teachers for the My Reports relation label. */
+  reporterIds?: string[];
   acknowledgedBy?: string | null;
+  /** Which org first acknowledged (the headline status names it). */
+  acknowledgedByOrg?: ResponderOrg | null;
+  /** Every org's own response — ETA per org; null until that org acts. */
+  responses?: Record<ResponderOrg, OrgResponse | null>;
   resolvedBy?: string | null;
+  resolvedByOrg?: ResponderOrg | null;
   log?: LogEntry[];
   canCancel?: boolean;
   // Priority rules
   overrideReasons: string[];
   escalationLevel: number;
   eta: Eta | null;
-  accountability: { status: "pending" | "partial" | "verified" | "mismatch"; reported: number; total: number };
+  accountability: { status: "pending" | "partial" | "verified" | "mismatch" | "not_required"; reported: number; total: number };
   headcounts: Headcount[];
+  /** Server-computed headcount rights for THIS viewer (never derived on the client). */
+  headcount?: HeadcountAccess;
   baseLocationRisk?: number;
   hazardApplied?: boolean;
   drill?: boolean;
+  /** "school" = staff only; "simulation" = responders take part. */
+  drillScope?: "school" | "simulation" | null;
   metrics?: Metrics;
+  /** Urgency band from the server (bandFor): CRITICAL, HIGH, or MODERATE. Never compute on client. */
+  tier?: "CRITICAL" | "HIGH" | "MODERATE";
+  locationKind?: "saved" | "area" | "unverified" | "room";
+  /** How the final location was established. */
+  locationSetBy?: LocationSetBy;
+  /** Human-readable final location + how it was set. */
+  locationNote?: string;
+  /** Set when the ticket was archived (manually by the Principal, or by the sweep). */
+  archivedAt?: number | null;
+  archivedBy?: string | null;
+  archiveReason?: string | null;
+  /** true when the retention sweep archived it rather than a person. */
+  archivedAuto?: boolean;
+  /** Set when the Admin purge anonymised the record. Never reversible. */
+  anonymizedAt?: number | null;
+  /** Role label shown instead of the reporter's name in the archive. */
+  reporterRole?: string | null;
 }
 
 export interface Eta {
@@ -69,6 +142,21 @@ export interface Eta {
 
 export interface Headcount { section: string; expected: number; present: number; at: number; by?: string }
 
+/** One answer to "may this viewer count, and against which registry?". */
+export interface HeadcountAccess {
+  required: boolean;
+  /** Only the class owner and the Principal ever see headcount UI. */
+  visible: boolean;
+  canRecord: boolean;
+  /** Set for a single-class ticket; null for whole-school (each teacher owns a section). */
+  ownerSection: string | null;
+  sections: string[];
+  /** The viewer's own section to count, or null until the Principal chooses one. */
+  section: string | null;
+  /** The OWNER's registry — never the reporter's. */
+  registry: number | null;
+}
+
 export interface Metrics {
   toReportMs: number | null;
   toAckMs: number | null;
@@ -80,12 +168,14 @@ export interface Metrics {
 
 export interface Modes {
   hazard: { active: boolean; kind: string; note: string; since: number | null; by: string | null };
-  drill: { active: boolean; label: string; startedAt: number | null };
+  drill: { active: boolean; label: string; startedAt: number | null; scope?: "school" | "simulation" };
   route: { status: "passable" | "flooded" | "blocked"; note?: string; updatedAt?: number | null; by?: string | null };
 }
 
 export interface DrillSummary {
   id: string; label: string; startedAt: number; endedAt: number; startedBy: string; endedBy: string; incidents: number;
+  /** "school" (staff only) or "simulation" (responders took part). */
+  scope?: "school" | "simulation";
   avgToReportMs: number | null; avgToAckMs: number | null; avgToOnSiteMs: number | null; avgToHeadcountMs: number | null; avgInteractions: number | null;
 }
 
@@ -93,6 +183,10 @@ export interface RosterEntry {
   id: string;
   name: string;
   section: string;
+  /** Structured grade derived from section: "K" or "1".."6" ("" when unparseable). */
+  grade?: string;
+  /** Section name part of section, e.g. "A" ("" when unparseable). */
+  sectionName?: string;
   room: string;
   gps: string;
   status: "active" | "inactive";
@@ -104,19 +198,60 @@ export interface ServerState {
   serverTime: number;
   me: User;
   incidents: Incident[];
+  /** Teachers only: live headcount work (whole-school tasks are never in `incidents`). */
+  headcountTasks?: Incident[];
   roster: RosterEntry[];
   sections: string[];
   modes: Modes;
   drills: DrillSummary[];
-  rules: { escalationMinutes: number[]; tiers: string[]; hazardBoost: number };
+  /** Tickets this user removed from their own lists (reversible — POST /api/me/hidden). */
+  hidden?: Incident[];
+}
+
+// ---- admin configuration (Super Admin only) -----------------------------------
+export interface ConfigWeights {
+  severity: number;
+  vulnerability: number;
+  locationRisk: number;
+  timeSensitivity: number;
+}
+
+/** One immutable configuration version. Percent weights must sum to exactly 100.0. */
+export interface ConfigVersion {
+  id: string;
+  version: number;
+  active: boolean;
+  weights: ConfigWeights;
+  consistency: { cr: number; lambdaMax: number; ci: number; ri: number; n: number };
+  /** Who validated these values and when — a record only; it never changes scoring. */
+  panelValidationDate: string | null;
+  panelReference: string | null;
+  hazardAdjustment: number;
+  escalation: { barangayMinutes: number; cdrrmoMinutes: number };
+  responderSpeeds: { walking: number; motorcycle: number; vehicle: number };
+  createdBy: string;
+  createdAt: number;
+}
+
+export interface ConfigPayload {
+  weights: ConfigWeights;
+  consistency: { cr: number; lambdaMax?: number; ci?: number; ri?: number; n?: number };
+  panelValidationDate: string;
+  panelReference: string;
+  hazardAdjustment: number;
+  escalation: { barangayMinutes: number; cdrrmoMinutes: number };
+  responderSpeeds: { walking: number; motorcycle: number; vehicle: number };
 }
 
 export interface ReportPayload {
   categoryId: string;
   subId: string;
   populationId: string;
-  locationKind: "saved" | "area" | "unverified";
+  locationKind: "saved" | "area" | "unverified" | "room";
   areaId?: string;
+  roomId?: string;
+  /** How the final location was established (see Incident.locationSetBy). */
+  locationSetBy?: LocationSetBy;
   section?: string;
   interactions?: number;
 }
@@ -133,32 +268,90 @@ export interface AppConfig {
   accessCodeRequired: boolean;
   demoReset: boolean;
   passwordMin?: number;
+  school?: { name: string; depedId: string; barangay: string; city: string; division: string; phone: string };
 }
 
 // ---- authentication / Super Admin console ------------------------------------
+export interface TeacherRecord {
+  id: string;
+  name: string;
+  section: string | null;
+  room: string | null;
+  gps: string | null;
+  registry: number | null;
+}
+
 export interface AccountRecord {
   id: string;
   email: string;
   role: Role;
   name: string;
+  /** Responders: the organization the account answers for. */
+  org?: ResponderOrg | null;
+  orgLabel?: string;
   section: string | null;
-  status: "active" | "inactive";
+  /** Structured grade derived from section: "K" or "1".."6" ("" when unparseable). */
+  grade?: string;
+  /** Section name part of section, e.g. "A" ("" when unparseable). */
+  sectionName?: string;
+  status: "active" | "inactive" | "archived" | "purged";
   mustChange: boolean;
   temp: boolean;
+  /** Set when the account was archived (blocks sign-in, revokes sessions). */
+  archivedAt?: number | null;
+  archiveReason?: string | null;
+  /** true when a retention sweep archived it rather than a person. */
+  archivedAuto?: boolean;
+  /** Set when the Admin purge erased personal data. */
+  purgedAt?: number | null;
   locked: boolean;
   lockedUntil: number;
   failed: number;
   lastLoginAt: number | null;
   createdAt: number;
+  teacher?: TeacherRecord | null;
+  /** archived AND past the (placeholder) retention period — the Admin purge gate. */
+  purgeEligible?: boolean;
+}
+
+/** Read-only eligibility card behind GET /api/admin/retention. */
+export interface RetentionInfo {
+  placeholder: boolean;
+  label: string;
+  periods: {
+    archiveAfterDays: number;
+    incidents: number;
+    accounts: number;
+    drills: number;
+    notifications: number;
+  };
+  counts: {
+    archivedIncidents: number;
+    anonymizedIncidents: number;
+    eligibleIncidents: number;
+    archivedAccounts: number;
+    eligibleAccounts: number;
+    expiredDrills: number;
+  };
+  /** Types with no persistent store are reported, never given a period. */
+  skipped: { type: string; days: number; note: string }[];
 }
 
 export interface AuditEntry {
   at: number;
   action: string;
+  /** Actor id (never a name, password or token). */
   by: string | null;
   target: string | null;
+  /** Resolved by the Admin endpoint for display; the raw id stays in by/target. */
+  actorLabel?: string | null;
+  targetLabel?: string | null;
   detail: string;
   ip: string;
+  /** Actor role and organisation, for the archive/purge/data-request actions. */
+  role?: string | null;
+  org?: string | null;
+  reason?: string | null;
 }
 
 export interface SchoolYear {
@@ -179,6 +372,7 @@ export interface LoginResult {
   token: string;
   user: User;
   mustChange: boolean;
+  policy?: string;
 }
 
 export interface AlertItem {
