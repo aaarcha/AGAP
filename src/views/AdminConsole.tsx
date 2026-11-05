@@ -2,10 +2,13 @@ import { useState, useEffect, useMemo, type ReactNode } from "react";
 import {
   Users, ClipboardList, Calendar, Plus, RefreshCw, Unlock, UserX, UserCheck, Key, Eye, EyeOff, Copy, Check, AlertCircle,
   SlidersHorizontal, Search, X, History, Pencil, RotateCcw, Save, Trash2, FileWarning, Archive, Radio, ShieldCheck, User, ChevronRight,
+  Footprints, Bike, Truck, ShieldAlert,
+  LogIn, LogOut, Database, Siren, AlertTriangle,
 } from "lucide-react";
 import { api } from "../lib/api";
 import type { AccountRecord, AuditEntry, ConfigPayload, ConfigVersion, SchoolYear, TempCredential } from "../lib/types";
 import { Modal, ConfirmModal } from "../components/Modal";
+import { TempCredentialModal, PasswordResultModal } from "../components/Credentials";
 import { dateTime } from "../lib/format";
 import { BackBarFor, Header, StatusBanner } from "../components/Chrome";
 import { RoleNav } from "../components/RoleNav";
@@ -15,7 +18,6 @@ import { BoundedPane, PageFlow } from "../components/PageShell";
 import { Select } from "../components/Select";
 import { FilterBar } from "../components/FilterBar";
 import { DatePicker } from "../components/DatePicker";
-import { PeriodControl } from "../components/PeriodControl";
 import {
   activeFilterCount, activeFilterEntries, clearGroupFilters, facetCounts, filterItems,
   inDateRange, initialDateRange, initialFilterState, isGroupSelected, matchesQuery,
@@ -23,10 +25,14 @@ import {
   useFilterState, type DateRangeState, type FilterSpec,
 } from "../lib/filters";
 import { SECTION_GRADES, gradeCode, gradeLabel, composeSection, parseSection } from "../../shared/section.js";
+import { RoomField } from "../components/RoomField";
+import { GradeSectionField, RegistryField, normalizeSectionName, suggestionsForGrade } from "../components/FormFields";
 import { RESPONDER_ORGS, SCHOOL } from "../../shared/domain.js";
 import AccountView from "./AccountView";
 import IncidentsRecords from "./IncidentsRecords";
 import AnalyticsView from "./AnalyticsView";
+import { recordsHash } from "../lib/records";
+import type { AnalyticsRecordsLink } from "../components/RecordsAnalytics";
 
 const card = "rounded-2xl border border-slate-200 bg-white p-4";
 const h2 = "flex items-center gap-1.5 text-xs font-bold uppercase tracking-wide text-slate-500";
@@ -39,6 +45,246 @@ const btnDanger = `${btn} bg-blush-100 text-blush-700`;
 /** Sub-screens of More — entries in the menu, never tabs of their own. */
 type MoreScreen = "menu" | "year" | "audit" | "records" | "account";
 
+/** The four Audit log categories, mapped from the stored action name. */
+const AUDIT_CATEGORIES = [
+  { value: "signin", label: "Sign-ins" },
+  { value: "accounts", label: "Accounts" },
+  { value: "incidents", label: "Incidents" },
+  { value: "privacy", label: "Data and privacy" },
+] as const;
+
+function auditCategory(entry: AuditEntry): string {
+  const a = String(entry.action ?? "");
+  if (/login|logout|sign.?in|session/i.test(a)) return "signin";
+  if (/purge|anonym|retention|export|privacy|data/i.test(a)) return "privacy";
+  if (/incident|ticket|archive|restore|resolve|drill|hazard|route|escalat/i.test(a)) return "incidents";
+  return "accounts";
+}
+
+/** Success unless the action says it failed/was refused. */
+function auditResult(entry: AuditEntry): "success" | "failed" {
+  return /fail|error|denied|refus|invalid|locked_out/i.test(String(entry.action ?? "")) ? "failed" : "success";
+}
+
+/** Every stored action, said in plain words (“Sign-in succeeded”). */
+const AUDIT_ACTION_LABEL: Record<string, string> = {
+  login: "Sign-in succeeded",
+  sign_in: "Sign-in succeeded",
+  login_success: "Sign-in succeeded",
+  login_failed: "Sign-in failed",
+  login_policy: "Sign-in blocked by policy",
+  logout: "Signed out",
+  account_locked: "Account locked",
+  account_unlocked: "Account unlocked",
+  account_created: "Account created",
+  account_updated: "Account updated",
+  email_changed: "Email changed",
+  account_deactivated: "Account deactivated",
+  account_activated: "Account activated",
+  account_archived: "Account archived",
+  account_restored: "Account restored",
+  account_purged: "Account purged",
+  account_seeded: "Demo accounts seeded",
+  password_reset: "Password reset",
+  password_change: "Password changed",
+  password_change_failed: "Password change failed",
+  incidents_purged: "Incident data purged",
+  incident_archived: "Incident archived",
+  incident_restored: "Incident restored",
+  incident_auto_archived: "Incident auto-archived",
+  incident_hidden: "Incident hidden",
+  incident_unhidden: "Incident shown again",
+  incident_acknowledged: "Incident acknowledged",
+  data_request_processed: "Data request processed",
+  school_year_started: "School year started",
+  config_saved: "Settings saved",
+  config_restored: "Settings restored",
+  config_seeded: "Settings seeded",
+  config_invalid_fallback: "Settings reset to defaults",
+  section_changed: "Section changed",
+  saved_room_changed: "Saved room changed",
+};
+
+/** “account_created” → “Account created”, for any action not listed above. */
+function auditActionLabel(entry: AuditEntry): string {
+  const raw = String(entry.action ?? "").trim();
+  const known = AUDIT_ACTION_LABEL[raw.toLowerCase()];
+  if (known) return known;
+  const words = raw.replace(/[._]+/g, " ").trim();
+  return words ? words.charAt(0).toUpperCase() + words.slice(1) : "Event";
+}
+
+/** Category tint + icon; a failure always takes the amber tone. */
+const AUDIT_TONE: Record<string, { icon: typeof Users; tint: string; text: string }> = {
+  signin: { icon: LogIn, tint: "bg-slate-100", text: "text-slate-600" },
+  accounts: { icon: Users, tint: "bg-brand-50", text: "text-brand-700" },
+  incidents: { icon: Siren, tint: "bg-sky-50", text: "text-sky-700" },
+  privacy: { icon: Database, tint: "bg-violet-50", text: "text-violet-700" },
+};
+
+function auditTone(entry: AuditEntry) {
+  const base = AUDIT_TONE[auditCategory(entry)] ?? AUDIT_TONE.accounts;
+  if (auditResult(entry) === "failed") {
+    return { icon: entry.action === "logout" ? LogOut : AlertTriangle, tint: "bg-amber-50", text: "text-amber-800" };
+  }
+  return base;
+}
+
+const startOfDay = (ts: number) => new Date(ts).setHours(0, 0, 0, 0);
+const DAY_MS = 86_400_000;
+
+/** “Today”, “Yesterday”, then “Oct 31” — the day a group of events belongs to. */
+function auditDayLabel(ts: number, now: number): string {
+  const day = startOfDay(ts);
+  const today = startOfDay(now);
+  if (day === today) return "Today";
+  if (day === today - DAY_MS) return "Yesterday";
+  return new Date(ts).toLocaleDateString("en-PH", { month: "short", day: "numeric" });
+}
+
+/** Phones read a day-grouped event list; >= 768 reads a fixed-width table. */
+export function AuditLog({ entries, now }: { entries: AuditEntry[]; now: number }) {
+  const days = useMemo(() => {
+    const groups: { key: string; label: string; entries: AuditEntry[] }[] = [];
+    for (const entry of entries) {
+      const key = String(startOfDay(entry.at));
+      const last = groups[groups.length - 1];
+      if (last && last.key === key) last.entries.push(entry);
+      else groups.push({ key, label: auditDayLabel(entry.at, now), entries: [entry] });
+    }
+    return groups;
+  }, [entries, now]);
+  const [detail, setDetail] = useState<AuditEntry | null>(null);
+
+  return (
+    <div data-audit>
+      {/* Phone: one card per event, under a sticky day heading. */}
+      <div data-audit-list className="space-y-4 lg:hidden">
+        {days.map((day) => (
+          <section key={day.key} data-audit-day={day.label}>
+            <h3 className="sticky top-0 z-10 -mx-1 mb-2 bg-cream/95 px-1 py-1.5 text-[11px] font-bold uppercase tracking-wide text-slate-500 backdrop-blur">
+              {day.label}
+            </h3>
+            <ul className="space-y-2">
+              {day.entries.map((entry, i) => {
+                const tone = auditTone(entry);
+                const Icon = tone.icon;
+                return (
+                  <li key={i} data-audit-event className="min-w-0">
+                    <button
+                      type="button"
+                      onClick={() => setDetail(entry)}
+                      aria-label={`Event details: ${auditActionLabel(entry)}`}
+                      className="flex min-h-14 w-full min-w-0 items-start gap-2.5 rounded-xl border border-slate-200 bg-white p-3 text-left hover:border-brand-300"
+                    >
+                      <span className={`mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-full ${tone.tint} ${tone.text}`}>
+                        <Icon size={15} aria-hidden />
+                      </span>
+                      <div className="min-w-0 flex-1">
+                        <p className="break-words hyphens-none text-sm font-bold leading-snug text-slate-800">{auditActionLabel(entry)}</p>
+                        <p data-audit-actor className="mt-0.5 break-words hyphens-none text-xs text-slate-600">
+                          {entry.actorLabel || entry.by || "System"}
+                        </p>
+                        {entry.detail && <p className="mt-0.5 break-words hyphens-none text-[11px] leading-snug text-slate-400">{entry.detail}</p>}
+                      </div>
+                      <span className="shrink-0 font-mono text-[11px] font-semibold tabular-nums text-slate-400">
+                        {new Date(entry.at).toLocaleTimeString("en-PH", { hour: "numeric", minute: "2-digit" })}
+                      </span>
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+          </section>
+        ))}
+      </div>
+
+      {/* >= 1024: six fixed columns, every cell wraps — never a sideways scroll. */}
+      <div data-audit-table className="hidden overflow-hidden rounded-2xl border border-slate-200 bg-white lg:block">
+        <table className="w-full table-fixed text-sm">
+          <caption className="sr-only">Audit events</caption>
+          <colgroup>
+            <col style={{ width: "13%" }} />
+            <col style={{ width: "19%" }} />
+            <col style={{ width: "15%" }} />
+            <col style={{ width: "16%" }} />
+            <col style={{ width: "25%" }} />
+            <col style={{ width: "12%" }} />
+          </colgroup>
+          <thead className="border-b border-slate-200 bg-slate-50">
+            <tr>
+              {["Time", "Action", "Actor", "Target", "Detail", "IP"].map((h) => (
+                <th key={h} scope="col" className="px-3 py-2 text-left text-xs font-bold text-slate-600">
+                  {h}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-slate-100">
+            {entries.map((entry, i) => {
+              const tone = auditTone(entry);
+              const Icon = tone.icon;
+              return (
+                <tr key={i} data-audit-row className="align-top hover:bg-slate-50">
+                  <td className="break-words px-3 py-2 text-xs tabular-nums text-slate-500">{dateTime(entry.at)}</td>
+                  <td className="px-3 py-2">
+                    <span className={`inline-flex min-w-0 items-center gap-1.5 rounded-full ${tone.tint} ${tone.text} px-2 py-0.5 text-[11px] font-bold`}>
+                      <Icon size={12} className="shrink-0" aria-hidden />
+                      <span className="break-words hyphens-none">{auditActionLabel(entry)}</span>
+                    </span>
+                  </td>
+                  <td className="break-words px-3 py-2 text-slate-600">{entry.actorLabel || entry.by || "—"}</td>
+                  <td className="break-words px-3 py-2 text-slate-600">{entry.targetLabel || entry.target || "—"}</td>
+                  <td className="break-words px-3 py-2 text-slate-500">{entry.detail || "—"}</td>
+                  <td className="break-all px-3 py-2 font-mono text-[11px] text-slate-400">{entry.ip || "—"}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+
+      {detail && <AuditEventDetails entry={detail} onClose={() => setDetail(null)} />}
+    </div>
+  );
+}
+
+/** Phone: the full event, including Target and IP, in a details sheet. */
+function AuditEventDetails({ entry, onClose }: { entry: AuditEntry; onClose: () => void }) {
+  const rows: [string, string][] = [
+    ["Time", dateTime(entry.at)],
+    ["Action", auditActionLabel(entry)],
+    ["Result", auditResult(entry) === "failed" ? "Failed" : "Success"],
+    ["Actor", entry.actorLabel || entry.by || "System"],
+    ["Target", entry.targetLabel || entry.target || "—"],
+    // The raw stored id stays available as the reference, never as a heading.
+    ["Reference", entry.target || entry.by || "—"],
+    ["Detail", entry.detail || "—"],
+    ["IP", entry.ip || "—"],
+  ];
+  return (
+    <Modal title="Event details" onClose={onClose}>
+      <dl data-audit-detail className="space-y-2 text-sm">
+        {rows.map(([label, value]) => (
+          <div key={label} className="flex min-w-0 gap-3 border-b border-slate-100 pb-2 last:border-0 last:pb-0">
+            <dt className="w-20 shrink-0 text-xs font-bold uppercase tracking-wide text-slate-500">{label}</dt>
+            <dd className={`min-w-0 flex-1 break-words hyphens-none ${label === "IP" ? "font-mono text-xs text-slate-500" : "text-slate-700"}`}>
+              {value}
+            </dd>
+          </div>
+        ))}
+      </dl>
+    </Modal>
+  );
+}
+
+const AUDIT_SPEC: FilterSpec<AuditEntry> = {
+  groups: {
+    category: (entry, value) => auditCategory(entry) === value,
+    result: (entry, value) => auditResult(entry) === value,
+  },
+};
+
 const MORE_ITEMS: { id: Exclude<MoreScreen, "menu">; label: string; hint: string; icon: typeof Users }[] = [
   { id: "year", label: "School year", hint: "Rollover and temporary credentials", icon: Calendar },
   { id: "audit", label: "Audit log", hint: "Read-only security and admin trail", icon: ClipboardList },
@@ -50,8 +296,9 @@ export default function AdminConsole() {
   const [tab, setTab] = useState<AdminTab>("accounts");
   const [accounts, setAccounts] = useState<AccountRecord[]>([]);
   const [auditEntries, setAuditEntries] = useState<AuditEntry[]>([]);
-  // The audit log's Period dropdown, kept for the session.
+  // The audit log's filters (period + category + result), kept for the session.
   const [auditRange, setAuditRange] = useFilterState<DateRangeState>("admin-audit-range", initialDateRange);
+  const [auditFilters, setAuditFilters] = useFilterState("admin-audit-filters", () => initialFilterState());
   const [schoolYear, setSchoolYear] = useState<SchoolYear | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -89,10 +336,74 @@ export default function AdminConsole() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab, moreScreen]);
 
-  // Audit records inside the chosen period — the Period dropdown in the Filters sheet.
-  const auditShown = useMemo(
+  // Audit records inside the chosen period, then the category and result sections.
+  const auditInPeriod = useMemo(
     () => auditEntries.filter((entry) => inDateRange(entry.at, auditRange, Date.now())),
     [auditEntries, auditRange],
+  );
+  const auditShown = useMemo(() => {
+    const categories = auditFilters.groups.category ?? [];
+    const results = auditFilters.groups.result ?? [];
+    return auditInPeriod.filter(
+      (entry) =>
+        (categories.length === 0 || categories.includes(auditCategory(entry))) &&
+        (results.length === 0 || results.includes(auditResult(entry))),
+    );
+  }, [auditInPeriod, auditFilters]);
+  const auditCatCounts = facetCounts(auditInPeriod, auditFilters, AUDIT_SPEC, {
+    options: AUDIT_CATEGORIES.map((c) => c.value),
+    valueOf: (entry) => auditCategory(entry),
+    exclude: "category",
+  });
+  const auditResultCounts = facetCounts(auditInPeriod, auditFilters, AUDIT_SPEC, {
+    options: ["success", "failed"],
+    valueOf: (entry) => auditResult(entry),
+    exclude: "result",
+  });
+  const auditFilterCount =
+    (auditFilters.groups.category?.length ?? 0) +
+    (auditFilters.groups.result?.length ?? 0) +
+    (auditRange.period === "all" ? 0 : 1);
+  const auditToggle = (group: string, value: string) =>
+    setAuditFilters((s) => toggleGroupValue(s, group, value));
+  const auditChip = (group: string, value: string, label: string, count: number) => ({
+    value,
+    label,
+    count,
+    disabled: count === 0 && !isGroupSelected(auditFilters, group, value),
+  });
+  const auditFilterBar = (
+    <FilterBar
+      compact
+      filters={{
+        groups: [
+          {
+            id: "category",
+            label: "Category",
+            options: AUDIT_CATEGORIES.map((c) => auditChip("category", c.value, c.label, auditCatCounts.find((x) => x.value === c.value)?.count ?? 0)),
+            selected: selectedValues(auditFilters, "category"),
+            onToggle: auditToggle,
+          },
+          {
+            id: "result",
+            label: "Result",
+            options: [
+              auditChip("result", "success", "Success", auditResultCounts.find((x) => x.value === "success")?.count ?? 0),
+              auditChip("result", "failed", "Failed", auditResultCounts.find((x) => x.value === "failed")?.count ?? 0),
+            ],
+            selected: selectedValues(auditFilters, "result"),
+            onToggle: auditToggle,
+          },
+        ],
+        activeCount: auditFilterCount,
+        onReset: () => setAuditFilters((s) => clearGroupFilters(s)),
+        shown: auditShown.length,
+        total: auditInPeriod.length,
+        title: "Audit filters",
+      }}
+      period={{ value: auditRange, onChange: setAuditRange }}
+      results={{ label: "Events", shown: auditShown.length, total: auditInPeriod.length }}
+    />
   );
 
   async function loadData() {
@@ -147,8 +458,9 @@ export default function AdminConsole() {
     setRequestTarget(null);
     await loadData();
   }
-  // Edit an account: name, a responder's organization, a parent's section.
-  async function handleEdit(values: { name: string; org?: string; section?: string }) {
+  // Edit an account: name and email, a responder's organization, a parent's
+  // section, and (for a teacher) the shared class fields.
+  async function handleEdit(values: { name: string; email: string; org?: string; section?: string; room?: string; registry?: number }) {
     if (!editTarget) return;
     await api("PUT", `/api/admin/accounts/${editTarget.id}`, values);
     setEditTarget(null);
@@ -208,7 +520,13 @@ export default function AdminConsole() {
             </PageFlow>
           )}
 
-          {tab === "analytics" && <AnalyticsView />}
+          {tab === "analytics" && (
+            <AnalyticsView onOpenRecords={(link: AnalyticsRecordsLink) => {
+              if (link) window.location.hash = recordsHash(link);
+              setTab("more");
+              setMoreScreen("records");
+            }} />
+          )}
 
           {tab === "more" && moreScreen === "menu" && (
             <PageFlow width="max-w-md" className="space-y-3">
@@ -241,46 +559,12 @@ export default function AdminConsole() {
 
           {tab === "more" && moreScreen === "audit" && !loading && (
             <>
-            <BackBarFor title="Audit log" backLabel="More" onBack={() => setMoreScreen("menu")} />
+            <BackBarFor title="Audit log" backLabel="More" onBack={() => setMoreScreen("menu")} actions={auditFilterBar} />
             <PageFlow className="space-y-3">
-              {/* Page header toolbar: title + count on the left, the period
-                  control right-aligned. No row holds only a period control. */}
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <div className="min-w-0">
-                  <h2 className={h2}><ClipboardList size={14} /> Audit log (read-only)</h2>
-                  <p className="mt-1 text-xs text-slate-500" aria-live="polite">
-                    {auditShown.length} event{auditShown.length === 1 ? "" : "s"} · {periodLabel(auditRange)}
-                  </p>
-                </div>
-                <div data-audit-toolbar className="flex w-full flex-wrap items-center justify-end gap-2 sm:w-auto">
-                  <PeriodControl value={auditRange} onChange={setAuditRange} className="flex-1 sm:w-56 sm:flex-none" />
-                </div>
-              </div>
-              <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white">
-                <div className="overflow-x-auto">
-                  <table className="w-full text-sm">
-                    <thead className="border-b border-slate-200 bg-slate-50">
-                      <tr>
-                        {["Time", "Action", "By", "Target", "Detail", "IP"].map((h) => <th key={h} className="px-3 py-2 text-left font-bold text-slate-600">{h}</th>)}
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-100">
-                      {auditShown.map((entry, i) => (
-                        <tr key={i} className="hover:bg-slate-50">
-                          <td className="whitespace-nowrap px-3 py-2 text-slate-500">{dateTime(entry.at)}</td>
-                          <td className="px-3 py-2">
-                            <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs font-bold text-slate-700">{entry.action}</span>
-                          </td>
-                          <td className="px-3 py-2 text-slate-600">{entry.by || "—"}</td>
-                          <td className="px-3 py-2 text-slate-600">{entry.target || "—"}</td>
-                          <td className="max-w-xs truncate px-3 py-2 text-slate-500">{entry.detail || "—"}</td>
-                          <td className="px-3 py-2 font-mono text-xs text-slate-400">{entry.ip || "—"}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
+              <p data-audit-summary className="text-xs text-slate-500" aria-live="polite">
+                {auditShown.length} event{auditShown.length === 1 ? "" : "s"} · {periodLabel(auditRange)}
+              </p>
+              <AuditLog entries={auditShown} now={Date.now()} />
               {auditEntries.length === 0 && <p className="py-8 text-center text-slate-500">No audit entries yet.</p>}
               {auditEntries.length > 0 && auditShown.length === 0 && (
                 <p className="py-8 text-center text-slate-500">No entries in that date range.</p>
@@ -317,12 +601,13 @@ export default function AdminConsole() {
       </div>
 
       {showProvision && (
-        <ProvisionModal onClose={() => setShowProvision(false)}
+        <ProvisionModal knownSections={accounts.map((a) => a.section ?? "")} onClose={() => setShowProvision(false)}
           onCreated={(cred) => { setShowProvision(false); setProvisionResult(cred); void loadData(); }} />
       )}
       {provisionResult && <TempCredentialModal title="Account provisioned" credential={provisionResult} onClose={() => setProvisionResult(null)} />}
       {editTarget && (
-        <AccountEditModal acc={editTarget} onClose={() => setEditTarget(null)} onSave={handleEdit} />
+        <AccountEditModal acc={editTarget} knownSections={accounts.map((a) => a.section ?? "")}
+          onClose={() => setEditTarget(null)} onSave={handleEdit} />
       )}
       {resetTarget && (
         <ConfirmModal title="Reset password" onClose={() => setResetTarget(null)}
@@ -662,9 +947,6 @@ const GRADE_CHIPS: { value: string; label: string }[] = SECTION_GRADES.map((labe
 }));
 
 const ORG_OPTIONS = [...RESPONDER_ORGS.map((o: { label: string }) => o.label), SCHOOL.name];
-
-/** The school's section set — a Parent/PTA account can only belong to one of these. */
-const SECTION_OPTIONS = ["A", "B", "C"];
 
 /** Organization: a responder belongs to one dispatch org; everyone else to the school. */
 const orgOf = (a: AccountRecord) =>
@@ -1198,7 +1480,22 @@ function ConfigReviewModal({ title, intro, rows, openTickets, confirmLabel, onCl
   );
 }
 
-function ConfigTab({ onDirtyChange }: { onDirtyChange: (dirty: boolean) => void }) {
+type SettingsTab = "scoring" | "escalation" | "versions";
+
+const SETTINGS_TABS: { id: SettingsTab; label: string }[] = [
+  { id: "scoring", label: "Scoring" },
+  { id: "escalation", label: "Escalation & Travel" },
+  { id: "versions", label: "Versions" },
+];
+
+const WEIGHT_ROWS = [
+  { key: "severity" as const, label: "Severity", tone: "bg-brand-700", dot: "#283762" },
+  { key: "vulnerability" as const, label: "Vulnerability", tone: "bg-brand-500", dot: "#425B9A" },
+  { key: "locationRisk" as const, label: "Location risk", tone: "bg-sky-500", dot: "#0ea5e9" },
+  { key: "timeSensitivity" as const, label: "Time sensitivity", tone: "bg-teal-500", dot: "#14b8a6" },
+];
+
+export function ConfigTab({ onDirtyChange }: { onDirtyChange: (dirty: boolean) => void }) {
   const [versions, setVersions] = useState<ConfigVersion[]>([]);
   const [openTickets, setOpenTickets] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -1208,6 +1505,8 @@ function ConfigTab({ onDirtyChange }: { onDirtyChange: (dirty: boolean) => void 
   const [draft, setDraft] = useState<ConfigDraft | null>(null);
   const [reviewing, setReviewing] = useState(false);
   const [restoreTarget, setRestoreTarget] = useState<ConfigVersion | null>(null);
+  // The selected tab survives a tab switch inside the console for this session.
+  const [tab, setTab] = useFilterState<SettingsTab>("admin-config-tab", () => "scoring");
 
   const active = versions.find((v) => v.active) ?? versions[0] ?? null;
   const errors = draft ? localErrors(draft) : {};
@@ -1267,19 +1566,74 @@ function ConfigTab({ onDirtyChange }: { onDirtyChange: (dirty: boolean) => void 
     );
   }
 
-  const bands: [string, string][] = [["Critical", "4.0 and up"], ["High", "3.0 – 3.99"], ["Moderate", "below 3.0"]];
+  const startEdit = () => {
+    setEditing(true);
+    setDraft(draftFrom(active));
+    setReviewing(false);
+    setRestoreTarget(null);
+    setNotice("");
+  };
+
+  const defaults = isDefaultVersion(active);
+  const statusText = defaults ? "Default values" : `Validated ${active.panelValidationDate}`;
+  const sumWeights = WEIGHT_ROWS.reduce((n, w) => n + active.weights[w.key], 0);
+  const consistent = active.consistency.cr <= 0.1;
+
+  const versionStatus = (v: ConfigVersion) =>
+    v.active ? "Active" : v.panelValidationDate ? "Validated" : "Default";
+
+  const versionList = (
+    <section data-versions-list className={card}>
+      <div className="flex flex-wrap items-baseline justify-between gap-2">
+        <h2 className={h2}><History size={14} /> Versions</h2>
+        <p className="text-[11px] text-slate-400">Restoring copies an old version into a new one.</p>
+      </div>
+      {versions.length === 0 ? (
+        <p className="mt-3 text-sm text-slate-500">No versions yet.</p>
+      ) : (
+        <ol className="mt-3 space-y-3 border-l border-slate-200 pl-4">
+          {versions.map((v) => {
+            const status = versionStatus(v);
+            return (
+              <li key={v.id} data-version-item className="relative min-w-0 rounded-xl border border-slate-200 bg-white p-3">
+                <span className="absolute -left-[1.35rem] top-4 h-2.5 w-2.5 rounded-full border-2 border-white bg-brand-500" aria-hidden />
+                <div className="flex flex-wrap items-start justify-between gap-2">
+                  <div className="flex min-w-0 flex-wrap items-center gap-2">
+                    <span data-version-badge className="rounded-lg bg-brand-100 px-2 py-0.5 font-mono text-xs font-black text-brand-800">v{v.version}</span>
+                    <span className={`rounded-full px-2 py-0.5 text-[10px] font-bold ${status === "Active" ? "bg-emerald-100 text-emerald-700" : status === "Validated" ? "bg-brand-50 text-brand-700" : "bg-amber-50 text-amber-800"}`}>{status}</span>
+                  </div>
+                  {!v.active && (
+                    <button type="button" data-version-restore onClick={() => { setRestoreTarget(v); setNotice(""); }}
+                      disabled={dirty}
+                      title={dirty ? "Finish or cancel your edit first" : "Restore this version"}
+                      className="flex min-h-8 items-center gap-1 rounded-lg border border-slate-300 bg-white px-2 text-[11px] font-bold text-slate-700 transition-colors hover:bg-slate-50 disabled:opacity-40">
+                      <RotateCcw size={12} aria-hidden /> Restore
+                    </button>
+                  )}
+                </div>
+                <p className="mt-1 break-words text-[11px] text-slate-500">
+                  {v.createdBy} · {dateTime(v.createdAt)}
+                  {v.panelValidationDate ? ` · Validated ${v.panelValidationDate}` : " · Default values"}
+                  {v.panelReference ? ` · ${v.panelReference}` : ""}
+                </p>
+                <div className="mt-2 flex flex-wrap gap-1">
+                  {WEIGHT_ROWS.map((w) => (
+                    <span key={w.key} data-version-weight className="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-bold text-slate-600">
+                      <span className="h-1.5 w-1.5 rounded-full" style={{ background: w.dot }} aria-hidden />
+                      {w.label} {v.weights[w.key]}%
+                    </span>
+                  ))}
+                </div>
+              </li>
+            );
+          })}
+        </ol>
+      )}
+    </section>
+  );
 
   return (
-    <PageFlow width="max-w-3xl" className="space-y-3">
-      {isDefaultVersion(active) && (
-        <div role="status" className="flex items-start gap-2 rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
-          <AlertCircle size={16} className="mt-0.5 shrink-0" />
-          <span className="min-w-0 flex-1">
-            Default values. Not yet validated by the Expert Panel. They score new tickets until a version
-            records the panel date and source.
-          </span>
-        </div>
-      )}
+    <PageFlow width="max-w-4xl" className="space-y-3">
       {error && (
         <p role="alert" className="rounded-xl border border-blush-200 bg-blush-100 p-3 text-sm text-blush-800">{error}</p>
       )}
@@ -1291,204 +1645,271 @@ function ConfigTab({ onDirtyChange }: { onDirtyChange: (dirty: boolean) => void 
         </div>
       )}
 
-      {editing && draft ? (
-        <form className="space-y-3" onSubmit={(e) => { e.preventDefault(); if (Object.keys(errors).length === 0) setReviewing(true); }}>
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <h2 className={h2}><SlidersHorizontal size={14} /> Edit configuration</h2>
-            <span className="text-xs text-slate-500">Based on v{active.version}</span>
+      {/* One header: title, status chip and Edit in the actions slot; the
+          long default-values banner becomes one inline line. */}
+      <header data-settings-header className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+          <div className="min-w-0">
+            <h1 className="break-normal hyphens-none text-lg font-black leading-tight tracking-tight text-brand-900">System Settings</h1>
+            <p className="mt-0.5 break-words text-xs text-slate-500">Scoring weights, escalation and validated versions.</p>
           </div>
-
-          <section className={card}>
-            <h3 className={`${h2} mb-2`}>Urgency weights</h3>
-            <div className="grid gap-3 sm:grid-cols-2">
-              <ConfigField label="Severity" suffix="%" error={errors["weights.severity"]}>
-                <input type="number" inputMode="decimal" step="0.1" min="0" max="100" value={draft.severity}
-                  onChange={(e) => set({ severity: e.target.value })} className={input} aria-label="Severity weight" />
-              </ConfigField>
-              <ConfigField label="Vulnerability" suffix="%" error={errors["weights.vulnerability"]}>
-                <input type="number" inputMode="decimal" step="0.1" min="0" max="100" value={draft.vulnerability}
-                  onChange={(e) => set({ vulnerability: e.target.value })} className={input} aria-label="Vulnerability weight" />
-              </ConfigField>
-              <ConfigField label="Location risk" suffix="%" error={errors["weights.locationRisk"]}>
-                <input type="number" inputMode="decimal" step="0.1" min="0" max="100" value={draft.locationRisk}
-                  onChange={(e) => set({ locationRisk: e.target.value })} className={input} aria-label="Location risk weight" />
-              </ConfigField>
-              <ConfigField label="Time sensitivity" suffix="%" error={errors["weights.timeSensitivity"]}>
-                <input type="number" inputMode="decimal" step="0.1" min="0" max="100" value={draft.timeSensitivity}
-                  onChange={(e) => set({ timeSensitivity: e.target.value })} className={input} aria-label="Time sensitivity weight" />
-              </ConfigField>
-            </div>
-            <p className={`mt-2 text-xs ${errors["weights.sum"] ? "font-bold text-blush-700" : "text-slate-500"}`}>
-              {errors["weights.sum"] ?? "The four weights must add up to exactly 100.0."}
-            </p>
-          </section>
-
-          <section className={card}>
-            <h3 className={`${h2} mb-2`}>AHP consistency</h3>
-            <div className="grid gap-3 sm:grid-cols-3">
-              <ConfigField label="Consistency ratio" suffix="max 0.10" error={errors["consistency.cr"]}>
-                <input type="number" inputMode="decimal" step="0.001" min="0" max="0.1" value={draft.cr}
-                  onChange={(e) => set({ cr: e.target.value })} className={input} aria-label="Consistency ratio" />
-              </ConfigField>
-              <ConfigField label="Expert panel validation date" error={errors.panelValidationDate}>
-                <DatePicker ariaLabel="Expert panel validation date" value={draft.panelValidationDate}
-                  onChange={(v) => set({ panelValidationDate: v })} clearable className="block w-full"
-                />
-              </ConfigField>
-              <ConfigField label="Panel / source" error={errors.panelReference}>
-                <input value={draft.panelReference} maxLength={PANEL_REFERENCE_MAX}
-                  onChange={(e) => set({ panelReference: e.target.value })} className={input}
-                  placeholder="AHP Expert Panel, SY 2026-2027" aria-label="Panel or source" />
-                <span className="mt-1 block text-[11px] font-normal text-slate-400">
-                  Recorded only: who validated these values and when. It does not change scoring.
-                </span>
-              </ConfigField>
-            </div>
-          </section>
-
-          <section className={card}>
-            <h3 className={`${h2} mb-2`}>Priority rules</h3>
-            <div className="grid gap-3 sm:grid-cols-3">
-              <ConfigField label="Hazard Location Risk" suffix="0–4" error={errors.hazardAdjustment}>
-                <input type="number" inputMode="numeric" step="1" min="0" max="4" value={draft.hazardAdjustment}
-                  onChange={(e) => set({ hazardAdjustment: e.target.value })} className={input} aria-label="Hazard Location Risk adjustment" />
-              </ConfigField>
-              <ConfigField label="Barangay limit" suffix="min" error={errors["escalation.barangayMinutes"]}>
-                <input type="number" inputMode="numeric" step="1" min="1" max="60" value={draft.barangayMinutes}
-                  onChange={(e) => set({ barangayMinutes: e.target.value })} className={input} aria-label="Barangay escalation limit in minutes" />
-              </ConfigField>
-              <ConfigField label="CDRRMO limit" suffix="min" error={errors["escalation.cdrrmoMinutes"]}>
-                <input type="number" inputMode="numeric" step="1" min="1" max="60" value={draft.cdrrmoMinutes}
-                  onChange={(e) => set({ cdrrmoMinutes: e.target.value })} className={input} aria-label="CDRRMO escalation limit in minutes" />
-              </ConfigField>
-            </div>
-            {errors["escalation.order"] && (
-              <p className="mt-2 text-xs font-bold text-blush-700">{errors["escalation.order"]}</p>
+          <div className="flex flex-wrap items-center gap-2">
+            <span data-settings-status
+              className={`inline-flex min-h-8 items-center gap-1 rounded-full px-2.5 text-[11px] font-bold ${defaults ? "bg-amber-50 text-amber-800" : "bg-emerald-50 text-emerald-800"}`}>
+              {defaults ? <AlertCircle size={12} aria-hidden /> : <Check size={12} aria-hidden />}
+              {statusText}
+            </span>
+            {!editing && (
+              <button type="button" data-settings-edit onClick={startEdit} className={btnPrimary}><Pencil size={15} /> Edit</button>
             )}
-            <p className="mt-2 text-xs text-slate-500">Score bands, the Severity 5 override and the headcount override are fixed.</p>
-          </section>
+          </div>
+        </div>
+        <p data-settings-line className="mt-2 break-words text-xs leading-relaxed text-slate-600">
+          {defaults
+            ? "Default values are scoring new tickets until the panel validation is recorded."
+            : `Validated ${active.panelValidationDate}${active.panelReference ? ` by ${active.panelReference}` : ""}.`}{" "}
+          <button type="button" onClick={startEdit}
+            className="font-bold text-brand-700 underline underline-offset-2 hover:text-brand-900 focus-visible:outline focus-visible:outline-2 focus-visible:outline-brand-600">
+            Record validation
+          </button>
+        </p>
+      </header>
 
-          <section className={card}>
-            <h3 className={`${h2} mb-2`}>Assumed responder speeds</h3>
-            <div className="grid gap-3 sm:grid-cols-3">
-              <ConfigField label="On foot (Tanod)" suffix="km/h" error={errors["responderSpeeds.walking"]}>
-                <input type="number" inputMode="decimal" step="0.1" min="1" max="120" value={draft.walking}
-                  onChange={(e) => set({ walking: e.target.value })} className={input} aria-label="Walking speed" />
-              </ConfigField>
-              <ConfigField label="Motorcycle" suffix="km/h" error={errors["responderSpeeds.motorcycle"]}>
-                <input type="number" inputMode="decimal" step="0.1" min="1" max="120" value={draft.motorcycle}
-                  onChange={(e) => set({ motorcycle: e.target.value })} className={input} aria-label="Motorcycle speed" />
-              </ConfigField>
-              <ConfigField label="Vehicle / ambulance" suffix="km/h" error={errors["responderSpeeds.vehicle"]}>
-                <input type="number" inputMode="decimal" step="0.1" min="1" max="120" value={draft.vehicle}
-                  onChange={(e) => set({ vehicle: e.target.value })} className={input} aria-label="Vehicle speed" />
-              </ConfigField>
+      <div data-settings-tabs role="tablist" aria-label="System settings sections"
+        className="flex w-full gap-5 overflow-x-auto border-b border-slate-200">
+        {SETTINGS_TABS.map((t) => {
+          const on = tab === t.id;
+          return (
+            <button key={t.id} type="button" role="tab" aria-selected={on}
+              onClick={() => setTab(t.id)}
+              className={`min-h-11 shrink-0 border-b-2 px-0.5 text-xs font-bold transition-colors duration-200 focus-visible:outline focus-visible:outline-2 focus-visible:outline-brand-600 motion-reduce:transition-none ${
+                on ? "border-brand-600 text-brand-800" : "border-transparent text-slate-500 hover:text-slate-700"
+              }`}>
+              {t.label}
+            </button>
+          );
+        })}
+      </div>
+
+      {editing && draft ? (
+        <form id="config-form" className="space-y-3" onSubmit={(e) => { e.preventDefault(); if (Object.keys(errors).length === 0) setReviewing(true); }}>
+          {tab === "scoring" && (
+            <div data-settings-panel="scoring" className="space-y-3">
+              <section className={card}>
+                <h2 className={`${h2} mb-2`}>Weights</h2>
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <ConfigField label="Severity" suffix="%" error={errors["weights.severity"]}>
+                    <input type="number" inputMode="decimal" step="0.1" min="0" max="100" value={draft.severity}
+                      onChange={(e) => set({ severity: e.target.value })} className={input} aria-label="Severity weight" />
+                  </ConfigField>
+                  <ConfigField label="Vulnerability" suffix="%" error={errors["weights.vulnerability"]}>
+                    <input type="number" inputMode="decimal" step="0.1" min="0" max="100" value={draft.vulnerability}
+                      onChange={(e) => set({ vulnerability: e.target.value })} className={input} aria-label="Vulnerability weight" />
+                  </ConfigField>
+                  <ConfigField label="Location risk" suffix="%" error={errors["weights.locationRisk"]}>
+                    <input type="number" inputMode="decimal" step="0.1" min="0" max="100" value={draft.locationRisk}
+                      onChange={(e) => set({ locationRisk: e.target.value })} className={input} aria-label="Location risk weight" />
+                  </ConfigField>
+                  <ConfigField label="Time sensitivity" suffix="%" error={errors["weights.timeSensitivity"]}>
+                    <input type="number" inputMode="decimal" step="0.1" min="0" max="100" value={draft.timeSensitivity}
+                      onChange={(e) => set({ timeSensitivity: e.target.value })} className={input} aria-label="Time sensitivity weight" />
+                  </ConfigField>
+                </div>
+                <p className={`mt-2 text-xs ${errors["weights.sum"] ? "font-bold text-blush-700" : "text-slate-500"}`}>
+                  {errors["weights.sum"] ?? "The four weights must add up to exactly 100.0."}
+                </p>
+              </section>
+
+              <section className={card}>
+                <h2 className={`${h2} mb-2`}>AHP consistency</h2>
+                <div className="grid gap-3 sm:grid-cols-3">
+                  <ConfigField label="Consistency ratio" suffix="max 0.10" error={errors["consistency.cr"]}>
+                    <input type="number" inputMode="decimal" step="0.001" min="0" max="0.1" value={draft.cr}
+                      onChange={(e) => set({ cr: e.target.value })} className={input} aria-label="Consistency ratio" />
+                  </ConfigField>
+                  <ConfigField label="Expert panel validation date" error={errors.panelValidationDate}>
+                    <DatePicker ariaLabel="Expert panel validation date" value={draft.panelValidationDate}
+                      onChange={(v) => set({ panelValidationDate: v })} clearable className="block w-full"
+                    />
+                  </ConfigField>
+                  <ConfigField label="Panel / source" error={errors.panelReference}>
+                    <input value={draft.panelReference} maxLength={PANEL_REFERENCE_MAX}
+                      onChange={(e) => set({ panelReference: e.target.value })} className={input}
+                      placeholder="AHP Expert Panel, SY 2026-2027" aria-label="Panel or source" />
+                    <span className="mt-1 block text-[11px] font-normal text-slate-400">
+                      Recorded only: who validated these values and when. It does not change scoring.
+                    </span>
+                  </ConfigField>
+                </div>
+              </section>
             </div>
-          </section>
+          )}
 
-          <div className="flex gap-2">
+          {tab === "escalation" && (
+            <div data-settings-panel="escalation" className="space-y-3">
+              <section className={card}>
+                <h2 className={`${h2} mb-2`}>Escalation timeline</h2>
+                <div className="grid gap-3 sm:grid-cols-3">
+                  <ConfigField label="Hazard Location Risk" suffix="0–4" error={errors.hazardAdjustment}>
+                    <input type="number" inputMode="numeric" step="1" min="0" max="4" value={draft.hazardAdjustment}
+                      onChange={(e) => set({ hazardAdjustment: e.target.value })} className={input} aria-label="Hazard Location Risk adjustment" />
+                  </ConfigField>
+                  <ConfigField label="Barangay limit" suffix="min" error={errors["escalation.barangayMinutes"]}>
+                    <input type="number" inputMode="numeric" step="1" min="1" max="60" value={draft.barangayMinutes}
+                      onChange={(e) => set({ barangayMinutes: e.target.value })} className={input} aria-label="Barangay escalation limit in minutes" />
+                  </ConfigField>
+                  <ConfigField label="CDRRMO limit" suffix="min" error={errors["escalation.cdrrmoMinutes"]}>
+                    <input type="number" inputMode="numeric" step="1" min="1" max="60" value={draft.cdrrmoMinutes}
+                      onChange={(e) => set({ cdrrmoMinutes: e.target.value })} className={input} aria-label="CDRRMO escalation limit in minutes" />
+                  </ConfigField>
+                </div>
+                {errors["escalation.order"] && (
+                  <p className="mt-2 text-xs font-bold text-blush-700">{errors["escalation.order"]}</p>
+                )}
+                <p className="mt-2 text-xs text-slate-500">Score bands, the Severity 5 override and the headcount override are fixed.</p>
+              </section>
+
+              <section className={card}>
+                <h2 className={`${h2} mb-2`}>Assumed responder speeds</h2>
+                <div className="grid gap-3 sm:grid-cols-3">
+                  <ConfigField label="On foot (Tanod)" suffix="km/h" error={errors["responderSpeeds.walking"]}>
+                    <input type="number" inputMode="decimal" step="0.1" min="1" max="120" value={draft.walking}
+                      onChange={(e) => set({ walking: e.target.value })} className={input} aria-label="Walking speed" />
+                  </ConfigField>
+                  <ConfigField label="Motorcycle" suffix="km/h" error={errors["responderSpeeds.motorcycle"]}>
+                    <input type="number" inputMode="decimal" step="0.1" min="1" max="120" value={draft.motorcycle}
+                      onChange={(e) => set({ motorcycle: e.target.value })} className={input} aria-label="Motorcycle speed" />
+                  </ConfigField>
+                  <ConfigField label="Vehicle / ambulance" suffix="km/h" error={errors["responderSpeeds.vehicle"]}>
+                    <input type="number" inputMode="decimal" step="0.1" min="1" max="120" value={draft.vehicle}
+                      onChange={(e) => set({ vehicle: e.target.value })} className={input} aria-label="Vehicle speed" />
+                  </ConfigField>
+                </div>
+              </section>
+            </div>
+          )}
+
+          {tab === "versions" && (
+            <div data-settings-panel="versions" className="space-y-3">
+              {versionList}
+              <p className="text-xs text-slate-500">Versions stay read-only while you edit. Finish or cancel this edit to restore one.</p>
+            </div>
+          )}
+
+          <div data-config-footer className="sticky bottom-0 z-20 -mx-3 flex flex-wrap items-center gap-2 border-t border-slate-200 bg-cream/95 px-3 py-2 backdrop-blur">
+            <p className="min-w-0 flex-1 text-xs font-semibold text-slate-500" aria-live="polite">
+              {dirty ? <span data-unsaved className="text-amber-800">Unsaved changes</span> : "No unsaved changes"}
+            </p>
             <button type="button" onClick={() => { setEditing(false); setDraft(null); setReviewing(false); }}
-              className={`${btnSecondary} flex-1 justify-center`}>Cancel</button>
+              className={`${btnSecondary} justify-center`}>Cancel</button>
             <button type="submit" disabled={!dirty || Object.keys(errors).length > 0}
-              className={`${btnPrimary} flex-1 justify-center disabled:opacity-50`}>
+              className={`${btnPrimary} justify-center disabled:opacity-50`}>
               <Save size={15} /> Review changes
             </button>
           </div>
         </form>
       ) : (
         <>
-          <section className={card}>
-            <div className="flex flex-wrap items-start justify-between gap-2">
-              <div>
-                <h2 className={h2}>Active configuration</h2>
-                <p className="mt-1 text-sm font-bold text-slate-800">Version {active.version}</p>
-                <p className="text-xs text-slate-500">
-                  Set by {active.createdBy} · {dateTime(active.createdAt)}
-                </p>
+          {tab === "scoring" && (
+            <div data-settings-panel="scoring" className="space-y-3">
+              <section data-weights-card className={card}>
+                <div className="flex flex-wrap items-baseline justify-between gap-2">
+                  <h2 className={h2}>Weights</h2>
+                  <p className="font-mono text-[11px] font-bold text-slate-500">Sum {sumWeights.toFixed(1)}%</p>
+                </div>
+                <div data-weights-bar className="mt-3 flex h-3 w-full overflow-hidden rounded-full bg-slate-100" role="img"
+                  aria-label="Scoring weights: Severity, Vulnerability, Location risk and Time sensitivity">
+                  {WEIGHT_ROWS.map((w) => (
+                    <span key={w.key} data-weight-segment className={w.tone} style={{ width: `${active.weights[w.key]}%` }} />
+                  ))}
+                </div>
+                <dl className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
+                  {WEIGHT_ROWS.map((w) => (
+                    <div key={w.key} className="flex min-w-0 items-center justify-between gap-2 rounded-lg bg-slate-50 px-2.5 py-1.5">
+                      <dt className="flex min-w-0 items-center gap-1.5 text-xs font-semibold text-slate-600">
+                        <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: w.dot }} aria-hidden />
+                        <span className="break-normal hyphens-none">{w.label}</span>
+                      </dt>
+                      <dd className="shrink-0 font-mono text-xs font-bold tabular-nums text-slate-800">{active.weights[w.key]}%</dd>
+                    </div>
+                  ))}
+                </dl>
+                <div className="mt-3">
+                  <span data-consistency-chip
+                    className={`inline-flex min-h-8 items-center gap-1.5 rounded-full px-2.5 text-[11px] font-bold ${consistent ? "bg-emerald-50 text-emerald-800" : "bg-amber-50 text-amber-800"}`}>
+                    {consistent ? <Check size={12} aria-hidden /> : <AlertCircle size={12} aria-hidden />}
+                    Consistency ratio {active.consistency.cr} {consistent ? "≤ 0.10" : "above 0.10"}
+                  </span>
+                </div>
+              </section>
+
+              <section data-score-bands className={card}>
+                <h2 className={h2}>Score bands</h2>
+                <div className="mt-3 flex h-12 overflow-hidden rounded-xl border border-slate-200" role="img"
+                  aria-label="Score scale from 0 to 5: Moderate below 3, High from 3 to 3.99, Critical 4 and above">
+                  <div className="flex w-[60%] flex-col justify-center bg-slate-100 px-2 text-[11px] font-bold leading-tight text-slate-700">Moderate <span className="font-normal text-slate-500">&lt; 3.0</span></div>
+                  <div className="flex w-[20%] flex-col justify-center bg-brand-50 px-2 text-[11px] font-bold leading-tight text-brand-800">High <span className="font-normal text-brand-600">3.0–3.99</span></div>
+                  <div className="flex w-[20%] flex-col justify-center bg-rose-50 px-2 text-[11px] font-bold leading-tight text-rose-800">Critical <span className="font-normal text-rose-600">≥ 4.0</span></div>
+                </div>
+                <div className="mt-1 flex justify-between font-mono text-[10px] text-slate-400"><span>0</span><span>5</span></div>
+              </section>
+
+              <div data-critical-override className="inline-flex min-h-9 items-center gap-1.5 rounded-full border border-rose-200 bg-rose-50 px-3 text-[11px] font-bold text-rose-800">
+                <ShieldAlert size={13} aria-hidden /> Critical override · Severity 5 or headcount mismatch
               </div>
-              <button onClick={() => { setEditing(true); setDraft(draftFrom(active)); setReviewing(false); setRestoreTarget(null); setNotice(""); }}
-                className={btnPrimary}><Pencil size={15} /> Edit</button>
             </div>
-            <p className="mt-2 text-xs text-slate-500">
-              Read-only until you edit. Every save creates a new version; tickets already created keep the
-              weights they were scored with.
-            </p>
-          </section>
+          )}
 
-          <section className={card}>
-            <h2 className={`${h2} mb-2`}>Urgency model</h2>
-            <dl className="divide-y divide-slate-100 text-sm">
-              <ConfigRow label="Severity weight" value={`${active.weights.severity} %`} />
-              <ConfigRow label="Vulnerability weight" value={`${active.weights.vulnerability} %`} />
-              <ConfigRow label="Location risk weight" value={`${active.weights.locationRisk} %`} />
-              <ConfigRow label="Time sensitivity weight" value={`${active.weights.timeSensitivity} %`} />
-            </dl>
-            <p className="mt-2 text-xs text-slate-500">
-              Consistency ratio {active.consistency.cr} · λmax {active.consistency.lambdaMax} · CI {active.consistency.ci} ·
-              RI {active.consistency.ri}. {validatedBy(active)}
-            </p>
-          </section>
+          {tab === "escalation" && (
+            <div data-settings-panel="escalation" className="space-y-3">
+              <section data-escalation-timeline className={card}>
+                <h2 className={h2}>Escalation timeline</h2>
+                <ol className="mt-3 space-y-4">
+                  <li className="relative border-l border-slate-200 pl-6">
+                    <span className="absolute -left-[5px] top-1 h-2.5 w-2.5 rounded-full bg-brand-600" aria-hidden />
+                    <p className="text-sm font-bold text-slate-800">Reported</p>
+                    <p className="text-[11px] text-slate-500">At report · the school is notified</p>
+                  </li>
+                  <li className="relative border-l border-slate-200 pl-6">
+                    <span className="absolute -left-[5px] top-1 h-2.5 w-2.5 rounded-full bg-amber-500" aria-hidden />
+                    <p className="text-sm font-bold text-slate-800">Barangay Tanod</p>
+                    <p className="text-[11px] text-slate-500">After {active.escalation.barangayMinutes} min without acknowledgement</p>
+                  </li>
+                  <li className="relative border-l border-transparent pl-6">
+                    <span className="absolute -left-[5px] top-1 h-2.5 w-2.5 rounded-full bg-rose-500" aria-hidden />
+                    <p className="text-sm font-bold text-slate-800">CDRRMO</p>
+                    <p className="text-[11px] text-slate-500">After {active.escalation.cdrrmoMinutes} min without acknowledgement</p>
+                  </li>
+                </ol>
+                <div data-hazard-adjustment className="mt-3 inline-flex min-h-9 items-center gap-1.5 rounded-full border border-sky-200 bg-sky-50 px-3 text-[11px] font-bold text-sky-800">
+                  <AlertTriangle size={13} aria-hidden /> Hazard Location Risk +{active.hazardAdjustment}
+                </div>
+              </section>
 
-          <section className={card}>
-            <h2 className={`${h2} mb-2`}>Priority rules</h2>
-            <dl className="divide-y divide-slate-100 text-sm">
-              <ConfigRow label="Score bands" value={bands.map(([k, v]) => `${k} ${v}`).join(" · ")} />
-              <ConfigRow label="Critical override" value="Severity 5 or headcount mismatch" />
-              <ConfigRow label="Barangay escalation" value={`${active.escalation.barangayMinutes} min`} />
-              <ConfigRow label="CDRRMO escalation" value={`${active.escalation.cdrrmoMinutes} min`} />
-              <ConfigRow label="Hazard Location Risk" value={`+${active.hazardAdjustment}`} />
-            </dl>
-          </section>
+              <section className={card}>
+                <h2 className={h2}>Assumed travel speeds</h2>
+                <div className="mt-3 grid auto-rows-fr grid-cols-1 gap-2 sm:grid-cols-3">
+                  {[
+                    { label: "On foot", icon: Footprints, value: active.responderSpeeds.walking },
+                    { label: "Motorcycle", icon: Bike, value: active.responderSpeeds.motorcycle },
+                    { label: "Vehicle", icon: Truck, value: active.responderSpeeds.vehicle },
+                  ].map((s) => (
+                    <div key={s.label} data-speed-card className="flex min-h-[88px] min-w-0 flex-col justify-between rounded-xl border border-slate-200 bg-slate-50 p-3">
+                      <s.icon size={20} className="text-brand-700" aria-hidden />
+                      <div className="mt-1 min-w-0">
+                        <p className="break-normal hyphens-none text-xs font-bold text-slate-700">{s.label}</p>
+                        <p className="font-mono text-lg font-black tabular-nums text-slate-900">{s.value} <span className="text-[11px] font-bold text-slate-500">km/h</span></p>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </section>
+            </div>
+          )}
 
-          <section className={card}>
-            <h2 className={`${h2} mb-2`}>Assumed responder speeds</h2>
-            <dl className="divide-y divide-slate-100 text-sm">
-              <ConfigRow label="On foot (Barangay Tanod)" value={`${active.responderSpeeds.walking} km/h`} />
-              <ConfigRow label="Motorcycle" value={`${active.responderSpeeds.motorcycle} km/h`} />
-              <ConfigRow label="Vehicle / ambulance" value={`${active.responderSpeeds.vehicle} km/h`} />
-            </dl>
-          </section>
+          {tab === "versions" && <div data-settings-panel="versions">{versionList}</div>}
         </>
       )}
-
-      <section className={card}>
-        <h2 className={`${h2} mb-2`}><History size={14} /> Version history</h2>
-        {versions.length === 0 ? (
-          <p className="text-sm text-slate-500">No versions yet.</p>
-        ) : (
-          <ul className="divide-y divide-slate-100">
-            {versions.map((v) => (
-              <li key={v.id} className="flex flex-wrap items-center gap-2 py-2">
-                <div className="min-w-0 flex-1">
-                  <p className="flex items-center gap-2 text-sm font-bold text-slate-800">
-                    v{v.version}
-                    {v.active && (
-                      <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[11px] font-bold text-emerald-700">Active</span>
-                    )}
-                  </p>
-                  <p className="text-[11px] text-slate-500">
-                    {v.createdBy} · {dateTime(v.createdAt)} · {v.weights.severity}/{v.weights.vulnerability}/
-                    {v.weights.locationRisk}/{v.weights.timeSensitivity} % · CR {v.consistency.cr} ·{" "}
-                    {v.panelValidationDate ? `Validated ${v.panelValidationDate}` : "Default values"}
-                    {v.panelReference ? ` · ${v.panelReference}` : ""}
-                  </p>
-                </div>
-                {!v.active && (
-                  <button onClick={() => { setRestoreTarget(v); setNotice(""); }}
-                    disabled={dirty}
-                    title={dirty ? "Finish or cancel your edit first" : "Restore this version"}
-                    className={`${btnSecondary} shrink-0 disabled:opacity-40`}>
-                    <RotateCcw size={15} /> Restore this version
-                  </button>
-                )}
-              </li>
-            ))}
-          </ul>
-        )}
-        <p className="mt-2 text-xs text-slate-500">
-          Restoring copies an old version into a new one — earlier versions are never modified or deleted.
-        </p>
-      </section>
 
       {reviewing && draft && (
         <ConfigReviewModal
@@ -1532,7 +1953,8 @@ function ConfigTab({ onDirtyChange }: { onDirtyChange: (dirty: boolean) => void 
 
 // ----------------------------------------------------------- Sub-components
 
-function ProvisionModal({ onClose, onCreated }: {
+function ProvisionModal({ knownSections, onClose, onCreated }: {
+  knownSections: string[];
   onClose: () => void;
   onCreated: (cred: TempCredential | null) => void;
 }) {
@@ -1543,10 +1965,28 @@ function ProvisionModal({ onClose, onCreated }: {
   const [org, setOrg] = useState<"" | "barangay" | "cdrrmo">("");
   const [grade, setGrade] = useState("");
   const [sectionName, setSectionName] = useState("");
+  // Teacher only: the classroom reports default to, and today's headcount.
+  const [room, setRoom] = useState("");
+  const [registry, setRegistry] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+
+  const isTeacher = role === "teacher";
+  const isParent = role === "parent";
+  const needsSection = isTeacher || isParent;
+  const suggestions = suggestionsForGrade(knownSections, grade);
+  // "Sec A" is the placeholder, so a typed "Sec A" must not become "Sec Sec A".
+  const sectionNameClean = normalizeSectionName(sectionName, suggestions);
+  const section = composeSection(grade, sectionNameClean);
+  const registryOk = registry.trim() === "" || (Number.isInteger(Number(registry)) && Number(registry) >= 0 && Number(registry) <= 200);
+  const valid =
+    Boolean(email && name) &&
+    (!needsSection || (Boolean(grade) && sectionNameClean.length > 0)) &&
+    (!isTeacher || Boolean(room)) &&
+    (role !== "responder" || Boolean(org)) &&
+    registryOk;
 
   async function submit() {
     setBusy(true);
@@ -1554,7 +1994,10 @@ function ProvisionModal({ onClose, onCreated }: {
     try {
       const r = await api<{ account: AccountRecord; tempPassword: string | null }>("POST", "/api/admin/accounts", {
         email, name, role, org: role === "responder" ? org : undefined,
-        section: role === "parent" ? composeSection(grade, sectionName) : undefined, password: password || undefined,
+        section: needsSection ? section : undefined,
+        room: isTeacher ? room : undefined,
+        registry: isTeacher && registry.trim() !== "" ? Number(registry) : undefined,
+        password: password || undefined,
       });
       onCreated(r.tempPassword ? { id: r.account.id, email, name, role, tempPassword: r.tempPassword } : null);
     } catch (e) {
@@ -1585,15 +2028,26 @@ function ProvisionModal({ onClose, onCreated }: {
             onChange={(v) => setOrg(v as typeof org)} placeholder="Pick the responder's org"
             options={RESPONDER_ORGS.map((o: { id: string; label: string }) => ({ value: o.id, label: o.label }))} />
         )}
-        {role === "parent" && (
-          <div className="space-y-3">
-            <Select label="Grade" labelClassName="text-sm font-medium text-slate-700" value={grade}
-              onChange={setGrade} placeholder="Pick a grade"
-              options={SECTION_GRADES.map((label) => ({ value: gradeCode(label) ?? "", label }))} />
-            <Select label="Section" labelClassName="text-sm font-medium text-slate-700" value={sectionName}
-              onChange={setSectionName} placeholder="Pick a section"
-              options={SECTION_OPTIONS.map((s) => ({ value: s, label: s }))} />
-          </div>
+        {needsSection && (
+          <GradeSectionField
+            grade={grade}
+            section={sectionName}
+            knownSections={knownSections}
+            onGrade={setGrade}
+            onSection={setSectionName}
+          />
+        )}
+        {isTeacher && (
+          <>
+            <RoomField value={room} onChange={setRoom} />
+            <RegistryField
+              value={registry}
+              onChange={setRegistry}
+              label="Today's registry"
+              optional
+              error={!registryOk ? "Today's registry must be a whole number from 0 to 200." : undefined}
+            />
+          </>
         )}
         <div>
           <label className="block text-sm font-medium text-slate-700">
@@ -1610,7 +2064,7 @@ function ProvisionModal({ onClose, onCreated }: {
         </div>
         {error && <p className="text-sm text-blush-700">{error}</p>}
         <button onClick={() => void submit()}
-          disabled={busy || !email || !name || (role === "responder" && !org) || (role === "parent" && (!grade || !sectionName.trim()))}
+          disabled={busy || !valid}
           className={`${btnPrimary} w-full justify-center`}>
           {busy ? "Creating…" : "Create account"}
         </button>
@@ -1619,34 +2073,47 @@ function ProvisionModal({ onClose, onCreated }: {
   );
 }
 
-/** Edit what the console owns: the display name, a responder's org, a parent's section. */
-function AccountEditModal({ acc, onClose, onSave }: {
+/** Edit the account: name and email for every role, plus the shared class fields. */
+function AccountEditModal({ acc, knownSections, onClose, onSave }: {
   acc: AccountRecord;
+  knownSections: string[];
   onClose: () => void;
-  onSave: (values: { name: string; org?: string; section?: string }) => Promise<void>;
+  onSave: (values: { name: string; email: string; org?: string; section?: string; room?: string; registry?: number }) => Promise<void>;
 }) {
   const parsed = parseSection(acc.section ?? "");
   const isResponder = acc.role === "responder";
   const isParent = acc.role === "parent";
+  const isTeacher = acc.role === "teacher";
   const [name, setName] = useState(acc.name);
+  const [email, setEmail] = useState(acc.email);
   const [org, setOrg] = useState<string>(acc.org ?? "");
   const [grade, setGrade] = useState(parsed.grade);
   const [sec, setSec] = useState(parsed.sectionName || acc.section || "");
+  const [room, setRoom] = useState(acc.teacher?.room ?? "");
+  const [registry, setRegistry] = useState(String(acc.teacher?.registry ?? ""));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const section = grade ? composeSection(grade, sec) : sec.trim();
-  // The account's current value stays selectable even if it is outside the set.
-  const sectionChoices = sec && !SECTION_OPTIONS.includes(sec) ? [sec, ...SECTION_OPTIONS] : SECTION_OPTIONS;
+  const suggestions = suggestionsForGrade(knownSections, grade);
+  const section = grade ? composeSection(grade, normalizeSectionName(sec, suggestions)) : normalizeSectionName(sec, suggestions);
+  const registryOk = registry.trim() === "" || (Number.isInteger(Number(registry)) && Number(registry) >= 0 && Number(registry) <= 200);
+  const needsClass = isParent || isTeacher;
   const canSave =
-    Boolean(name.trim()) &&
+    Boolean(name.trim()) && Boolean(email.trim()) &&
     (!isResponder || Boolean(org)) &&
-    (!isParent || (Boolean(grade) && Boolean(sec.trim())));
+    (!needsClass || (Boolean(grade) && Boolean(sec.trim()))) &&
+    (!isTeacher || Boolean(room)) &&
+    registryOk;
 
   async function save() {
     setBusy(true);
     setError("");
     try {
-      await onSave({ name: name.trim(), ...(isResponder ? { org } : {}), ...(isParent ? { section } : {}) });
+      await onSave({
+        name: name.trim(), email: email.trim(),
+        ...(isResponder ? { org } : {}),
+        ...(needsClass ? { section } : {}),
+        ...(isTeacher ? { room, ...(registry.trim() !== "" ? { registry: Number(registry) } : {}) } : {}),
+      });
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not save the account.");
       setBusy(false);
@@ -1654,17 +2121,18 @@ function AccountEditModal({ acc, onClose, onSave }: {
   }
 
   return (
-    <Modal title="Edit account" onClose={() => { if (!busy) onClose(); }}>
+    <Modal title="Edit user" onClose={() => { if (!busy) onClose(); }}>
       <div className="space-y-3">
-        <div>
-          <p className="break-words text-sm font-medium text-slate-700">{acc.email}</p>
-          <p className="text-xs text-slate-500">
-            {acc.role}{acc.status !== "active" ? ` · ${acc.status}` : ""} · email and role cannot be changed
-          </p>
-        </div>
+        <p className="text-xs text-slate-500">
+          {acc.role}{acc.status !== "active" ? ` · ${acc.status}` : ""} · changing the email signs this user out everywhere
+        </p>
         <label className="block text-sm font-medium text-slate-700">Name
           <input value={name} maxLength={80} onChange={(e) => setName(e.target.value)}
             className={`${input} mt-1`} aria-label="Account name" />
+        </label>
+        <label className="block text-sm font-medium text-slate-700">Email
+          <input type="email" value={email} maxLength={120} onChange={(e) => setEmail(e.target.value)}
+            className={`${input} mt-1`} aria-label="Account email" placeholder="name@deped.gov.ph" />
         </label>
         {isResponder && (
           <>
@@ -1677,24 +2145,33 @@ function AccountEditModal({ acc, onClose, onSave }: {
             </p>
           </>
         )}
-        {isParent && (
+        {needsClass && (
           <div className="space-y-3">
-            <Select label="Grade" labelClassName="text-sm font-medium text-slate-700" value={grade}
-              onChange={setGrade} placeholder="Pick a grade"
-              options={SECTION_GRADES.map((label) => ({ value: gradeCode(label) ?? "", label }))} />
-            <Select label="Section" labelClassName="text-sm font-medium text-slate-700" value={sec}
-              onChange={setSec} placeholder="Pick a section"
-              options={sectionChoices.map((s) => ({ value: s, label: s }))} />
+            <GradeSectionField
+              grade={grade}
+              section={sec}
+              knownSections={knownSections}
+              onGrade={setGrade}
+              onSection={setSec}
+            />
+            {isTeacher && (
+              <>
+                <RoomField value={room} onChange={setRoom} />
+                <RegistryField
+                  value={registry}
+                  onChange={setRegistry}
+                  label="Registry"
+                  hint="Today's class count; a report uses it as the expected number."
+                  error={!registryOk ? "Registry must be a whole number from 0 to 200." : undefined}
+                />
+              </>
+            )}
             <p className="text-xs text-slate-500">
-              Moves this Parent/PTA account to {section || "another section"} — they see that section's alerts.
+              {isParent
+                ? `Moves this Parent/PTA account to ${section || "another section"} — they see that section's alerts.`
+                : "Renaming also renames the teacher's roster entry; the class follows the same rules as the Principal's roster."}
             </p>
           </div>
-        )}
-        {acc.role === "teacher" && (
-          <p className="text-xs text-slate-500">
-            Renaming also renames the teacher's roster entry. Section and room are edited from the Principal's
-            Teacher roster.
-          </p>
         )}
         {error && <p role="alert" className="text-sm font-semibold text-blush-700">{error}</p>}
         <div className="flex gap-2">
@@ -1703,57 +2180,6 @@ function AccountEditModal({ acc, onClose, onSave }: {
             {busy ? "Saving…" : "Save changes"}
           </button>
         </div>
-      </div>
-    </Modal>
-  );
-}
-
-function TempCredentialModal({ title, credential, onClose }: { title: string; credential: TempCredential; onClose: () => void }) {
-  const [copied, setCopied] = useState(false);
-  function copyToClipboard() {
-    void navigator.clipboard.writeText(`${credential.email} / ${credential.tempPassword}`);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
-  }
-  return (
-    <Modal title={title} onClose={onClose}>
-      <div className="space-y-3">
-        <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
-          <p className="mb-1 font-bold">⚠️ Save these credentials now</p>
-          <p>This is the only time the temporary password will be shown. Share it securely with the user.</p>
-        </div>
-        <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
-          <p className="mb-1 text-xs text-slate-500">Email</p>
-          <p className="font-mono text-sm font-bold">{credential.email}</p>
-          <p className="mb-1 mt-3 text-xs text-slate-500">Temporary password</p>
-          <p className="font-mono text-sm font-bold">{credential.tempPassword}</p>
-        </div>
-        <button onClick={copyToClipboard} className={`${btnSecondary} w-full justify-center`}>
-          {copied ? <><Check size={15} /> Copied!</> : <><Copy size={15} /> Copy credentials</>}
-        </button>
-        <p className="text-center text-xs text-slate-500">The user must set a new password on their first sign-in.</p>
-      </div>
-    </Modal>
-  );
-}
-
-function PasswordResultModal({ tempPassword, onClose }: { tempPassword: string; onClose: () => void }) {
-  const [copied, setCopied] = useState(false);
-  return (
-    <Modal title="Password reset" onClose={onClose}>
-      <div className="space-y-3">
-        <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
-          <p className="mb-1 font-bold">⚠️ Save this temporary password</p>
-          <p>The user must set a new password on their next sign-in.</p>
-        </div>
-        <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
-          <p className="mb-1 text-xs text-slate-500">Temporary password</p>
-          <p className="font-mono text-sm font-bold">{tempPassword}</p>
-        </div>
-        <button onClick={() => { void navigator.clipboard.writeText(tempPassword); setCopied(true); setTimeout(() => setCopied(false), 2000); }}
-          className={`${btnSecondary} w-full justify-center`}>
-          {copied ? <><Check size={15} /> Copied!</> : <><Copy size={15} /> Copy password</>}
-        </button>
       </div>
     </Modal>
   );

@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Archive, ChevronLeft, ChevronRight, Lock, ShieldCheck, Trash2, Users } from "lucide-react";
 import { api } from "../lib/api";
 import { dateTime } from "../lib/format";
+import { LocationLine, locationName } from "./Location";
 import { useApp } from "../lib/store";
 import { catTheme } from "../lib/theme";
 import { BackBarFor } from "./Chrome";
@@ -114,15 +115,13 @@ export default function ArchivePage({
             <li key={i.id}>
               <button
                 onClick={() => setOpen(i.id)}
-                className="flex min-h-16 w-full items-center gap-3 px-3 py-3 text-left hover:bg-slate-50"
-                aria-label={`View archived record: ${i.subLabel}, ${i.room}`}
-              >
+                className="flex min-h-16 w-full items-center gap-3 px-3 py-3 text-left hover:bg-slate-50"                aria-label={`View archived record: ${i.subLabel}, ${locationName(i.room)}`}>
                 <span className="text-xl" aria-hidden>{catTheme(i.category).emoji}</span>
                 <span className="min-w-0 flex-1">
-                  <span className="block truncate text-sm font-bold text-slate-800">
+                  <span className="block break-words hyphens-none text-sm font-bold text-slate-800">
                     {i.subLabel}{i.drill ? " · Drill" : ""}
                   </span>
-                  <span className="block truncate text-xs text-slate-500">{i.room}</span>
+                  <LocationLine room={i.room} pin={false} className="block text-xs text-slate-500" />
                   <span className="block text-xs text-slate-400">
                     {user?.role === "teacher" && (i.reporterIds ?? []).length > 0 ? (
                       <span className="font-bold text-brand-700">
@@ -137,11 +136,11 @@ export default function ArchivePage({
                     {i.status === "RESOLVED" ? "Closed" : i.status}
                   </span>
                   {i.anonymizedAt ? (
-                    <span className="flex items-center gap-1 rounded-full bg-brand-50 px-2 py-0.5 text-[11px] font-bold text-brand-700">
+                    <span className="flex items-center gap-1 text-[11px] font-semibold text-slate-400">
                       <ShieldCheck size={11} aria-hidden /> Anonymised
                     </span>
                   ) : (
-                    <span className="flex items-center gap-1 rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-bold text-slate-500">
+                    <span className="flex items-center gap-1 text-[11px] font-semibold text-slate-400">
                       <Lock size={11} aria-hidden /> Read-only
                     </span>
                   )}
@@ -187,7 +186,7 @@ export default function ArchivePage({
           {archivedAccounts.map((a) => (
             <li key={a.id} className="flex flex-wrap items-center gap-3 px-3 py-3">
               <span className="min-w-0 flex-1">
-                <span className="block truncate text-sm font-bold text-slate-800">{accountName(a)}</span>
+                <span className="block break-words hyphens-none text-sm font-bold text-slate-800">{accountName(a)}</span>
                 <span className="block text-xs text-slate-500">{ROLE_LABEL[a.role] ?? a.role}</span>
                 <span className="block text-xs text-slate-400">
                   Archived {a.archivedAt ? dateTime(a.archivedAt) : "—"}
@@ -240,17 +239,23 @@ export default function ArchivePage({
       </div>
 
       {showTabs && (
-        <div role="tablist" aria-label="Archive sections" className="mb-3 flex overflow-hidden rounded-xl border border-brand-200 bg-white">
-          {([["tickets", "Tickets"], ["accounts", "Accounts"]] as [ArchiveTab, string][]).map(([id, label]) => (
+        <div role="tablist" aria-label="Archive sections" className="mb-3 flex items-stretch gap-1 border-b border-slate-200">
+          {([
+            ["tickets", "Tickets", data?.total ?? data?.items.length ?? 0],
+            ["accounts", "Accounts", archivedAccounts.length],
+          ] as [ArchiveTab, string, number][]).map(([id, label, count]) => (
             <button
               key={id}
               role="tab"
               aria-selected={tab === id}
               aria-controls={`archive-${id}-panel`}
               onClick={() => setTab(id)}
-              className={`min-h-12 flex-1 px-4 text-sm font-bold ${tab === id ? "bg-brand-600 text-white" : "text-brand-700"}`}
+              className={`-mb-px min-h-11 min-w-0 flex-1 border-b-2 px-2 text-sm font-bold ${
+                tab === id ? "border-brand-600 text-brand-800" : "border-transparent text-slate-500 hover:border-slate-300"
+              }`}
             >
-              {label}
+              <span className="break-words hyphens-none">{label}</span>{" "}
+              <span className={`font-mono text-[11px] ${tab === id ? "text-brand-700" : "text-slate-400"}`}>{count}</span>
             </button>
           ))}
         </div>

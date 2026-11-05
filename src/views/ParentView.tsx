@@ -6,7 +6,8 @@ import { LANGS, buildAdvisory } from "../../shared/advisories.js";
 import { useApp } from "../lib/store";
 import { useLang } from "../lib/lang";
 import { BAND_STYLE, catTheme } from "../lib/theme";
-import { clockTime, elapsed, escalationLabel, plainOverride } from "../lib/format";
+import { clockTime, elapsed, escalationLabel, plainOverride, splitLocation } from "../lib/format";
+import { LocationLine } from "../components/Location";
 import type { Incident } from "../lib/types";
 import { StatusStepper, WaitingLine } from "../components/Incident";
 import { EtaLine, HeadcountPanel, RuleBadges } from "../components/Rules";
@@ -106,7 +107,7 @@ function ParentCard({ inc }: { inc: Incident }) {
   const reasons: [string, string][] = [
     ["Incident type", `${inc.categoryLabel} — ${inc.subLabel}`],
     ["Who is affected", `${inc.populationLabel ?? "—"}${inc.linkedSection === "ALL" ? " · whole school" : inc.linkedSection ? ` · ${inc.linkedSection}` : ""}`],
-    ["Location", inc.room],
+    ["Location", splitLocation(inc.room).area],
     ["Hazard mode", inc.hazardApplied ? "On — flooding/typhoon conditions" : "Off"],
     ["Escalation", escalationLabel(inc)],
     ["Critical override", inc.overrideReasons.length ? inc.overrideReasons.map((r) => plainOverride(r)).join(" · ") : "None"],
@@ -125,7 +126,7 @@ function ParentCard({ inc }: { inc: Incident }) {
       <div className="space-y-3 p-4">
         <div>
           <p className="text-base font-bold text-slate-800">{inc.subLabel}</p>
-          <p className="mt-0.5 text-sm text-slate-600">📍 {inc.room}</p>
+          <LocationLine room={inc.room} className="mt-0.5 block text-sm text-slate-600" />
           <p className="mt-0.5 text-xs text-slate-500">
             {inc.populationLabel ?? "—"} · {inc.linkedSection === "ALL" ? "whole school" : inc.linkedSection} · {elapsed(inc.createdAt, now)}
           </p>
@@ -219,7 +220,7 @@ export default function ParentView() {
                 <span className="min-w-0 flex-1">
                   <span className="block truncate text-sm font-bold text-slate-800">{i.subLabel}</span>
                   <span className="block truncate text-xs text-slate-500">
-                    {i.room}{i.resolvedAt ? ` · ${elapsed(i.resolvedAt, now)}` : ""}
+                    {splitLocation(i.room).area}{i.resolvedAt ? ` · ${elapsed(i.resolvedAt, now)}` : ""}
                   </span>
                 </span>
                 <button onClick={() => void hideIncident(i.id, !showHidden)}

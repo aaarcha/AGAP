@@ -12,26 +12,31 @@
  *      toggle. Count changes are announced through aria-live.
  *
  * Everything that is not the primary category lives in the Filters panel
- * (bottom sheet on phones, popover at >= 768):
- *   - quick chips become labelled toggle rows (role="switch") at the top;
- *   - every group (Grade, Section, Status, Tier, …) becomes a Select dropdown
- *     whose first option is "Any <name>", whose labels carry counts
- *     ("Grade 4 (6)") and whose zero-count options stay visible but disabled.
+ * (bottom sheet on phones, popover at >= 768). The panel is made of SECTIONS
+ * OF TAPPABLE CHIPS — never dropdowns:
+ *   - a section heading row: the label, an "N selected" note when it is
+ *     active, and a small Clear link that only clears that section;
+ *   - single-choice sections start with an "Any …" chip and use
+ *     role="radiogroup" / aria-checked;
+ *   - multi-choice sections use toggle chips with aria-pressed;
+ *   - counts sit inside the chip ("Grade 4 · 6"); a zero-count chip stays
+ *     visible but is muted and disabled;
+ *   - more than 12 options scroll inside max-h-56;
+ *   - Quick filters (Locked, Escalated, Drill…) are a section of chips too;
+ *   - Period is a section: Any time … Custom range, with the DatePicker range
+ *     revealed INLINE under the chips.
  *
- * `chipRows` and `quickChips` callers are converted automatically, so a screen
- * that predates the panel keeps the same filters, counts and behaviour.
- * A dropdown opened inside the panel stacks above it (z-80 vs z-60) and Esc
- * closes that dropdown first, then the panel.
+ * The panel has a scrolling body and a sticky footer ("Show N results" and
+ * Reset). The shared Select is only for form fields, never inside this panel.
  */
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { ArrowDownUp, Check, ChevronDown, ChevronLeft, ChevronRight, LayoutGrid, List, SlidersHorizontal, X } from "lucide-react";
+import { ArrowDownUp, Check, ChevronLeft, ChevronRight, LayoutGrid, List, SlidersHorizontal, X } from "lucide-react";
 import { useMediaQuery } from "../lib/hooks";
 import {
   PERIOD_OPTIONS, periodLabel, setDateBound, setPeriod,
   type DateRangeState, type PeriodId,
 } from "../lib/filters";
-import { Select } from "./Select";
 import { DatePicker } from "./DatePicker";
 
 export type ChipOption = {
@@ -59,6 +64,8 @@ export type FilterGroupProps = {
   options: ChipOption[];
   selected: string[];
   onToggle: (group: string, value: string) => void;
+  /** Single-choice section: an "Any …" chip, role="radiogroup". Defaults to multi. */
+  single?: boolean;
 };
 
 export type ActiveChipProps = { id: string; label: string; onRemove: () => void };
@@ -67,7 +74,7 @@ export type FilterBarProps = {
   search?: { value: string; onChange: (v: string) => void; placeholder?: string; ariaLabel?: string };
   /** The row: single-select, "all" first, counts visible, never behind the panel. */
   category?: { value: string; options: ChipOption[]; onChange: (v: string) => void; ariaLabel: string };
-  /** Sheet: labelled toggle rows at the top (Locked, Escalated, Drill…). */
+  /** Sheet: the "Quick filters" section of toggle chips (Locked, Escalated, Drill…). */
   quickChips?: { label: string; count?: number; active: boolean; onToggle: () => void; ariaLabel?: string }[];
   filters?: {
     groups: FilterGroupProps[];
@@ -78,17 +85,20 @@ export type FilterBarProps = {
     title?: string;
   };
   sort?: { value: string; options: { value: string; label: string }[]; onChange: (v: string) => void; ariaLabel?: string };
-  /** The one Period dropdown, inside the Filters sheet. */
+  /** The Period section, inside the Filters panel. */
   period?: { value: DateRangeState; onChange: (next: DateRangeState) => void };
   /** Text used for the period in the active summary (defaults to its label). */
   periodSummary?: string;
-  /** Legacy extra chip rows — converted into Select dropdowns in the panel. */
+  /** Legacy extra chip rows — folded into the panel as multi-choice sections. */
   chipRows?: ChipRowProps[];
   /** Legacy removable chips — now summarised in the results header. */
   activeChips?: ActiveChipProps[];
   onClearAll?: () => void;
   results: { label: string; shown: number; total: number };
   view?: { mode: "list" | "grid"; onToggle: (mode: "list" | "grid") => void };
+  /** Header mode: only the Filters icon button (and its badge) is rendered, for
+   *  a page-header `actions` slot. The panel, sections and footer are unchanged. */
+  compact?: boolean;
 };
 
 const CHIP_BASE =
@@ -96,26 +106,12 @@ const CHIP_BASE =
 const CHIP_ON = "border-brand-600 bg-brand-600 text-white";
 const CHIP_OFF = "border-slate-300 bg-white text-slate-700 hover:border-brand-300";
 const CHIP_DISABLED = "cursor-not-allowed opacity-50";
+/** Panel chips are a full 44px tall for thumbs. */
+const SECTION_CHIP = `${CHIP_BASE} min-h-11`;
 const ICON_BTN =
   "relative flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border outline-none transition-colors focus-visible:ring-2 focus-visible:ring-brand-200 motion-reduce:transition-none";
 const ICON_BTN_OFF = `${ICON_BTN} border-slate-300 bg-white text-slate-700 hover:border-brand-300`;
 const ICON_BTN_ON = `${ICON_BTN} border-brand-600 bg-brand-50 text-brand-700`;
-
-/**
- * The one Esc target inside a filters panel: the group dropdown that is
- * currently open. Set while a dropdown is open so the sheet/popover's own Esc
- * handler can close the dropdown first and itself second.
- */
-let dismissTopMenu: (() => void) | null = null;
-
-/** True when a dropdown inside the panel consumed the Esc press. */
-function closeTopMenuFirst(): boolean {
-  const close = dismissTopMenu;
-  if (!close) return false;
-  dismissTopMenu = null;
-  close();
-  return true;
-}
 
 /** Horizontal scroll edges for the one-row filter bar (arrows on >= 1024). */
 export function scrollEdges(scrollLeft: number, scrollWidth: number, clientWidth: number) {
@@ -199,16 +195,12 @@ function AnchoredPanel({
       const t = e.target as Node | null;
       if (!t) return;
       if (triggerRef.current?.contains(t) || panelRef.current?.contains(t)) return;
-      // A dropdown portalled out of the panel keeps the panel open.
-      if (t instanceof HTMLElement && t.closest("[data-group-menu]")) return;
       onClose();
     };
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         e.preventDefault();
         e.stopPropagation();
-        // An open dropdown inside the panel closes first.
-        if (closeTopMenuFirst()) return;
         onClose();
         triggerRef.current?.focus();
       }
@@ -229,7 +221,7 @@ function AnchoredPanel({
       role="dialog"
       aria-label={ariaLabel}
       tabIndex={-1}
-      className="fixed z-[60] max-h-[70vh] overflow-y-auto rounded-xl border border-slate-200 bg-white p-3 shadow-xl outline-none"
+      className="fixed z-[60] flex max-h-[70vh] flex-col overflow-hidden rounded-xl border border-slate-200 bg-white shadow-xl outline-none"
       style={pos ? { left: pos.left, top: pos.top, width } : { left: -9999, top: -9999, width }}
     >
       {children}
@@ -268,6 +260,7 @@ export function FilterBar({
   onClearAll,
   results,
   view,
+  compact = false,
 }: FilterBarProps) {
   const desktopFilters = useMediaQuery("screen and (min-width: 768px)");
   const wide = useMediaQuery("screen and (min-width: 1024px)");
@@ -281,15 +274,15 @@ export function FilterBar({
   const groups = useMemo(() => panelGroups(filters?.groups, chipRows), [filters?.groups, chipRows]);
   const quick = useMemo(() => quickChips ?? [], [quickChips]);
 
-  // The summary + badge: category label, every dropdown selection, and any
-  // toggle that is not already shown by a dropdown.
+  // The summary + badge: category label, every group selection, and any
+  // toggle that is not already shown by a group.
   const categoryLabel =
     category && category.value !== "all"
       ? category.options.find((o) => o.value === category.value)?.label ?? category.value
       : "";
   const groupLabels = groups.flatMap((g) => g.selected.map((v) => optionLabel(g, v)));
   // Quick toggles normally mirror a group value, so they only add a summary
-  // entry on screens that have no dropdowns (e.g. Teacher My Reports).
+  // entry on screens that have no groups.
   const extraToggles = groupLabels.length > 0 ? [] : quick.filter((q) => q.active).map((q) => q.label);
   const periodName = period
     ? periodSummary ?? (period.value.period === "all" ? "" : periodLabel(period.value))
@@ -332,8 +325,6 @@ export function FilterBar({
   };
 
   const resetAll = () => {
-    // Group selections (which back most quick toggles) are the caller's to
-    // clear; without any groups, Reset just turns the toggles off.
     if (period && period.value.period !== "all") {
       period.onChange({ ...period.value, period: "all", from: "", to: "" });
     }
@@ -348,6 +339,61 @@ export function FilterBar({
     setFiltersOpen(false);
     filtersBtn.current?.focus();
   };
+
+  // Header mode: the Filter icon (with its count badge) and its panel only.
+  if (compact) {
+    return (
+      <div className="relative flex items-center">
+        {canOpenPanel && (
+          <button
+            ref={filtersBtn}
+            type="button"
+            aria-haspopup="dialog"
+            aria-expanded={filtersOpen}
+            aria-label={activeCount > 0 ? `Filters, ${activeCount} active` : "Filters"}
+            title={activeCount > 0 ? `Filters, ${activeCount} active` : "Filters"}
+            onClick={() => setFiltersOpen((v) => !v)}
+            className={filtersActive || filtersOpen ? ICON_BTN_ON : ICON_BTN_OFF}
+          >
+            <SlidersHorizontal size={18} aria-hidden />
+            {activeCount > 0 && (
+              <span
+                data-filter-badge
+                aria-hidden
+                className="absolute -right-1 -top-1 flex h-5 min-w-5 items-center justify-center rounded-full bg-brand-600 px-1 font-mono text-[11px] font-bold leading-none text-white"
+              >
+                {activeCount}
+              </span>
+            )}
+          </button>
+        )}
+        {canOpenPanel && !desktopFilters && filtersOpen && (
+          <FiltersSheet
+            title={panelTitle}
+            groups={groups}
+            quick={quick}
+            period={period}
+            shown={shown}
+            total={total}
+            onReset={resetAll}
+            onClose={closePanel}
+          />
+        )}
+        {canOpenPanel && desktopFilters && (
+          <AnchoredPanel
+            open={filtersOpen}
+            triggerRef={filtersBtn}
+            onClose={() => setFiltersOpen(false)}
+            width={360}
+            ariaLabel={panelTitle}
+          >
+            <FilterSections groups={groups} quick={quick} period={period} />
+            <FilterFooter shown={shown} total={total} onReset={resetAll} onDone={closePanel} />
+          </AnchoredPanel>
+        )}
+      </div>
+    );
+  }
 
   return (
     <div className="min-w-0 space-y-2">
@@ -512,15 +558,8 @@ export function FilterBar({
           width={360}
           ariaLabel={panelTitle}
         >
-          <FiltersBody
-            groups={groups}
-            quick={quick}
-            period={period}
-            shown={shown}
-            total={total}
-            onReset={resetAll}
-            onDone={closePanel}
-          />
+          <FilterSections groups={groups} quick={quick} period={period} />
+          <FilterFooter shown={shown} total={total} onReset={resetAll} onDone={closePanel} />
         </AnchoredPanel>
       )}
 
@@ -542,7 +581,9 @@ export function FilterBar({
           width={260}
           ariaLabel={sort.ariaLabel ?? "Sort"}
         >
-          <SortBody sort={sort} onDone={() => { setSortOpen(false); sortBtn.current?.focus(); }} />
+          <div className="p-2">
+            <SortBody sort={sort} onDone={() => { setSortOpen(false); sortBtn.current?.focus(); }} />
+          </div>
         </AnchoredPanel>
       )}
 
@@ -583,88 +624,193 @@ export function FilterBar({
   );
 }
 
-/** Toggle rows + one Select dropdown per group + footer (sheet or popover). */
-function FiltersBody({
+/** One chip in a panel section. Single-choice sections use radio semantics. */
+function SectionChip({
+  option,
+  active,
+  single,
+  onSelect,
+}: {
+  option: ChipOption;
+  active: boolean;
+  single: boolean;
+  onSelect: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      role={single ? "radio" : undefined}
+      aria-checked={single ? active : undefined}
+      aria-pressed={single ? undefined : active}
+      disabled={option.disabled}
+      onClick={() => !option.disabled && onSelect()}
+      className={`${SECTION_CHIP} ${active ? CHIP_ON : CHIP_OFF} ${option.disabled ? CHIP_DISABLED : ""}`}
+    >
+      <span>{option.label}</span>
+      {option.count !== undefined && (
+        <span className={`font-mono text-xs ${active ? "text-white/80" : "text-slate-400"}`}>{" · "}{option.count}</span>
+      )}
+    </button>
+  );
+}
+
+/** A labelled section: heading row with "N selected" + a per-section Clear. */
+function FilterSection({
+  id,
+  label,
+  selectedCount,
+  onClear,
+  children,
+  scroll = false,
+  radiogroup = false,
+}: {
+  id: string;
+  label: string;
+  selectedCount: number;
+  onClear?: () => void;
+  children: ReactNode;
+  /** More than 12 options: the chips scroll inside max-h-56 instead of growing. */
+  scroll?: boolean;
+  radiogroup?: boolean;
+}) {
+  return (
+    <section data-filter-section={id} className="border-b border-slate-100 pb-5 last:border-0 last:pb-0">
+      <div className="mb-2 flex min-h-6 items-center gap-2">
+        <h3 className="text-[11px] font-bold uppercase tracking-wide text-slate-500">{label}</h3>
+        {selectedCount > 0 && (
+          <span data-selected-note className="font-mono text-[11px] font-bold text-brand-700">{selectedCount} selected</span>
+        )}
+        {selectedCount > 0 && onClear && (
+          <button
+            type="button"
+            onClick={onClear}
+            aria-label={`Clear ${label}`}
+            className="ml-auto rounded px-1 text-xs font-bold text-brand-700 underline outline-none hover:text-brand-900 focus-visible:ring-2 focus-visible:ring-brand-200"
+          >
+            Clear
+          </button>
+        )}
+      </div>
+      {scroll ? (
+        <div className="scroll-area max-h-56 overflow-y-auto pr-1">
+          <div role={radiogroup ? "radiogroup" : undefined} aria-label={radiogroup ? label : undefined} className="flex flex-wrap gap-2">
+            {children}
+          </div>
+        </div>
+      ) : (
+        <div role={radiogroup ? "radiogroup" : undefined} aria-label={radiogroup ? label : undefined} className="flex flex-wrap gap-2">
+          {children}
+        </div>
+      )}
+    </section>
+  );
+}
+
+/** All the panel's sections, in the order the screen asked for. */
+function FilterSections({
   groups,
   quick,
   period,
+}: {
+  groups: FilterGroupProps[];
+  quick: NonNullable<FilterBarProps["quickChips"]>;
+  period?: FilterBarProps["period"];
+}) {
+  return (
+    <div data-filter-sections className="min-h-0 flex-1 space-y-5 overflow-y-auto p-4">
+      {period && <PeriodSection value={period.value} onChange={period.onChange} />}
+
+      {quick.length > 0 && (
+        <FilterSection
+          id="quick"
+          label="Quick filters"
+          selectedCount={quick.filter((q) => q.active).length}
+          onClear={() => quick.filter((q) => q.active).forEach((q) => q.onToggle())}
+        >
+          {quick.map((q) => (
+            <button
+              key={q.label}
+              type="button"
+              aria-pressed={q.active}
+              aria-label={q.ariaLabel ?? q.label}
+              onClick={q.onToggle}
+              className={`${SECTION_CHIP} ${q.active ? CHIP_ON : CHIP_OFF}`}
+            >
+              <span>{q.label}</span>
+              {q.count !== undefined && (
+                <span className={`font-mono text-xs ${q.active ? "text-white/80" : "text-slate-400"}`}>{" · "}{q.count}</span>
+              )}
+            </button>
+          ))}
+        </FilterSection>
+      )}
+
+      {groups.map((g) => {
+        const single = Boolean(g.single);
+        const active = (value: string) => g.selected.includes(value);
+        const clear = () => {
+          for (const v of [...g.selected]) g.onToggle(g.id, v);
+        };
+        // Single-choice sections start with an "Any" chip; picking it clears.
+        const anyChip = single ? (
+          <SectionChip
+            key="__any"
+            option={{ value: "", label: `Any ${g.label.toLowerCase()}` }}
+            active={g.selected.length === 0}
+            single
+            onSelect={clear}
+          />
+        ) : null;
+        return (
+          <FilterSection
+            key={g.id}
+            id={g.id}
+            label={g.label}
+            selectedCount={g.selected.length}
+            onClear={clear}
+            scroll={g.options.length > 12}
+            radiogroup={single}
+          >
+            {anyChip}
+            {g.options.map((o) => (
+              <SectionChip
+                key={o.value}
+                option={o}
+                active={active(o.value)}
+                single={single}
+                onSelect={() => g.onToggle(g.id, o.value)}
+              />
+            ))}
+          </FilterSection>
+        );
+      })}
+    </div>
+  );
+}
+
+/** The sticky footer: Reset on the left, "Show N results" on the right. */
+function FilterFooter({
   shown,
   total,
   onReset,
   onDone,
 }: {
-  groups: FilterGroupProps[];
-  quick: NonNullable<FilterBarProps["quickChips"]>;
-  period?: FilterBarProps["period"];
   shown: number;
   total: number;
   onReset: () => void;
   onDone: () => void;
 }) {
-  const [openGroup, setOpenGroup] = useState<string | null>(null);
-  const closeGroup = useCallback(() => setOpenGroup(null), []);
-
-  // The open dropdown owns the first Esc press (see closeTopMenuFirst).
-  useEffect(() => {
-    if (!openGroup) return;
-    dismissTopMenu = closeGroup;
-    const onPointerDown = (e: PointerEvent) => {
-      const t = e.target;
-      if (t instanceof Element && (t.closest("[data-group-menu]") || t.closest("[data-group-trigger]"))) return;
-      closeGroup();
-    };
-    document.addEventListener("pointerdown", onPointerDown, true);
-    return () => {
-      document.removeEventListener("pointerdown", onPointerDown, true);
-      if (dismissTopMenu === closeGroup) dismissTopMenu = null;
-    };
-  }, [openGroup, closeGroup]);
-
   return (
-    <div className="space-y-3">
-      <p className="text-xs font-bold uppercase tracking-wide text-slate-500">Showing {shown} of {total}</p>
-
-      {period && <PeriodGroup value={period.value} onChange={period.onChange} />}
-
-      {quick.length > 0 && (
-        <div className="space-y-1">
-          {quick.map((q) => (
-            <button
-              key={q.label}
-              type="button"
-              role="switch"
-              aria-checked={q.active}
-              aria-label={q.ariaLabel ?? q.label}
-              onClick={q.onToggle}
-              className={`flex min-h-12 w-full items-center gap-3 rounded-xl border px-3 text-left text-sm font-bold ${q.active ? "border-brand-600 bg-brand-50 text-brand-800" : "border-slate-200 bg-white text-slate-700"}`}
-            >
-              <span className="min-w-0 flex-1 truncate">{q.label}</span>
-              {q.count !== undefined && <span className="shrink-0 font-mono text-xs text-slate-400">{q.count}</span>}
-              <span aria-hidden className={`flex h-6 w-11 shrink-0 items-center rounded-full p-0.5 transition-colors ${q.active ? "bg-brand-600" : "bg-slate-300"}`}>
-                <span className={`block h-5 w-5 rounded-full bg-white transition-transform ${q.active ? "translate-x-5" : "translate-x-0"}`} />
-              </span>
-            </button>
-          ))}
-        </div>
-      )}
-
-      {groups.map((g) => (
-        <GroupSelect
-          key={g.id}
-          group={g}
-          open={openGroup === g.id}
-          onOpenChange={(open) => setOpenGroup(open ? g.id : null)}
-        />
-      ))}
-
-      <div className="flex items-center justify-between gap-2 border-t border-slate-100 pt-3">
-        <button
-          type="button"
-          onClick={onReset}
-          className="flex min-h-12 items-center gap-1.5 rounded-xl border border-slate-300 bg-white px-4 text-sm font-bold text-slate-700 hover:border-brand-300"
-        >
-          Reset
-        </button>
+    <div data-filter-footer className="flex shrink-0 items-center justify-between gap-2 border-t border-slate-200 bg-white px-4 py-3">
+      <button
+        type="button"
+        onClick={onReset}
+        className="flex min-h-12 items-center gap-1.5 rounded-xl border border-slate-300 bg-white px-4 text-sm font-bold text-slate-700 hover:border-brand-300"
+      >
+        Reset
+      </button>
+      <div className="flex min-w-0 items-center gap-2">
+        <span className="hidden font-mono text-[11px] text-slate-400 sm:inline">Showing {shown} of {total}</span>
         <button
           type="button"
           onClick={onDone}
@@ -678,188 +824,40 @@ function FiltersBody({
 }
 
 /**
- * One group as a dropdown: "Any <name>", then "Label (count)" options.
- *
- * The menu is ALWAYS portalled out of the sheet/dialog that opened it — a
- * bottom picker sheet on phones, an anchored popover at >= 640px — so a
- * scrolling parent can never clip the first option.
+ * The Period section: single-choice chips for the presets, with the DatePicker
+ * range revealed INLINE (no dropdown, no extra tap) for Custom range.
  */
-function GroupSelect({ group, open, onOpenChange }: { group: FilterGroupProps; open: boolean; onOpenChange: (open: boolean) => void }) {
-  const triggerRef = useRef<HTMLButtonElement>(null);
-  const menuRef = useRef<HTMLUListElement>(null);
-  const desktop = useMediaQuery("screen and (min-width: 640px)");
-  const [pos, setPos] = useState<{ left: number; top: number; width: number; maxHeight: number } | null>(null);
-
-  const selectedLabels = group.options.filter((o) => group.selected.includes(o.value)).map((o) => o.label);
-  const anyLabel = `Any ${group.label.toLowerCase()}`;
-  const triggerLabel = selectedLabels.length === 0 ? anyLabel : selectedLabels.length === 1 ? selectedLabels[0] : `${selectedLabels.length} selected`;
-
-  // Anchor the popover under the trigger and flip it above when there is no room.
-  useEffect(() => {
-    if (!open || !desktop) {
-      setPos(null);
-      return;
-    }
-    const place = () => {
-      const trigger = triggerRef.current;
-      if (!trigger) return;
-      const r = trigger.getBoundingClientRect();
-      const gap = 6;
-      const roomBelow = window.innerHeight - r.bottom - gap - 8;
-      const roomAbove = r.top - gap - 8;
-      const natural = Math.min(menuRef.current?.scrollHeight ?? 256, 320);
-      const flip = natural > roomBelow && roomAbove > roomBelow;
-      const maxHeight = Math.max(140, Math.min(320, flip ? roomAbove : roomBelow));
-      const width = Math.max(180, r.width);
-      const left = Math.max(8, Math.min(r.left, window.innerWidth - width - 8));
-      const top = flip ? Math.max(8, r.top - gap - Math.min(natural, maxHeight)) : r.bottom + gap;
-      setPos({ left, top, width, maxHeight });
-    };
-    place();
-    window.addEventListener("resize", place);
-    window.addEventListener("scroll", place, true);
-    return () => {
-      window.removeEventListener("resize", place);
-      window.removeEventListener("scroll", place, true);
-    };
-  }, [open, desktop, group.options.length]);
-
-  // Open on the chosen option and scroll it into view — never a cut-off top.
-  useEffect(() => {
-    if (!open) return;
-    const id = window.setTimeout(() => {
-      const menu = menuRef.current;
-      const chosen = menu?.querySelector<HTMLElement>('[aria-selected="true"]');
-      if (!menu || !chosen) return;
-      menu.scrollTop = Math.max(0, chosen.offsetTop - 12);
-      chosen.scrollIntoView?.({ block: "nearest" });
-    }, 0);
-    return () => window.clearTimeout(id);
-  }, [open]);
-
-  const optionNodes = (
-    <>
-      <li>
-        <button
-          type="button"
-          role="option"
-          aria-selected={group.selected.length === 0}
-          onClick={() => {
-            for (const v of [...group.selected]) group.onToggle(group.id, v);
-            onOpenChange(false);
-          }}
-          className="flex min-h-12 w-full items-center gap-2 px-3 text-left text-sm text-slate-700 hover:bg-brand-50"
-        >
-          <span className="min-w-0 flex-1 break-words">{anyLabel}</span>
-          {group.selected.length === 0 && <Check size={16} className="shrink-0 text-brand-600" aria-hidden />}
-        </button>
-      </li>
-      {group.options.map((o) => {
-        const on = group.selected.includes(o.value);
-        return (
-          <li key={o.value}>
-            <button
-              type="button"
-              role="option"
-              aria-selected={on}
-              aria-pressed={on}
-              disabled={o.disabled}
-              onClick={() => group.onToggle(group.id, o.value)}
-              className={`flex min-h-12 w-full items-center gap-2 px-3 text-left text-sm ${o.disabled ? "cursor-not-allowed text-slate-300" : "text-slate-700 hover:bg-brand-50"}`}
-            >
-              <span className="min-w-0 flex-1 break-words">
-                {o.label}{" "}
-                {o.count !== undefined && <span className={`font-mono text-xs ${o.disabled ? "text-slate-300" : "text-slate-400"}`}>({o.count})</span>}
-              </span>
-              {on && <Check size={16} className="shrink-0 text-brand-600" aria-hidden />}
-            </button>
-          </li>
-        );
-      })}
-    </>
-  );
-
-  const list = (extra: string) => (
-    <ul
-      ref={menuRef}
-      data-group-menu
-      role="listbox"
-      aria-label={group.label}
-      className={`list-none overflow-y-auto max-h-[70dvh] ${extra}`}
-    >
-      {optionNodes}
-    </ul>
-  );
-
+function PeriodSection({ value, onChange }: { value: DateRangeState; onChange: (next: DateRangeState) => void }) {
   return (
-    <div>
-      <button
-        ref={triggerRef}
-        type="button"
-        data-group-trigger
-        aria-haspopup="listbox"
-        aria-expanded={open}
-        aria-label={`${group.label}: ${triggerLabel}`}
-        onClick={() => onOpenChange(!open)}
-        className="flex min-h-12 w-full items-center gap-2 rounded-xl border border-slate-300 bg-white px-3 text-left text-sm font-bold text-slate-700 outline-none focus-visible:ring-2 focus-visible:ring-brand-200"
+    <div data-period-section>
+      <FilterSection
+        id="period"
+        label="Period"
+        selectedCount={value.period === "all" ? 0 : 1}
+        onClear={() => onChange({ ...value, period: "all", from: "", to: "" })}
+        radiogroup
       >
-        <span className="min-w-0 flex-1 truncate">
-          {triggerLabel}
-          {group.selected.length > 0 && <span className="ml-1 font-mono text-xs text-brand-600">({group.selected.length})</span>}
-        </span>
-        <ChevronDown size={16} aria-hidden className={`shrink-0 text-slate-400 transition-transform ${open ? "rotate-180" : ""}`} />
-      </button>
-
-      {/* Desktop: anchored popover, portalled so no parent can clip it. */}
-      {open && desktop && typeof document !== "undefined" &&
-        createPortal(
-          <div
-            className="fixed z-[80] flex flex-col overflow-hidden rounded-xl border border-slate-200 bg-white shadow-xl"
-            style={
-              pos
-                ? { left: pos.left, top: pos.top, width: pos.width, maxHeight: pos.maxHeight }
-                : { left: -9999, top: -9999, width: 240, maxHeight: 320 }
-            }
-          >
-            {list("min-h-0 flex-1 py-1")}
-          </div>,
-          document.body,
-        )}
-
-      {/* Phones: a bottom picker sheet, always with a title and a Close button. */}
-      {open && !desktop && typeof document !== "undefined" &&
-        createPortal(
-          <div
-            className="fixed inset-0 z-[80] flex items-end bg-black/55"
-            onMouseDown={(e) => e.target === e.currentTarget && onOpenChange(false)}
-          >
-            <div
-              role="dialog"
-              aria-modal="true"
-              aria-label={group.label}
-              className="flex max-h-[85dvh] w-full flex-col overflow-hidden rounded-t-2xl bg-white shadow-2xl"
-            >
-              <div className="flex shrink-0 items-center justify-between border-b border-slate-100 px-4 py-3">
-                <h2 className="text-base font-bold text-slate-800">{group.label}</h2>
-                <button
-                  type="button"
-                  aria-label="Close"
-                  onClick={() => onOpenChange(false)}
-                  className="-mr-2 flex h-12 w-12 items-center justify-center rounded-lg hover:bg-slate-100"
-                >
-                  <X size={20} className="text-slate-500" aria-hidden />
-                </button>
-              </div>
-              {list("min-h-0 flex-1 p-2 pb-[max(0.75rem,env(safe-area-inset-bottom))]")}
-            </div>
-          </div>,
-          document.body,
-        )}
+        {PERIOD_OPTIONS.map((o) => (
+          <SectionChip
+            key={o.value}
+            option={{ value: o.value, label: o.label }}
+            active={value.period === o.value}
+            single
+            onSelect={() => onChange(setPeriod(value, o.value as PeriodId))}
+          />
+        ))}
+      </FilterSection>
+      {value.period === "custom" && (
+        <div data-period-range className="mt-3 flex flex-wrap items-end gap-2">
+          <DatePicker className="w-40" label="From" value={value.from} onChange={(v) => onChange(setDateBound(value, "from", v))} clearable />
+          <DatePicker className="w-40" label="To" value={value.to} onChange={(v) => onChange(setDateBound(value, "to", v))} clearable />
+        </div>
+      )}
     </div>
   );
 }
 
-/** Phone bottom sheet wrapper. Esc closes an open dropdown first, then the sheet. */
+/** Phone bottom sheet: header, scrolling body, sticky footer. */
 function FiltersSheet({
   title,
   groups,
@@ -884,7 +882,6 @@ function FiltersSheet({
       if (e.key !== "Escape") return;
       e.preventDefault();
       e.stopPropagation();
-      if (closeTopMenuFirst()) return;
       onClose();
     };
     document.addEventListener("keydown", onKey, true);
@@ -901,53 +898,34 @@ function FiltersSheet({
         role="dialog"
         aria-modal="true"
         aria-label={title}
-        className="max-h-[85dvh] w-full overflow-y-auto rounded-t-2xl bg-white p-4 shadow-2xl"
+        className="flex max-h-[85dvh] w-full flex-col overflow-hidden rounded-t-2xl bg-white shadow-2xl"
       >
-        <div className="mb-3 flex items-center justify-between">
+        <div className="flex shrink-0 items-center justify-between border-b border-slate-100 px-4 py-3">
           <h2 className="text-base font-bold text-slate-800">{title}</h2>
           <button type="button" aria-label="Close" onClick={onClose} className="-mr-2 flex h-12 w-12 items-center justify-center rounded-lg hover:bg-slate-100">
             <X size={20} className="text-slate-500" />
           </button>
         </div>
-        <FiltersBody groups={groups} quick={quick} period={period} shown={shown} total={total} onReset={onReset} onDone={onClose} />
+        <FilterSections groups={groups} quick={quick} period={period} />
+        <FilterFooter shown={shown} total={total} onReset={onReset} onDone={onClose} />
       </div>
     </div>,
     document.body,
   );
 }
 
-/** The Period dropdown: one preset value, Custom reveals the From/To range. */
-function PeriodGroup({ value, onChange }: { value: DateRangeState; onChange: (next: DateRangeState) => void }) {
-  return (
-    <div data-period-group className="space-y-2">
-      <Select
-        label="Period"
-        ariaLabel="Period"
-        value={value.period}
-        onChange={(v) => onChange(setPeriod(value, v as PeriodId))}
-        options={PERIOD_OPTIONS.map((o) => ({ value: o.value, label: o.label }))}
-      />
-      {value.period === "custom" && (
-        <div className="flex flex-wrap items-end gap-2">
-          <DatePicker className="w-40" label="From" value={value.from} onChange={(v) => onChange(setDateBound(value, "from", v))} clearable />
-          <DatePicker className="w-40" label="To" value={value.to} onChange={(v) => onChange(setDateBound(value, "to", v))} clearable />
-        </div>
-      )}
-    </div>
-  );
-}
-
+/** The Sort panel: a list of radio rows, one choice at a time. */
 function SortBody({ sort, onDone }: { sort: NonNullable<FilterBarProps["sort"]>; onDone: () => void }) {
   return (
-    <div role="listbox" aria-label={sort.ariaLabel ?? "Sort by"} className="space-y-1">
+    <div role="radiogroup" aria-label={sort.ariaLabel ?? "Sort by"} className="space-y-1">
       {sort.options.map((o) => {
         const on = o.value === sort.value;
         return (
           <button
             key={o.value}
             type="button"
-            role="option"
-            aria-selected={on}
+            role="radio"
+            aria-checked={on}
             onClick={() => { sort.onChange(o.value); onDone(); }}
             className="flex min-h-12 w-full items-center gap-2 rounded-lg px-3 text-left text-sm text-slate-700 hover:bg-brand-50"
           >

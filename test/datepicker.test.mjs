@@ -364,36 +364,35 @@ test("at >=640px the calendar is a popover anchored to the field", () => {
   assert.equal(document.querySelector('[role="dialog"]'), null, "outside press closes the popover");
 });
 
-test("the Period dropdown filters dates and Custom range reveals the From/To pickers", () => {
+test("the Period chips filter dates and Custom range reveals the From/To pickers inline", () => {
   viewportWidth = 1024; // desktop: the Filters panel is an anchored popover
   render(React.createElement(RangeHarness));
   assert.deepEqual(rangeState(), { period: "all", from: "", to: "" });
-  assert.equal(document.querySelector('[role="group"][aria-label="Date range"]'), null, "no period chip row anywhere");
+  assert.equal(document.querySelector('[role="group"][aria-label="Date range"]'), null, "no period chip row on the bar");
 
   const filtersBtn = [...document.querySelectorAll("button[aria-label]")]
     .find((b) => (b.getAttribute("aria-label") || "").startsWith("Filters"));
   assert.ok(filtersBtn, "the Filters icon button opens the sheet");
   fireEvent.click(filtersBtn);
 
-  const group = document.querySelector("[data-period-group]");
-  assert.ok(group, "the Period group is inside the Filters sheet");
-  const trigger = group.querySelector('button[aria-haspopup="listbox"]');
-  assert.ok(trigger, "the Period select exists");
-  fireEvent.click(trigger);
-  const options = () => [...document.querySelectorAll('ul[role="listbox"] li[role="option"]')];
+  const group = document.querySelector("[data-period-section]");
+  assert.ok(group, "the Period section is inside the Filters panel");
+  assert.equal(group.querySelector('[aria-haspopup="listbox"]'), null, "no dropdown is used for the period");
+  const options = () => [...group.querySelectorAll('[role="radio"]')];
   assert.deepEqual(options().map((o) => o.textContent.trim()), [
     "Any time", "Today", "Last 7 days", "Last 30 days", "This school year", "Custom range",
   ]);
+  assert.equal(options()[0].getAttribute("aria-checked"), "true", "Any time starts selected");
 
   fireEvent.click(options().find((o) => o.textContent.trim() === "Last 7 days"));
   assert.equal(rangeState().period, "7d");
+  assert.equal(options().find((o) => o.textContent.trim() === "Last 7 days").getAttribute("aria-checked"), "true");
   assert.equal(document.querySelectorAll('[aria-label="From"]').length, 0, "no date fields for a preset");
   assert.equal(document.querySelector("[data-filter-badge]").textContent, "1", "the period counts as an active filter");
 
-  // The select re-renders after a choice: re-query its trigger, never reuse the node.
-  fireEvent.click(group.querySelector('button[aria-haspopup="listbox"]'));
   fireEvent.click(options().find((o) => o.textContent.trim() === "Custom range"));
   assert.equal(rangeState().period, "custom");
+  assert.ok(document.querySelector("[data-period-range]"), "the range is revealed inline under the chips");
   const fieldNamed = (name) =>
     [...document.querySelectorAll("button")].find(
       (b) => b.getAttribute("aria-haspopup") === "dialog" && (b.getAttribute("aria-label") || "").startsWith(name),

@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import { Archive, MoreVertical, Pencil, Plus } from "lucide-react";
 import { useApp } from "../lib/store";
-import type { RosterEntry } from "../lib/types";
+import type { RosterEntry, TempCredential } from "../lib/types";
+import { TempCredentialModal } from "../components/Credentials";
 import { ConfirmModal, Modal } from "../components/Modal";
 import { Select } from "../components/Select";
 import { FilterBar } from "../components/FilterBar";
@@ -9,12 +10,12 @@ import { PageFlow } from "../components/PageShell";
 import {
   facetCounts, filterItems, initialFilterState, matchesQuery, setCategory, setQuery, useFilterState, type FilterSpec,
 } from "../lib/filters";
-import { SECTION_GRADES, gradeCode, gradeLabel, parseSection, composeSection } from "../../shared/section.js";
+import { gradeLabel, parseSection, composeSection } from "../../shared/section.js";
+import { GRADE_CHOICES, GradeSectionField, RegistryField, normalizeSectionName, suggestionsForGrade } from "../components/FormFields";
+import { RoomField } from "../components/RoomField";
 
-const GRADE_OPTIONS = SECTION_GRADES.map((label) => ({ value: gradeCode(label) ?? "", label }));
+const GRADE_OPTIONS = GRADE_CHOICES;
 const GRADE_CODES = GRADE_OPTIONS.map((g) => g.value);
-/** The school's section set — the same fixed list the Admin console assigns. */
-const SECTION_OPTIONS = ["A", "B", "C"];
 
 /** Structured grade, falling back to the stored section string. */
 const gradeOf = (t: RosterEntry) => t.grade || parseSection(t.section).grade || "";
@@ -40,29 +41,35 @@ function StatusChip({ status, compact = false }: { status: RosterEntry["status"]
   );
 }
 
-function TeacherForm({ initial, onClose }: { initial: RosterEntry | null; onClose: () => void }) {
+function TeacherForm({ initial, knownSections, onClose, onCreated }: {
+  initial: RosterEntry | null;
+  knownSections: string[];
+  onClose: () => void;
+  onCreated: (c: TempCredential) => void;
+}) {
   const { addTeacher, editTeacher } = useApp();
   const rawSection = initial?.section ?? "";
   const parsed = parseSection(rawSection);
   const [name, setName] = useState(initial?.name ?? "");
+  const [email, setEmail] = useState("");
   const [grade, setGrade] = useState(parsed.grade);
   const [sec, setSec] = useState(parsed.sectionName || rawSection);
   const [room, setRoom] = useState(initial?.room ?? "");
-  // A teacher already on a section outside the set keeps it selectable.
-  const sectionChoices = sec && !SECTION_OPTIONS.includes(sec) ? [sec, ...SECTION_OPTIONS] : SECTION_OPTIONS;
   const [registry, setRegistry] = useState(String(initial?.registry ?? 30));
   const [status, setStatus] = useState<"active" | "inactive">(initial?.status ?? "active");
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
   const [confirmSection, setConfirmSection] = useState(false);
 
-  /** Stored string "Grade 3 - Sec A" from the grade select + section field. */
-  const composed = grade ? composeSection(grade, sec) : sec.trim();
+  const suggestions = suggestionsForGrade(knownSections, grade);
+  /** Stored string "Grade 3 - Sec A" from the shared grade + section fields. */
+  const composed = grade ? composeSection(grade, normalizeSectionName(sec, suggestions)) : normalizeSectionName(sec, suggestions);
 
   // A section change moves linked parent accounts (server side) — ask first.
   function submit() {
+    if (!initial && !email.trim()) { setErr("Email is required."); return; }
     if (!grade) { setErr("Pick a grade."); return; }
-    if (!sec.trim()) { setErr("Pick a section."); return; }
+    if (!normalizeSectionName(sec, suggestions)) { setErr("Enter a section."); return; }
     if (initial && composed !== initial.section) { setConfirmSection(true); return; }
     void save();
   }
@@ -71,28 +78,40 @@ function TeacherForm({ initial, onClose }: { initial: RosterEntry | null; onClos
     setBusy(true); setErr("");
     try {
       if (initial) await editTeacher(initial.id, { name, section: composed, room, status, registry: Number(registry) });
-      else await addTeacher({ name, section: composed, room, status, registry: Number(registry) });
+      else {
+        // One-time credentials: the password is returned here and never again.
+        const created = await addTeacher({ name, section: composed, room, status, registry: Number(registry), email: email.trim() });
+        onCreated({ id: created.teacherId, email: created.email, name, role: "teacher", tempPassword: created.tempPassword });
+      }
       onClose();
     } catch (e) { setErr(e instanceof Error ? e.message : "Could not save."); setBusy(false); }
   }
-  const fields: [string, string, (v: string) => void, string][] = [
-    ["Name", name, setName, "Ms. Reyes"], ["Default Room", room, setRoom, "Bldg A | Flr 2 | Rm 204"],
-    ["Today's registry (number of pupils)", registry, (v: string) => setRegistry(v.replace(/\D/g, "").slice(0, 3)), "30"],
-  ];
   return (
     <>
     <Modal title={initial ? "Edit Teacher" : "Add Teacher"} onClose={onClose}>
       <div className="space-y-3">
-        {fields.map(([label, val, set, ph]) => (
-          <label key={label} className="block text-xs font-semibold text-slate-600">{label}
-            <input value={val} onChange={(e) => set(e.target.value)} placeholder={ph} className="mt-1 min-h-12 w-full rounded-xl border border-slate-300 px-3 text-base font-normal outline-none focus:border-brand-500" />
+        <label className="block text-xs font-semibold text-slate-600">Name
+          <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Ms. Reyes"
+            className="mt-1 min-h-12 w-full rounded-xl border border-slate-300 px-3 text-base font-normal outline-none focus:border-brand-500" />
+        </label>
+        {initial ? (
+          <p className="text-xs text-slate-500">Email cannot be changed here. Ask the System Administrator to correct an email.</p>
+        ) : (
+          <label className="block text-xs font-semibold text-slate-600">Email
+            <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="name@deped.gov.ph"
+              aria-label="Teacher email" autoComplete="off"
+              className="mt-1 min-h-12 w-full rounded-xl border border-slate-300 px-3 text-base font-normal outline-none focus:border-brand-500" />
           </label>
-        ))}
-        <Select label="Grade" value={grade} onChange={(v) => { setGrade(v); setErr(""); }}
-          options={GRADE_OPTIONS} placeholder="Pick a grade" />
-        <Select label="Section" value={sec} onChange={(v) => { setSec(v); setErr(""); }}
-          placeholder="Pick a section"
-          options={sectionChoices.map((s) => ({ value: s, label: s }))} />
+        )}
+        <GradeSectionField
+          grade={grade}
+          section={sec}
+          knownSections={knownSections}
+          onGrade={(v) => { setGrade(v); setErr(""); }}
+          onSection={(v) => { setSec(v); setErr(""); }}
+        />
+        <RoomField value={room} onChange={setRoom} />
+        <RegistryField value={registry} onChange={setRegistry} label="Today's registry" />
         <Select label="Status" value={status} onChange={(v) => setStatus(v as "active" | "inactive")}
           options={[
             { value: "active", label: "On duty (can sign in and report)" },
@@ -118,6 +137,7 @@ function TeacherForm({ initial, onClose }: { initial: RosterEntry | null; onClos
 export default function RosterPanel() {
   const { roster, archiveTeacher } = useApp();
   const [editing, setEditing] = useState<RosterEntry | "new" | null>(null);
+  const [credential, setCredential] = useState<TempCredential | null>(null);
   const [archiving, setArchiving] = useState<RosterEntry | null>(null);
   const [reason, setReason] = useState("");
   // Grade chips + counts persist per screen for the session (as does the view).
@@ -248,7 +268,15 @@ export default function RosterPanel() {
       )}
       {shown.length === 0 && roster.length > 0 && <p className="text-center text-sm text-slate-500 py-8">No teachers match those filters.</p>}
       {roster.length === 0 && <p className="text-center text-sm text-slate-500 py-8">No teachers yet. Add one to get started.</p>}
-      {editing && <TeacherForm initial={editing === "new" ? null : editing} onClose={() => setEditing(null)} />}
+      {editing && (
+        <TeacherForm
+          initial={editing === "new" ? null : editing}
+          knownSections={roster.map((t) => t.section)}
+          onClose={() => setEditing(null)}
+          onCreated={setCredential}
+        />
+      )}
+      {credential && <TempCredentialModal title="Account created" credential={credential} onClose={() => setCredential(null)} />}
       {archiving && (
         <ConfirmModal title="Archive teacher?" confirmLabel="Archive teacher" onClose={() => setArchiving(null)}
           onConfirm={() => void archiveTeacher(archiving.id, reason.trim() || undefined)}

@@ -89,7 +89,10 @@ const TEACHER = {
 /** Click a rail (desktop sidebar) tab by its visible label. */
 function clickRail(label) {
   const btn = [...document.querySelectorAll('aside nav[aria-label="Sections"] button')]
-    .find((b) => (b.getAttribute("aria-label") || "").trim() === label);
+    .find((b) => {
+      const name = (b.getAttribute("aria-label") || "").trim();
+      return name === label || name.startsWith(`${label},`);
+    });
   assert.ok(btn, `rail tab "${label}" exists`);
   fireEvent.click(btn);
 }
@@ -196,10 +199,12 @@ test("My profile: empty name, registry 201 and a non-integer registry are reject
   assert.match(document.body.textContent, /Enter your name\./);
   assert.match(document.body.textContent, /Enter a whole number from 0 to 200\./);
 
+  // The shared registry field accepts whole digits only, so a decimal can never be typed.
   fireEvent.change(registryInput(), { target: { value: "12.5" } });
+  assert.equal(registryInput().value, "125", "the decimal point is dropped, not stored");
   await act(async () => { fireEvent.click(button("Save")); });
-  assert.equal(saves.length, 0, "no save call with a non-integer registry");
-  assert.match(document.body.textContent, /Enter a whole number from 0 to 200\./);
+  assert.equal(saves.length, 0, "no save call with an empty name");
+  assert.match(document.body.textContent, /Enter your name\./);
 
   // The steppers stay whole numbers and clamp at 200.
   fireEvent.change(registryInput(), { target: { value: "200" } });
@@ -229,27 +234,42 @@ test("My profile: Back guards unsaved changes, and leaves straight away when cle
   assert.ok(buttonContaining("My profile"), "left the screen after discarding");
 });
 
-test("the headcount card link opens the My profile screen", () => {
+const HC_ACCESS = {
+  required: true, visible: true, canRecord: true,
+  ownerSection: "Grade 3 - Sec A", sections: ["Grade 3 - Sec A"],
+  section: "Grade 3 - Sec A", registry: 30,
+};
+
+const headcountIncident = (over = {}) => ({
+  id: "INC-9", status: "SENT", category: "flood", categoryLabel: "Flooding/Natural",
+  subLabel: "Flash Flood", room: "Bldg A | Flr 1 | Rm 104", createdAt: Date.now() - 300_000,
+  linkedSection: "Grade 3 - Sec A", reporterId: "t2", reporterIds: ["t2"],
+  accountability: { status: "pending", reported: 0, total: 1 },
+  headcounts: [], overrideReasons: [], escalationLevel: 0, eta: null,
+  headcount: HC_ACCESS, ...over,
+});
+
+test("the Headcount page edits the expected pupils inline, never by opening My profile", async () => {
+  let saved = null;
   __resetCtx({
     user: { ...TEACHER },
-    incidents: [{
-      id: "INC-9", status: "SENT", category: "flood", categoryLabel: "Flooding/Natural",
-      subLabel: "Flash Flood", room: "Bldg A | Flr 2 | Rm 204",
-      linkedSection: "Grade 3 - Sec A", reporterId: "someone-else",
-      accountability: { status: "pending", reported: 0, total: 1 },
-      headcounts: [], overrideReasons: [], escalationLevel: 0, eta: null,
-    }],
+    headcountTasks: [headcountIncident()],
+    incidents: [],
+    updateRegistry: async (n) => { saved = n; },
   });
   render(React.createElement(App));
-  const link = [...document.querySelectorAll("button")].find((b) => (b.textContent || "").includes("Update today's registry"));
-  assert.ok(link, "the link is offered on the Report tab");
+  clickRail("Headcount");
+  const link = buttonContaining("Edit expected pupils");
+  assert.ok(link, "the inline action is offered on the dedicated Headcount page");
   fireEvent.click(link);
-  assert.ok(registryInput(), "the My profile screen opened");
-  assert.equal(document.querySelectorAll('[data-testid="back-bar"]').length, 1, "one back bar on the profile screen");
-  // Returning to Account later shows the menu, not the profile screen again.
-  fireEvent.click(document.querySelector('[data-testid="back-bar"] button'));
-  assert.ok(buttonContaining("My profile"), "back on the Account menu");
-  assert.equal(registryInput(), null, "the profile screen closed");
+  const dialog = document.querySelector("[data-expected-dialog]");
+  assert.ok(dialog, "a small dialog opens in place");
+  assert.match(dialog.textContent || "", /Pupils expected today/);
+  assert.match(dialog.textContent || "", /If pupils are absent today, set the number expected/);
+  fireEvent.change(dialog.querySelector('[aria-label="Pupils expected today"]'), { target: { value: "26" } });
+  await act(async () => { fireEvent.click(button("Save")); });
+  assert.equal(saved, 26, "it saves through the existing registry endpoint");
+  assert.equal(registryInput(), null, "My profile never opened");
 });
 
 test("the Callout renders no <p> inside a <p>", () => {
@@ -263,40 +283,20 @@ test("the Callout renders no <p> inside a <p>", () => {
   assert.equal(document.querySelectorAll("p p").length, 0, "no nested <p> anywhere on the About screen");
 });
 
-test("the headcount card shows Registry: N and links to My profile while today's registry is stale", () => {
-  const incident = {
-    id: "INC-1", status: "SENT", category: "flood", categoryLabel: "Flooding/Natural",
-    subLabel: "Flash Flood", room: "Bldg A | Flr 2 | Rm 204",
-    linkedSection: "Grade 3 - Sec A", reporterId: "someone-else",
-    accountability: { status: "pending", reported: 0, total: 1 },
-    headcounts: [], overrideReasons: [], escalationLevel: 0, eta: null,
-  };
-  let opened = 0;
+test("the Headcount card shows Registry: N and can be submitted while the registry is stale", async () => {
+  // registryUpdatedAt is null (never set today) → the registry link stays on offer.
+  __resetCtx({ user: { ...TEACHER }, headcountTasks: [headcountIncident()], incidents: [] });
+  render(React.createElement(App));
+  clickRail("Headcount");
 
-  // registryUpdatedAt is null (never set today) → the link is offered.
-  __resetCtx({ user: { ...TEACHER }, incidents: [incident] });
-  render(React.createElement(ReportView, { onOpenProfile: () => { opened += 1; } }));
-  assert.match(document.body.textContent, /Registry: 30/);
-  const link = [...document.querySelectorAll("button")].find((b) => (b.textContent || "").includes("Update today's registry"));
-  assert.ok(link, "the link shows while the registry was not set today");
-  fireEvent.click(link);
-  assert.equal(opened, 1, "the link opens the profile screen");
+  assert.match(document.body.textContent, /Pupils expected today: 30/, "the owner's expected count is shown");
+  assert.ok(buttonContaining("Edit expected pupils"), "the inline edit shows while the registry was not set today");
 
-  // The link never blocks submitting a headcount.
-  const panel = document.querySelector('[aria-label="Pupil headcount"]');
-  const input = panel.querySelector("input");
-  fireEvent.change(input, { target: { value: "30" } });
-  const confirm = [...panel.querySelectorAll("button")].find((b) => (b.textContent || "").trim() === "Confirm");
-  assert.ok(confirm && !confirm.disabled, "the headcount can still be submitted while the registry is stale");
-  cleanup();
-
-  // Set today → the line stays, the link goes away.
-  __resetCtx({ user: { ...TEACHER, registryUpdatedAt: Date.now() }, incidents: [incident] });
-  render(React.createElement(ReportView, { onOpenProfile: () => { opened += 10; } }));
-  assert.match(document.body.textContent, /Registry: 30/);
-  assert.equal(
-    [...document.querySelectorAll("button")].some((b) => (b.textContent || "").includes("Update today's registry")),
-    false,
-    "no link when today's registry is already set",
-  );
+  const input = document.querySelector('[aria-label="Pupils present in Flash Flood"]');
+  assert.ok(input, "the present-count stepper is on the card");
+  await act(async () => {
+    fireEvent.change(input, { target: { value: "30" } });
+    fireEvent.click(button("Submit"));
+  });
+  assert.match(document.body.textContent, /30 of 30 present/, "the count can be submitted while the registry is stale");
 });

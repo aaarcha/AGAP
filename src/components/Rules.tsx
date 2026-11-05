@@ -9,6 +9,7 @@ import { clockTime, fmtMs, plainOverride, startOfToday } from "../lib/format";
 import type { Incident, OrgResponse } from "../lib/types";
 import { Modal } from "./Modal";
 import { Select } from "./Select";
+import { locationName } from "./Location";
 
 const chip = "inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-bold";
 
@@ -104,22 +105,33 @@ export function HeadcountPanel({ inc, onOpenProfile }: { inc: Incident; onOpenPr
   const acc = inc.accountability;
   const isTeacher = user!.role === "teacher";
   const isPrincipal = user!.role === "principal";
-  const eligible = isTeacher
-    ? [inc.linkedSection === "ALL" || inc.linkedSection === user!.section ? user!.section! : ""].filter(Boolean)
-    : isPrincipal ? (inc.linkedSection === "ALL" ? sections : [inc.linkedSection]) : [];
-  const canRecord = open && eligible.length > 0 && !user!.role.startsWith("parent");
+  // The server answers "may this viewer count, and against which registry?" —
+  // the client never re-derives ownership from a section string.
+  const access = inc.headcount;
+  const ownSection = access?.section ?? null;
+  const eligible: string[] = isTeacher
+    ? (ownSection ? [ownSection] : [])
+    : isPrincipal
+      ? (access?.sections ?? (inc.linkedSection === "ALL" ? sections : inc.linkedSection ? [inc.linkedSection] : []))
+      : [];
+  const canRecord = open && Boolean(isPrincipal ? eligible.length > 0 : access?.canRecord);
   const [section, setSection] = useState(eligible[0] ?? "");
   const [present, setPresent] = useState("");
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
-  const registry = isTeacher ? user!.registry : roster.find((r) => r.section === section)?.registry;
-  const mine = inc.headcounts.find((h) => h.section === (section || user!.section));
+  // The OWNER's registry, not the signed-in reporter's.
+  const registry = isTeacher ? (access?.registry ?? user!.registry) : roster.find((r) => r.section === section)?.registry;
+  const countSection = isTeacher ? ownSection : (section || user!.section);
+  const mine = inc.headcounts.find((h) => h.section === countSection);
   // "Registry: N" + a link when today's registry was never set or was set on an earlier day.
   const registryStale =
     user!.registryUpdatedAt == null || user!.registryUpdatedAt < startOfToday(Date.now());
 
   if (acc.status === "not_required") return null;
-  if (!canRecord && inc.headcounts.length === 0 && !open && user!.role !== "parent") return null;
+  // A reporter who is not the owner of the class sees NO headcount UI at all,
+  // not even read-only. Only the owner (and the Principal) gets the card.
+  if (isTeacher && !access?.visible) return null;
+  if (!isTeacher && !isPrincipal && user!.role !== "parent") return null;
 
   async function save() {
     setBusy(true); setErr("");
@@ -204,7 +216,7 @@ export function AckModal({ inc, onClose, onConfirm }: { inc: Incident; onClose: 
   const valid = dist > 0 && dist <= 50;
   return (
     <Modal title="Acknowledge & dispatch" onClose={onClose}>
-      <p className="mb-3 text-sm text-slate-600">{inc.subLabel} · {inc.room}</p>
+      <p className="mb-3 text-sm text-slate-600">{inc.subLabel} · {locationName(inc.room)}</p>
       <fieldset className="space-y-1.5">
         <legend className="mb-1 text-xs font-bold uppercase tracking-wide text-slate-500">How is the responder travelling?</legend>
         {modesOrdered.map((m) => {

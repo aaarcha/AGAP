@@ -173,6 +173,15 @@ function clickExact(label) {
   return btn;
 }
 
+/** A tab (the records tabs or an archive sub-tab), by its visible label. */
+function clickTab(label) {
+  const btn = [...document.querySelectorAll('[role="tab"]')]
+    .find((b) => (b.textContent || "").trim().startsWith(label));
+  assert.ok(btn, `tab "${label}" exists`);
+  fireEvent.click(btn);
+  return btn;
+}
+
 function clickFolder(label) {
   const btn = [...document.querySelectorAll("[data-folder-label]")]
     .find((b) => b.getAttribute("data-folder-label") === label);
@@ -185,7 +194,7 @@ async function openRecords() {
   clickRail("More");
   await waitFor(() => assert.ok(text().includes("Incidents & Records"), "the More row exists"));
   clickButton("Incidents & Records");
-  await waitFor(() => assert.ok(text().includes("Real Incidents"), "the records view opened"));
+  await waitFor(() => assert.ok(text().includes("Incidents"), "the records view opened"));
 }
 
 /** Drill the explorer down to the zone that holds the record rows. */
@@ -245,9 +254,9 @@ test("Principal: System Archives is split into ticket and account archives, and 
   render(React.createElement(App));
   await openRecords();
 
-  clickButton("System Archives");
-  await waitFor(() => assert.ok(text().includes("Archived tickets"), "the ticket archive is the default section"));
-  assert.equal(text().includes("Archived accounts"), false,
+  clickTab("Archive");
+  await waitFor(() => assert.ok(text().includes("Tickets"), "the ticket archive is the default section"));
+  assert.equal(text().includes("Accounts"), false,
     "the account archive is the Super Admin's and is not offered to the Principal");
   assert.ok(text().includes("Electrical fire"), "archived tickets are listed");
 
@@ -269,19 +278,41 @@ test("Super Admin: the account archive is its own section, and purge is retentio
   await waitFor(() => assert.ok(text().includes("Total users")), "the Users page rendered");
   await openRecords();
 
-  clickButton("System Archives");
-  await waitFor(() => assert.ok(text().includes("Archived tickets"), "the ticket archive is the default section"));
-  assert.ok(text().includes("Archived accounts"), "the account archive has its own tab");
+  clickTab("Archive");
+  await waitFor(() => assert.ok(text().includes("Tickets"), "the ticket archive is the default section"));
+  assert.ok(text().includes("Accounts"), "the account archive has its own sub-tab");
 
-  // Outside the retention period the purge is offered but disabled.
-  const young = document.querySelector('[aria-label="Purge record: Electrical fire"]');
-  assert.ok(young, "the Admin sees a purge action");
-  assert.equal(young.disabled, true, "a record inside its retention period cannot be purged yet");
+  // No destructive action sits on an archive list row.
+  assert.equal(document.querySelector('[aria-label="Purge record: Electrical fire"]'), null,
+    "no purge action on the archive rows");
+  assert.equal(document.querySelectorAll('[data-archive-row] button[aria-label^="Restore record:"]').length, 0,
+    "the Admin does not restore tickets");
 
-  const older = document.querySelector('[aria-label="Purge record: Old lab spill"]');
-  assert.ok(older, "the eligible record has a purge action");
-  assert.equal(older.disabled, false, "an eligible record can be purged");
-  fireEvent.click(older);
+  // The purge lives in the record detail, gated by the record's retention.
+  const openArchived = (label) => {
+    const row = [...document.querySelectorAll('[data-archive-row] button[aria-label^="View archived record:"]')]
+      .find((b) => (b.getAttribute("aria-label") || "").includes(label));
+    assert.ok(row, `archived row "${label}" exists`);
+    fireEvent.click(row);
+  };
+  const purgeButton = () => {
+    const dialog = document.querySelector('[role="dialog"]');
+    assert.ok(dialog, "the record detail is open");
+    return [...dialog.querySelectorAll("button")]
+      .find((b) => (b.textContent || "").includes("Purge record"));
+  };
+
+  // Inside the retention period the purge is offered but disabled.
+  openArchived("Electrical fire");
+  await waitFor(() => assert.ok(purgeButton(), "the detail offers a purge action"));
+  assert.equal(purgeButton().disabled, true, "a record inside its retention period cannot be purged yet");
+  fireEvent.click(document.querySelector('[role="dialog"] button[aria-label="Close"]'));
+  await waitFor(() => assert.equal(document.querySelector('[role="dialog"]'), null, "the detail closed"));
+
+  openArchived("Old lab spill");
+  await waitFor(() => assert.ok(purgeButton(), "the eligible record has a purge action"));
+  assert.equal(purgeButton().disabled, false, "an eligible record can be purged");
+  fireEvent.click(purgeButton());
 
   await waitFor(() => assert.ok(text().includes("Purge archived record"), "the typed confirmation opens"));
   const inputs = document.querySelectorAll('[role="dialog"] input');
@@ -299,4 +330,37 @@ test("Super Admin: the account archive is its own section, and purge is retentio
     assert.equal(post.body.confirm, "PURGE", "the purge is confirmed by typing PURGE");
     assert.equal(post.body.reason, "Retention period passed");
   });
+});
+
+test("Drill records: a card per drill, metric tiles only for real data, no dash tiles", async () => {
+  const saved = RECORDS.drills.past;
+  RECORDS.drills.past = [
+    { id: "d1", label: "Fire drill", startedAt: NOW - 3 * HOUR, endedAt: NOW - 2 * HOUR, incidents: 0,
+      avgToReportMs: null, avgToAckMs: null, avgToOnSiteMs: null, avgToHeadcountMs: null, avgInteractions: null, rows: [] },
+    { id: "d2", label: "Earthquake drill", startedAt: NOW - 30 * HOUR, endedAt: NOW - 29 * HOUR, incidents: 1,
+      avgToReportMs: 45_000, avgToAckMs: null, avgToOnSiteMs: null, avgToHeadcountMs: null, avgInteractions: null,
+      rows: [{ id: "r1", subLabel: "Electrical fire", toReportMs: 45_000, toAckMs: null, toOnSiteMs: null, toHeadcountMs: null, interactions: 3 }] },
+  ];
+  try {
+    __resetCtx({ user: USERS.principal });
+    render(React.createElement(App));
+    await openRecords();
+    clickTab("Drills");
+    await waitFor(() => assert.ok(text().includes("Fire drill")));
+
+    const cards = [...document.querySelectorAll("[data-drill-card]")];
+    assert.equal(cards.length, 2, "one card per past drill");
+
+    const empty = cards.find((c) => c.textContent.includes("Fire drill"));
+    assert.ok(empty.textContent.includes("No reports were filed in this drill."), "a ticketless drill says so in words");
+    assert.equal(empty.querySelectorAll("[data-drill-metric]").length, 0, "no tiles of dashes");
+    assert.equal(empty.textContent.includes("—"), false, "no dash placeholder anywhere");
+
+    const withData = cards.find((c) => c.textContent.includes("Earthquake drill"));
+    assert.equal(withData.querySelectorAll("[data-drill-metric]").length, 1, "only metrics with data get a tile");
+    assert.ok(withData.textContent.includes("45 s"), "the real metric is shown");
+    assert.ok(withData.querySelector("[data-drill-tickets]"), "per-ticket metrics are an accordion");
+  } finally {
+    RECORDS.drills.past = saved;
+  }
 });

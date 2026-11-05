@@ -1,6 +1,7 @@
 import { Users } from "lucide-react";
 import { useApp } from "../lib/store";
 import { PageFlow } from "../components/PageShell";
+import { locationName } from "../components/Location";
 
 /**
  * Headcount accountability has its own feed: Safety only carries the switches
@@ -38,7 +39,7 @@ export default function HeadcountView() {
               <div className="flex items-start justify-between gap-2">
                 <div className="min-w-0">
                   <p className="truncate text-sm font-bold text-slate-800">{i.categoryLabel} — {i.subLabel}</p>
-                  <p className="truncate text-xs text-slate-500">📍 {i.room} · {i.linkedSection === "ALL" ? "whole school" : i.linkedSection}</p>
+                  <p className="truncate text-xs text-slate-500">📍 {locationName(i.room)} · {i.linkedSection === "ALL" ? "whole school" : i.linkedSection}</p>
                 </div>
                 <span className={`shrink-0 rounded-full px-2 py-0.5 text-[11px] font-bold ${tone[i.accountability.status] ?? tone.pending}`}>
                   {label(i.accountability.status)}

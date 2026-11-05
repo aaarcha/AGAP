@@ -152,14 +152,12 @@ test("archive: active tickets are rejected, Principal archives and restores, and
   assert.equal(forTeacher.json.total, 1, "only the teacher's own archived reports");
   assert.equal(forTeacher.json.items[0].id, open.id);
 
-  // 7. …a Parent gets nothing but a 403, while a Responder can read the records
-  //    of every ticket they work with (read-only, reporter redacted).
+  // 7. …a Parent gets nothing but a 403, while a Responder reads only the
+  //    records their own organization took part in (read-only, reporter redacted).
   assert.equal((await s.call("GET", "/api/incidents/archive", { token: parent })).status, 403, "parent cannot read the archive");
   const forResponder = await s.call("GET", "/api/incidents/archive", { token: responder });
   assert.equal(forResponder.status, 200, JSON.stringify(forResponder.json));
-  assert.equal(forResponder.json.total, 2, "every archived ticket");
-  assert.equal(forResponder.json.items[0].readOnly, true, "read-only for responders too");
-  assert.equal(forResponder.json.items[0].reporterName, undefined, "the reporter stays a role label");
+  assert.equal(forResponder.json.total, 0, "nothing this responder org never worked");
 
   // 8. restore puts it back in the live view for everyone
   const restored = await s.call("POST", `/api/incidents/${open.id}/restore`, { token: principal, body: {} });
@@ -170,6 +168,18 @@ test("archive: active tickets are rejected, Principal archives and restores, and
   assert.equal((await s.call("GET", "/api/incidents/archive", { token: principal })).json.total, 1, "the other ticket stays archived");
   // restoring twice is refused
   assert.equal((await s.call("POST", `/api/incidents/${open.id}/restore`, { token: principal, body: {} })).status, 400);
+
+  // 9. the responder's archive is the archive of its own work.
+  const worked = (await s.call("POST", "/api/incidents", { token: other, body: report({ categoryId: "medical", subId: "heatstroke" }) })).json.incident;
+  await s.call("POST", `/api/incidents/${worked.id}/ack`, { token: responder, body: {} });
+  await s.call("POST", `/api/incidents/${worked.id}/onsite`, { token: responder, body: {} });
+  await s.call("POST", `/api/incidents/${worked.id}/resolve`, { token: responder, body: {} });
+  await s.call("POST", `/api/incidents/${worked.id}/archive`, { token: principal, body: {} });
+  const workedArchive = (await s.call("GET", "/api/incidents/archive", { token: responder })).json;
+  assert.equal(workedArchive.total, 1, "the work this responder org took part in");
+  assert.equal(workedArchive.items[0].id, worked.id);
+  assert.equal(workedArchive.items[0].readOnly, true, "read-only for responders too");
+  assert.equal(workedArchive.items[0].reporterName, undefined, "the reporter stays a role label");
 
   await s.close();
 });
@@ -318,7 +328,7 @@ test("the Principal archives a teacher from the roster, and the entry stays read
 });
 
 // ---------------------------------------------------------------- hide
-test("hide: Teacher and Parent can hide and unhide closed records; the record itself never changes", async () => {
+test("hide: Teacher, Parent and Responder can hide and unhide closed records; the record itself never changes", async () => {
   const s = await boot();
   const teacher = await s.login("teacher", "t1");
   const otherTeacher = await s.login("teacher", "t2");
@@ -336,10 +346,15 @@ test("hide: Teacher and Parent can hide and unhide closed records; the record it
 
   await s.call("POST", `/api/incidents/${open.id}/resolve`, { token: principal, body: {} });
 
-  // responders have no hide at all
-  assert.equal((await s.call("POST", "/api/me/hidden", { token: responder, body: { incidentId: open.id, hidden: true } })).status, 403);
-  // a teacher can only hide their own reports
-  assert.equal((await s.call("POST", "/api/me/hidden", { token: otherTeacher, body: { incidentId: open.id, hidden: true } })).status, 403);
+  // responders hide their own list, independently of everyone else
+  assert.equal((await s.call("POST", "/api/me/hidden", { token: responder, body: { incidentId: open.id, hidden: true } })).status, 200);
+  assert.equal((await s.call("GET", "/api/state", { token: responder })).json.hidden.length, 1, "in the responder's Hidden list");
+  assert.equal((await s.call("GET", "/api/state", { token: principal })).json.incidents.length, 1, "the ticket itself is untouched");
+  assert.equal((await s.call("POST", "/api/me/hidden", { token: responder, body: { incidentId: open.id, hidden: false } })).status, 200, "unhide works too");
+  assert.equal((await s.call("GET", "/api/state", { token: responder })).json.incidents.length, 1);
+  // a teacher can only hide their own reports: one they cannot see is a 404,
+  // so hiding never confirms that a ticket exists.
+  assert.equal((await s.call("POST", "/api/me/hidden", { token: otherTeacher, body: { incidentId: open.id, hidden: true } })).status, 404);
 
   // teacher hides it: gone from their list, still there for everyone else
   assert.equal((await s.call("POST", "/api/me/hidden", { token: teacher, body: { incidentId: open.id, hidden: true } })).status, 200);
@@ -350,6 +365,7 @@ test("hide: Teacher and Parent can hide and unhide closed records; the record it
   for (const [name, tok] of [["principal", principal], ["responder", responder], ["parent", parent]]) {
     assert.equal((await s.call("GET", "/api/state", { token: tok })).json.incidents.length, 1, `${name} still sees it`);
   }
+  assert.equal((await s.call("GET", "/api/state", { token: responder })).json.hidden.length, 0, "the responder unhid it earlier");
   // a different section never saw it at all (the ticket is scoped to Grade 3 - Sec A)
   assert.equal((await s.call("GET", "/api/state", { token: otherTeacher })).json.incidents.length, 0);
   const stillThere = (await s.call("GET", "/api/state", { token: principal })).json.incidents[0];

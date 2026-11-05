@@ -224,6 +224,15 @@ function clickButton(label) {
   return btn;
 }
 
+/** A tab (the records tabs or an archive sub-tab), by its visible label. */
+function clickTab(label) {
+  const btn = [...document.querySelectorAll('[role="tab"]')]
+    .find((b) => (b.textContent || "").trim().startsWith(label));
+  assert.ok(btn, `tab "${label}" exists`);
+  fireEvent.click(btn);
+  return btn;
+}
+
 /** Click a folder card in the records browser (not a filter chip of the same name). */
 function clickFolder(label) {
   const btn = [...document.querySelectorAll("[data-folder-label]")]
@@ -295,11 +304,11 @@ test("More → Incidents & Records opens the consolidated, read-only records vie
   await waitFor(() => assert.ok(text().includes("Incidents & Records")));
   clickButton("Incidents & Records");
 
-  await waitFor(() => assert.ok(text().includes("Real Incidents"), "the consolidated records view opened"));
+  await waitFor(() => assert.ok(text().includes("Incidents"), "the consolidated records view opened"));
   assert.ok(fetched.some((u) => u.includes("/api/records")), "the records endpoint loads the view");
 
-  clickButton("System Archives");
-  await waitFor(() => assert.ok(text().includes("Archived tickets"), "the archive tab is shown"));
+  clickTab("Archive");
+  await waitFor(() => assert.ok(text().includes("Tickets"), "the archive tab is shown"));
   assert.ok(text().includes("Electrical fire"), "the archived record is listed");
   assert.ok(text().includes("reported by Teacher"), "the reporter is a role label, not a name");
   assert.ok(text().includes("Read-only"), "archived records are read-only");
@@ -316,16 +325,16 @@ test("leaving More while the records view is open closes it instead of leaving i
 
   clickRail("More");
   clickButton("Incidents & Records");
-  await waitFor(() => assert.ok(text().includes("Real Incidents"), "the records view opened"));
+  await waitFor(() => assert.ok(text().includes("Incidents"), "the records view opened"));
 
   clickRail("Analytics");
   await waitFor(() => assert.ok(text().includes("Aggregated and anonymised"), "the Analytics page rendered"));
-  assert.equal(text().includes("Real Incidents"), false, "the records view does not stay on the Analytics tab");
+  assert.equal(document.querySelector("#records-tab-real"), null, "the records view does not stay on the Analytics tab");
 
   // Returning to More shows the menu, not the old sub-screen.
   clickRail("More");
   await waitFor(() => assert.ok(text().includes("School year"), "back on the More menu"));
-  assert.equal(text().includes("Real Incidents"), false, "the records view was closed by leaving More");
+  assert.equal(document.querySelector("#records-tab-real"), null, "the records view was closed by leaving More");
 });
 
 test("About ASPIRE holds the expandable retention & purge rules, off the landing", async () => {
@@ -372,13 +381,14 @@ test("Principal: More → Incidents & Records opens the read-only three-tab view
   await waitFor(() => assert.ok(text().includes("Incidents & Records"), "the More entry exists"));
   clickButton("Incidents & Records");
 
-  await waitFor(() => assert.ok(text().includes("Real Incidents"), "the records view opened on Real Incidents"));
-  assert.ok(text().includes("Drill Records"));
-  assert.ok(text().includes("System Archives"));
+  await waitFor(() => assert.ok(text().includes("Incidents"), "the records view opened on Real Incidents"));
+  assert.ok(document.querySelector("#records-tab-real"), "the Incidents tab exists");
+  assert.ok(document.querySelector("#records-tab-drills"), "the Drills tab exists");
+  assert.ok(document.querySelector("#records-tab-archives"), "the Archive tab exists");
   assert.ok(fetched.some((u) => u.includes("/api/records")), "the read-only records endpoint loads the view");
 
-  clickButton("System Archives");
-  await waitFor(() => assert.ok(text().includes("Archived tickets"), "the archive tab is shown"));
+  clickTab("Archive");
+  await waitFor(() => assert.ok(text().includes("Tickets"), "the archive tab is shown"));
   assert.ok(text().includes("Electrical fire"));
   assert.ok(text().includes("reported by Teacher"), "the reporter is a role label, not a name");
   assert.ok(text().includes("Read-only"), "archived records are read-only");
@@ -394,7 +404,7 @@ test("Principal: the records explorer drills Records → School Year → Month �
   clickRail("More");
   await waitFor(() => assert.ok(text().includes("Incidents & Records")));
   clickButton("Incidents & Records");
-  await waitFor(() => assert.ok(text().includes("Real Incidents"), "the records view opened on Real Incidents"));
+  await waitFor(() => assert.ok(text().includes("Incidents"), "the records view opened on Real Incidents"));
   assert.equal(text().includes("Spatial zone"), false, "the heavy charts are not on the records page");
 
   clickFolder(REC_SY);
@@ -422,13 +432,13 @@ test("Admin: More → Incidents & Records is read-only, accounts included", asyn
   await waitFor(() => assert.ok(text().includes("Incidents & Records")));
   clickButton("Incidents & Records");
 
-  await waitFor(() => assert.ok(text().includes("Real Incidents"), "the read-only records view opened"));
+  await waitFor(() => assert.ok(text().includes("Incidents"), "the read-only records view opened"));
   assert.ok(fetched.some((u) => u.includes("/api/records")));
 
   // Two dedicated archives: tickets first, accounts on their own sub-tab.
-  clickButton("System Archives");
-  await waitFor(() => assert.ok(text().includes("Archived tickets"), "the ticket archive is shown first"));
-  clickButton("Archived accounts");
+  clickTab("Archive");
+  await waitFor(() => assert.ok(text().includes("Tickets"), "the ticket archive is shown first"));
+  clickTab("Accounts");
   await waitFor(() => assert.ok(text().includes("Mr. Dizon"), "the Admin sees the account archive"));
   assert.ok(text().includes("Purge eligible"));
   assert.ok(text().includes("Manage in Users"), "account mediation points at Users");
@@ -452,7 +462,7 @@ test("the Super Admin can assign a responder's organization on the Users page", 
   );
 
   clickButton("Edit");
-  await waitFor(() => assert.ok(text().includes("Edit account"), "the edit dialog opened"));
+  await waitFor(() => assert.ok(text().includes("Edit user"), "the edit dialog opened"));
   assert.equal(document.querySelector('input[aria-label="Account name"]').value, "Brgy. Tanod");
 
   const trigger = document.querySelector('[role="dialog"] [aria-haspopup="listbox"]');
@@ -519,31 +529,89 @@ test("the User Detail screen groups identity, notices, information and actions",
     "the data actions share their own row");
 });
 
-test("provisioning a Parent/PTA offers the full section list A, B, C", async () => {
+test("provisioning a Teacher: all four fields, Create gated, section/room/registry sent", async () => {
   __resetCtx({ user: USERS.super_admin });
   render(React.createElement(App));
   await waitFor(() => assert.ok(text().includes("Users (4)")), "the roster loaded");
 
   clickButton("Provision");
   await waitFor(() => assert.ok(text().includes("Provision new account")));
-  const triggers = () => [...document.querySelectorAll('[role="dialog"] [aria-haspopup="listbox"]')];
+  const modal = () => document.querySelector('[role="dialog"]');
 
-  // Role → Parent/PTA reveals Grade and Section.
-  fireEvent.click(triggers()[0]);
+  // Teacher is the default role: Grade chips, Section, Default room, Registry.
+  const grades = [...modal().querySelectorAll('[role="radiogroup"][aria-label="Grade"] [role="radio"]')];
+  assert.deepEqual(grades.map((g) => g.textContent.trim()), ["Kinder", "Grade 1", "Grade 2", "Grade 3", "Grade 4", "Grade 5", "Grade 6"]);
+  assert.ok(modal().querySelector('input[aria-label="Section"]'), "Section is free text");
+  assert.equal(modal().querySelector('input[aria-label="Section"]').getAttribute("placeholder"), "A");
+  assert.ok(modal().querySelector('button[aria-label="Default room"]'), "Default room is a field");
+  assert.ok(modal().querySelector('input[aria-label="Today\'s registry"]'), "Today's registry is optional");
+
+  const create = () => [...modal().querySelectorAll("button")].find((b) => (b.textContent || "").trim() === "Create account");
+  fireEvent.change(modal().querySelector('input[placeholder="user@example.com"]'), { target: { value: "new.teacher@school.test" } });
+  fireEvent.change(modal().querySelector('input[placeholder="Juan Dela Cruz"]'), { target: { value: "Ms. Nueva" } });
+  assert.equal(create().disabled, true, "Create stays disabled until grade, section and room are set");
+
+  fireEvent.click(grades.find((g) => g.textContent.trim() === "Grade 3"));
+  assert.equal(create().disabled, true, "grade alone is not enough");
+  fireEvent.change(modal().querySelector('input[aria-label="Section"]'), { target: { value: "Sec A" } });
+  assert.equal(create().disabled, true, "room is still missing");
+
+  fireEvent.click(modal().querySelector('button[aria-label="Default room"]'));
+  await waitFor(() => assert.ok(document.querySelector('[role="dialog"]') && text().includes("Floor 1"), "the room picker opened"));
+  fireEvent.click([...document.querySelectorAll("button")].find((b) => (b.textContent || "").trim() === "Floor 2"));
+  fireEvent.click([...document.querySelectorAll("button")].find((b) => (b.textContent || "").trim() === "Rm 204"));
+  await waitFor(() => assert.ok(!text().includes("Common areas"), "rooms-only mode: no common areas"));
+  assert.ok(text().includes("Bldg A | Flr 2 | Rm 204"), "the field shows the chosen legacy room");
+  assert.equal(create().disabled, false, "Create unlocks once grade, section and room are valid");
+
+  fireEvent.change(modal().querySelector('input[aria-label="Today\'s registry"]'), { target: { value: "28" } });
+  fireEvent.click(create());
+  await waitFor(() => assert.ok(calls.some((c) => c.method === "POST" && c.url.includes("/api/admin/accounts")), "the create call was sent"));
+  const sent = calls.findLast((c) => c.method === "POST" && c.url.includes("/api/admin/accounts")).body;
+  assert.equal(sent.role, "teacher");
+  assert.equal(sent.section, "Grade 3 - Sec A", "the section is composed from grade + name");
+  assert.equal(sent.room, "Bldg A | Flr 2 | Rm 204", "the legacy room string is sent");
+  assert.equal(sent.registry, 28, "today's registry is sent");
+});
+
+test("provisioning a Parent/PTA shows Grade and Section only", async () => {
+  __resetCtx({ user: USERS.super_admin });
+  render(React.createElement(App));
+  await waitFor(() => assert.ok(text().includes("Users (4)")), "the roster loaded");
+
+  clickButton("Provision");
+  await waitFor(() => assert.ok(text().includes("Provision new account")));
+  const modal = () => document.querySelector('[role="dialog"]');
+
+  // Role → Parent/PTA reveals Grade and Section, but no room or registry.
+  fireEvent.click(modal().querySelector('[aria-haspopup="listbox"]'));
   const parent = [...document.querySelectorAll('[role="option"]')].find((o) => (o.textContent || "").includes("Parent / PTA"));
   assert.ok(parent, "the Parent/PTA role is offered");
   fireEvent.click(parent);
-  await waitFor(() => assert.equal(triggers().length, 3, "role, grade and section triggers"));
+  await waitFor(() => assert.ok(modal().querySelector('[role="radiogroup"][aria-label="Grade"]'), "the grade chips appear"));
+  assert.ok(modal().querySelector('input[aria-label="Section"]'), "Section is free text");
+  assert.equal(modal().querySelector('button[aria-label="Default room"]'), null, "no room field for a parent");
+  assert.equal(modal().querySelector('input[aria-label="Today\'s registry"]'), null, "no registry field for a parent");
 
-  // Section is a dropdown from the first moment, and every section is listed.
-  assert.equal(triggers()[2].disabled, false, "Section is selectable without a grade");
-  fireEvent.click(triggers()[2]);
-  const sections = [...document.querySelectorAll('[role="option"]')].map((o) => (o.textContent || "").trim());
-  assert.deepEqual(sections, ["A", "B", "C"], "A, B and C are all offered");
-  // No free-text section field remains in the provision form.
-  assert.equal(document.querySelector('input[aria-label="Section"]'), null);
-  assert.equal([...document.querySelectorAll("input")].some((i) => i.getAttribute("placeholder") === "Sec A"), false);
+  const create = () => [...modal().querySelectorAll("button")].find((b) => (b.textContent || "").trim() === "Create account");
+  fireEvent.change(modal().querySelector('input[placeholder="user@example.com"]'), { target: { value: "pta2@test.test" } });
+  fireEvent.change(modal().querySelector('input[placeholder="Juan Dela Cruz"]'), { target: { value: "PTA Grade 2" } });
+  assert.equal(create().disabled, true, "grade and section are required");
+  fireEvent.click([...modal().querySelectorAll('[role="radiogroup"][aria-label="Grade"] [role="radio"]')].find((g) => g.textContent.trim() === "Grade 2"));
+  fireEvent.change(modal().querySelector('input[aria-label="Section"]'), { target: { value: "B" } });
+  assert.equal(create().disabled, false);
+  fireEvent.click(create());
+  await waitFor(() => assert.ok(calls.some((c) => c.method === "POST" && c.url.includes("/api/admin/accounts"))));
+  const sent = calls.findLast((c) => c.method === "POST" && c.url.includes("/api/admin/accounts")).body;
+  assert.equal(sent.section, "Grade 2 - Sec B");
+  assert.equal(sent.room, undefined, "no room for a parent");
 });
+
+const settingsTab = (label) => {
+  const tab = [...document.querySelectorAll('[role="tab"]')].find((t) => (t.textContent || "").trim() === label);
+  assert.ok(tab, `settings tab "${label}" exists`);
+  return tab;
+};
 
 test("System Settings calls an unvalidated configuration what it is: Default values", async () => {
   CONFIG_VERSIONS = [configVersion()];
@@ -552,17 +620,20 @@ test("System Settings calls an unvalidated configuration what it is: Default val
 
   await waitFor(() => assert.ok(text().includes("Total users")));
   clickRail("System Settings");
-  await waitFor(() => assert.ok(text().includes("Active configuration"), `the configuration loaded: ${text().slice(0, 200)}`));
+  await waitFor(() => assert.ok(text().includes("System Settings") && text().includes("Scoring"),
+    `the configuration loaded: ${text().slice(0, 200)}`));
 
   const shown = text();
-  // The banner at the top, and the same wording under the urgency model.
-  assert.equal(shown.split("Default values. Not yet validated by the Expert Panel.").length - 1, 2,
-    "the default-values wording appears in the banner and under the model");
-  // The old, vague wording is gone everywhere.
+  assert.ok(shown.includes("Default values"), "the status chip says Default values");
+  assert.ok(shown.includes("Record validation"), "the inline line offers Record validation");
+  assert.equal(shown.includes("Default values. Not yet validated by the Expert Panel."), false,
+    "the long default-values banner is gone");
   assert.equal(/panel not set/i.test(shown), false, "no \"panel not set\"");
-  assert.equal(/validation: not yet validated/i.test(shown), false, "no \"not yet validated\" as a value");
-  // The version history says what the version is, not what is missing.
-  assert.ok(shown.includes("Default values"), "the history row reads Default values");
+
+  // The version history lives on its own tab and says what the version is.
+  fireEvent.click(settingsTab("Versions"));
+  await waitFor(() => assert.ok(text().includes("v1")));
+  assert.ok(text().includes("Default values"), "the history row reads Default values");
 });
 
 test("System Settings credits the panel that validated the active version", async () => {
@@ -578,18 +649,22 @@ test("System Settings credits the panel that validated the active version", asyn
 
   await waitFor(() => assert.ok(text().includes("Total users")));
   clickRail("System Settings");
-  await waitFor(() => assert.ok(text().includes("Active configuration")));
+  await waitFor(() => assert.ok(text().includes("System Settings") && text().includes("Scoring")));
 
   const shown = text();
-  assert.ok(shown.includes("Validated 2026-10-01 by AHP Expert Panel, SY 2026-2027"), `the model credits the panel: ${shown.slice(0, 300)}`);
+  assert.ok(shown.includes("Validated 2026-10-01 by AHP Expert Panel, SY 2026-2027"), `the inline line credits the panel: ${shown.slice(0, 300)}`);
   assert.equal(shown.includes("Not yet validated by the Expert Panel"), false,
     "no default-values banner once the active version is validated");
+
   // History: the seeded version reads Default values, the validated one its date and source.
-  assert.ok(shown.includes("Default values"), "v1 is Default values");
-  assert.ok(shown.includes("Validated 2026-10-01 · AHP Expert Panel, SY 2026-2027"), "v2 names its date and source");
-  assert.equal(/panel not set/i.test(shown), false);
+  fireEvent.click(settingsTab("Versions"));
+  await waitFor(() => assert.ok(text().includes("v2"), "the versions timeline rendered"));
+  assert.ok(text().includes("Default values"), "v1 is Default values");
+  assert.ok(text().includes("Validated 2026-10-01 · AHP Expert Panel, SY 2026-2027"), "v2 names its date and source");
+  assert.equal(/panel not set/i.test(text()), false);
 
   // The editor keeps the field next to the date, and says what it is for.
+  fireEvent.click(settingsTab("Scoring"));
   clickButton("Edit");
   await waitFor(() => assert.ok(document.querySelector('input[aria-label="Panel or source"]'), "the panel source field exists"));
   const ref = document.querySelector('input[aria-label="Panel or source"]');

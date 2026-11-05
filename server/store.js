@@ -20,7 +20,7 @@ export const SEED_ROSTER = [
 function freshModes() {
   return {
     hazard: { active: false, kind: "flood", note: "", since: null, by: null },
-    drill: { active: false, id: null, label: "", startedAt: null, by: null },
+    drill: { active: false, id: null, label: "", startedAt: null, by: null, scope: "school" },
     route: { status: "passable", note: "", updatedAt: null, by: null },
   };
 }

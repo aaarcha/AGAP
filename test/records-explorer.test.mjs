@@ -190,3 +190,20 @@ test("no label in the explorer uses a truncation class", () => {
   search("Electrical");
   assert.deepEqual([...document.querySelectorAll('[class*="truncate"]')].map((n) => n.className), []);
 });
+
+test("the root is a single Records breadcrumb and the folder legend is always visible", () => {
+  render(React.createElement(Explorer, { records: RECORDS }));
+  assert.deepEqual([...document.querySelectorAll("[data-crumb]")].map((c) => c.getAttribute("data-crumb")), ["Records"]);
+  assert.equal(document.querySelector("[data-folder-title]"), null, "no back card at the root");
+
+  const legend = cards()[0].querySelector("[data-mix-legend]");
+  assert.ok(legend, "the folder legend is rendered");
+  assert.equal(/hidden/.test(legend.className), false, "the legend is visible without hovering");
+  assert.match(document.querySelector("[data-recent]").className, /brand/, "Recent is emphasised");
+
+  search("Electrical");
+  const row = document.querySelector("[data-record-row]");
+  assert.ok(row.querySelector("[data-status-chip]"), "the row carries a status chip");
+  assert.ok(row.textContent.includes("Building A"), "the row shows the friendly location");
+  assert.ok(!row.textContent.includes("reassigned from"), "the stored origin text is never shown");
+});

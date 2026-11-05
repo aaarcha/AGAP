@@ -13,13 +13,14 @@ import {
   Users,
 } from "lucide-react";
 
-export type NavTab<T extends string> = { id: T; label: string; icon: ElementType };
+export type NavTab<T extends string> = { id: T; label: string; icon: ElementType; /** Pending count shown as a badge. */ badge?: number };
 
 // One tab set per role. A signed-in user only ever sees its own set.
-export type TeacherTab = "report" | "reports" | "account";
+export type TeacherTab = "report" | "reports" | "headcount" | "account";
 export const TEACHER_TABS: NavTab<TeacherTab>[] = [
   { id: "report", label: "Report", icon: Siren },
   { id: "reports", label: "My Reports", icon: HistoryIcon },
+  { id: "headcount", label: "Headcount", icon: Users },
   { id: "account", label: "Account", icon: User },
 ];
 

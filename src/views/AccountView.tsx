@@ -1,18 +1,18 @@
 import { useEffect, useState } from "react";
-import { ChevronRight, Info, KeyRound, LogOut, Minus, Plus, School } from "lucide-react";
+import { ChevronRight, Info, KeyRound, LogOut, School } from "lucide-react";
 import { useApp } from "../lib/store";
 import { ConfirmModal, Modal } from "../components/Modal";
 import { validatePassword } from "../lib/password";
 import { BackBarFor } from "../components/Chrome";
 import { Card, SectionLabel } from "../components/ui";
-import { CampusPicker } from "../components/CampusPicker";
 import { ChangePasswordForm } from "../components/ChangePassword";
-import { Select } from "../components/Select";
 import AboutView from "./AboutView";
 import { PageFlow } from "../components/PageShell";
 import { SCHOOL } from "../../shared/domain.js";
-import { SECTION_GRADES, gradeCode, parseSection, composeSection } from "../../shared/section.js";
-import { roomById } from "../../shared/campus.js";
+import { parseSection, composeSection } from "../../shared/section.js";
+import { roomByLegacy } from "../../shared/campus.js";
+import { GradeSectionField, RegistryField, normalizeSectionName, suggestionsForGrade } from "../components/FormFields";
+import { RoomField } from "../components/RoomField";
 import { clockTime, startOfToday } from "../lib/format";
 
 const ROLE_LABEL: Record<string, string> = {
@@ -59,8 +59,6 @@ function AccountRow({
   );
 }
 
-const GRADE_OPTIONS = SECTION_GRADES.map((label) => ({ value: gradeCode(label) ?? "", label }));
-
 /** "Set today at 7:45 AM" when the registry was set today, else "Last set <date>". */
 function registryStamp(ts: number | null | undefined): string | null {
   if (!ts) return null;
@@ -83,35 +81,23 @@ function ProfileEditor({ onBack }: { onBack: () => void }) {
   const [grade, setGrade] = useState(initialGrade);
   const [sec, setSec] = useState(initialSec);
   const [registry, setRegistry] = useState(String(user!.registry ?? ""));
-  const [pendingRoomId, setPendingRoomId] = useState<string | null>(null);
-  const [pickerOpen, setPickerOpen] = useState(false);
+  const [room, setRoom] = useState(user!.room ?? "");
   const [errs, setErrs] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState(false);
   const [confirmSection, setConfirmSection] = useState(false);
   const [confirmDiscard, setConfirmDiscard] = useState(false);
 
-  // The saved room, or the staged pick resolved to its canonical legacy string.
-  const roomLabel = pendingRoomId
-    ? roomById(pendingRoomId)?.legacy ?? user!.room ?? ""
-    : user!.room ?? "";
-  const composed = grade ? composeSection(grade, sec) : "";
+  const suggestions = suggestionsForGrade([rawSection], grade);
+  const composed = grade ? composeSection(grade, normalizeSectionName(sec, suggestions)) : "";
   const sectionChanged = Boolean(grade) && composed !== (user!.section ?? "");
   const dirty =
     name !== user!.name ||
     grade !== initialGrade ||
     sec !== initialSec ||
     registry !== String(user!.registry ?? "") ||
-    pendingRoomId !== null;
+    room !== (user!.room ?? "");
 
   const clear = (key: string) => setErrs((e) => ({ ...e, [key]: "" }));
-
-  /** Whole numbers only, 0 to 200; the steppers clamp instead of rejecting. */
-  function stepRegistry(delta: number) {
-    const raw = Number(registry);
-    const n = Number.isFinite(raw) ? Math.trunc(raw) : 0;
-    setRegistry(String(Math.min(200, Math.max(0, n + delta))));
-    clear("registry");
-  }
 
   function validate(): Record<string, string> {
     const e: Record<string, string> = {};
@@ -121,7 +107,7 @@ function ProfileEditor({ onBack }: { onBack: () => void }) {
     const n = Number(registry);
     if (!/^\d+$/.test(registry.trim()) || !Number.isInteger(n) || n < 0 || n > 200)
       e.registry = "Enter a whole number from 0 to 200.";
-    if (!roomLabel) e.room = "Pick a default room.";
+    if (!room) e.room = "Pick a default room.";
     return e;
   }
 
@@ -137,10 +123,11 @@ function ProfileEditor({ onBack }: { onBack: () => void }) {
   async function doSave() {
     setBusy(true);
     try {
-      await saveProfile({ name: name.trim(), section: composed, room: roomLabel, registry: Number(registry) });
-      if (pendingRoomId) {
-        // The profile save carries the room label; this also moves the GPS anchor.
-        try { await changeSavedRoom(pendingRoomId); } catch { /* label already saved */ }
+      await saveProfile({ name: name.trim(), section: composed, room, registry: Number(registry) });
+      const roomId = room !== (user!.room ?? "") ? roomByLegacy(room)?.id : undefined;
+      if (roomId) {
+        // Saving the profile carries the room label; this also moves the GPS anchor.
+        try { await changeSavedRoom(roomId); } catch { /* the label is already saved */ }
       }
       notify({ kind: "info", title: "Profile saved", body: "Your name, section, room and registry are up to date." });
       onBack();
@@ -183,27 +170,16 @@ function ProfileEditor({ onBack }: { onBack: () => void }) {
         {/* b. Grade and section — stored as "Grade 3 - Sec A" / "Kinder - Sec A". */}
         <Card>
           <SectionLabel>Grade and section</SectionLabel>
-          <div className="mt-2 space-y-3">
-            <Select
-              value={grade}
-              onChange={(v) => { setGrade(v); clear("grade"); }}
-              options={GRADE_OPTIONS}
-              placeholder="Pick a grade"
-              label="Grade"
+          <div className="mt-2">
+            <GradeSectionField
+              grade={grade}
+              section={sec}
+              knownSections={[rawSection]}
+              onGrade={(v) => { setGrade(v); clear("grade"); }}
+              onSection={(v) => { setSec(v); clear("sec"); }}
+              error={{ grade: errs.grade, section: errs.sec }}
             />
-            <label className="block text-xs font-semibold text-slate-600">
-              Section
-              <input
-                value={sec}
-                maxLength={20}
-                onChange={(e) => { setSec(e.target.value); clear("sec"); }}
-                placeholder="Sec A"
-                className={input}
-              />
-            </label>
           </div>
-          {err("grade")}
-          {err("sec")}
           {!parsed.grade && (
             <p className="mt-2 text-xs text-slate-500">
               Your current section ({user!.section || "not set"}) is not in the usual format — pick your grade and adjust the section.
@@ -215,61 +191,23 @@ function ProfileEditor({ onBack }: { onBack: () => void }) {
         {/* c. Default room — Building → Floor → Room, saved via PUT /api/profile/room. */}
         <Card>
           <SectionLabel>Default room</SectionLabel>
-          <p className="mt-1 text-sm text-slate-700">{roomLabel || "No default room set."}</p>
-          <button
-            type="button"
-            onClick={() => { setPickerOpen(true); clear("room"); }}
-            className="mt-2 min-h-12 w-full rounded-xl border border-slate-300 bg-white text-sm font-bold text-slate-700 hover:border-brand-300"
-          >
-            Change room
-          </button>
+          <div className="mt-2">
+            <RoomField value={room} onChange={(v) => { setRoom(v); clear("room"); }} />
+          </div>
           {err("room")}
-          {pickerOpen && (
-            <CampusPicker
-              savedRoom={roomLabel}
-              detected={null}
-              picked={pendingRoomId ? { kind: "room", roomId: pendingRoomId, label: roomLabel } : null}
-              onPick={(p) => { if (p.kind === "room") { setPendingRoomId(p.roomId); setPickerOpen(false); } }}
-              onClose={() => setPickerOpen(false)}
-              title="Pick classroom"
-              showCommonAreas={false}
-              showUnverified={false}
-              showSavedRoom={false}
-              showDetected={false}
-              intro="Choose the classroom you teach. It is used as the default location for your reports."
-            />
-          )}
         </Card>
 
         {/* d. Today's registry — 0 to 200, whole numbers, with - / + steppers. */}
         <Card>
           <SectionLabel>Today's registry</SectionLabel>
-          <div className="mt-2 flex items-center gap-2">
-            <button
-              type="button"
-              aria-label="One fewer pupil"
-              onClick={() => stepRegistry(-1)}
-              className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl border border-slate-300 bg-white text-slate-700 hover:border-brand-300"
-            >
-              <Minus size={18} />
-            </button>
-            <input
+          <div className="mt-2">
+            <RegistryField
               value={registry}
-              onChange={(e) => { setRegistry(e.target.value.replace(/[^\d.]/g, "").slice(0, 6)); clear("registry"); }}
-              inputMode="numeric"
-              aria-label="Today's registry"
-              className="min-h-12 w-full rounded-xl border border-slate-300 px-3 text-center font-mono text-base outline-none focus:border-brand-500"
+              onChange={(v) => { setRegistry(v); clear("registry"); }}
+              label="Today's registry"
+              hint="Used to check headcount."
             />
-            <button
-              type="button"
-              aria-label="One more pupil"
-              onClick={() => stepRegistry(1)}
-              className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl border border-slate-300 bg-white text-slate-700 hover:border-brand-300"
-            >
-              <Plus size={18} />
-            </button>
           </div>
-          <p className="mt-2 text-xs text-slate-500">Used to check headcount.</p>
           {registryStamp(user!.registryUpdatedAt) && (
             <p className="mt-1 text-xs text-slate-500">{registryStamp(user!.registryUpdatedAt)}</p>
           )}

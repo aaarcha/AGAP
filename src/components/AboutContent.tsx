@@ -97,6 +97,10 @@ const ROLE_HELP: Record<string, { title: string; items: { q: string; a: string }
         q: "Changing conditions",
         a: "Update the approach route status (passable, flooded, blocked) when conditions change. The Escalation page lists agencies to coordinate with.",
       },
+      {
+        q: "Your history and archive",
+        a: "History shows closed tickets your organization responded to; Remove from my list hides one for your account only, and Hidden brings it back. View archive shows the archived tickets your organization took part in.",
+      },
     ],
   },
   super_admin: {
@@ -167,8 +171,8 @@ function RetentionRules() {
         <Accordion title="Retention and purge rules">
           <ul className="space-y-2">
             <li>
-              <b>Hide</b> — teachers and parents can remove a closed record from their own list only. It is
-              reversible from the Hidden chip and nobody else's view changes.
+              <b>Hide</b> — teachers, parents and responders can remove a closed record from their own list only.
+              Each account hides independently, it is reversible from the Hidden chip, and nobody else's view changes.
             </li>
             <li>
               <b>Archive</b> — the Principal archives closed tickets one at a time or all at once, and a

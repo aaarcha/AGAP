@@ -77,6 +77,26 @@ export interface RecordsDeepLink {
   zoneId?: string;
   category?: string;
   tier?: RecordTier;
+  /** One of the four school-day windows ("before", "class", "recess", "after"). */
+  time?: string;
+  /** The Analytics period, carried so the records view opens on the same window. */
+  period?: string;
+  from?: string;
+  to?: string;
+}
+
+/** "#records?tier=HIGH&period=30d" — the one deep-link format Analytics emits. */
+export function recordsHash(link: RecordsDeepLink & { period?: string; from?: string; to?: string }): string {
+  const params = new URLSearchParams();
+  if (link.zoneId) params.set("zone", link.zoneId);
+  if (link.category) params.set("category", link.category);
+  if (link.tier) params.set("tier", link.tier);
+  if (link.time) params.set("time", link.time);
+  if (link.period) params.set("period", link.period);
+  if (link.from) params.set("from", link.from);
+  if (link.to) params.set("to", link.to);
+  const q = params.toString();
+  return `#records${q ? `?${q}` : ""}`;
 }
 
 /**
@@ -96,6 +116,14 @@ export function readRecordsDeepLink(hash: string): RecordsDeepLink {
   if (category) out.category = category;
   const tier = params.get("tier")?.toUpperCase();
   if (tier === "CRITICAL" || tier === "HIGH" || tier === "MODERATE") out.tier = tier;
+  const time = params.get("time");
+  if (time === "before" || time === "class" || time === "recess" || time === "after") out.time = time;
+  const period = params.get("period");
+  if (period === "sy" || period === "30d" || period === "custom") {
+    out.period = period;
+    out.from = params.get("from") ?? undefined;
+    out.to = params.get("to") ?? undefined;
+  }
   return out;
 }
 
@@ -142,6 +170,8 @@ export interface DrillRecord {
   label: string;
   startedAt: number;
   endedAt: number;
+  /** "school" = staff only; "simulation" = responders took part. */
+  scope?: "school" | "simulation";
   incidents: number;
   avgToReportMs: number | null;
   avgToAckMs: number | null;
@@ -165,6 +195,7 @@ export interface OngoingDrill {
   label: string;
   startedAt: number;
   active: true;
+  scope?: "school" | "simulation";
 }
 
 export interface RecordsPayload {

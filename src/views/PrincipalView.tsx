@@ -10,6 +10,7 @@ import HeadcountView from "./HeadcountView";
 import AccountView from "./AccountView";
 import IncidentsRecords from "./IncidentsRecords";
 import AnalyticsView from "./AnalyticsView";
+import type { AnalyticsRecordsLink } from "../components/RecordsAnalytics";
 import { QueueRow } from "./ResponderView";
 import { IncidentCard } from "../components/Incident";
 import { SchoolMap, type RoomMarker } from "../components/SchoolMap";
@@ -534,8 +535,10 @@ function BackBar({ title, onBack }: { title: string; onBack: () => void }) {
   );
 }
 
-function More() {
+function More({ recordsSignal = 0 }: { recordsSignal?: number }) {
   const [screen, setScreen] = useState<"menu" | "safety" | "headcount" | "records" | "roster" | "account">("menu");
+  // An Analytics chart opens Records directly; the tab switch mounts More fresh.
+  useEffect(() => { if (recordsSignal > 0) setScreen("records"); }, [recordsSignal]);
   const items = [
     { id: "safety" as const, label: "Safety", hint: "Hazard mode and drill mode switches", icon: ShieldAlert },
     { id: "headcount" as const, label: "Headcount status", hint: "Live accountability per open incident", icon: Activity },
@@ -574,13 +577,17 @@ function More() {
   );
 }
 
-export default function PrincipalView({ tab }: { tab: PrincipalTab }) {
+export default function PrincipalView({ tab, recordsSignal = 0, onOpenRecords }: {
+  tab: PrincipalTab;
+  recordsSignal?: number;
+  onOpenRecords?: (link: AnalyticsRecordsLink) => void;
+}) {
   return (
     <>
       {tab === "command" && <Command />}
       {tab === "report" && <ReportView />}
-      {tab === "analytics" && <AnalyticsView />}
-      {tab === "more" && <More />}
+      {tab === "analytics" && <AnalyticsView onOpenRecords={(link) => onOpenRecords?.(link)} />}
+      {tab === "more" && <More recordsSignal={recordsSignal} />}
     </>
   );
 }

@@ -185,7 +185,8 @@ test("acknowledge → on site → resolve syncs to every role and resets the par
   for (const tok of [teacher, principal, parent]) {
     assert.equal((await s.call("GET", "/api/state", { token: tok })).json.incidents[0].status, "EN_ROUTE");
   }
-  assert.equal((await s.call("POST", `/api/incidents/${incident.id}/onsite`, { token: principal })).json.incident.status, "ON_SITE");
+  // En route / on site are responder-org steps; the Principal closes the school track.
+  assert.equal((await s.call("POST", `/api/incidents/${incident.id}/onsite`, { token: responder })).json.incident.status, "ON_SITE");
   const done = await s.call("POST", `/api/incidents/${incident.id}/resolve`, { token: principal, body: { outcome: "resolved" } });
   assert.equal(done.json.incident.status, "RESOLVED");
   assert.equal((await s.call("POST", `/api/incidents/${incident.id}/resolve`, { token: responder, body: {} })).status, 409);
@@ -242,7 +243,7 @@ test("teacher profile edits and roster CRUD are reflected for the principal inst
   assert.ok(st.sections.includes("Grade 3 - Sec B"));
   assert.equal((await s.call("PUT", "/api/profile", { token: teacher, body: { name: "", section: "x", room: "y" } })).status, 400);
 
-  const added = await s.call("POST", "/api/roster", { token: principal, body: { name: "Mr. Lopez", section: "Grade 1 - Sec A", room: "Bldg C | Flr 1 | Rm 101" } });
+  const added = await s.call("POST", "/api/roster", { token: principal, body: { name: "Mr. Lopez", email: "mlopez@sinalhanes.deped.ph", section: "Grade 1 - Sec A", room: "Bldg C | Flr 1 | Rm 101" } });
   assert.equal(added.status, 201);
   const newId = added.json.teacher.id;
   // Creating a roster row also provisions its sign-in account with temporary credentials.
@@ -682,11 +683,12 @@ test("drill mode: parents are not alarmed, metrics are captured, ending the dril
   const responder = await s.login("responder");
   const parent = await s.login("parent", "Grade 3 - Sec A");
   assert.equal((await s.call("PUT", "/api/modes/drill", { token: teacher, body: { active: true } })).status, 403);
-  await s.call("PUT", "/api/modes/drill", { token: principal, body: { active: true, label: "Quarterly earthquake drill" } });
+  // Responders take part only in a simulation drill.
+  await s.call("PUT", "/api/modes/drill", { token: principal, body: { active: true, label: "Quarterly earthquake drill", scope: "simulation" } });
   t += 12000;
   const { incident } = (await s.call("POST", "/api/incidents", { token: teacher, body: { ...report({ categoryId: "flood", subId: "structural_eq", populationId: "wholeschool" }), interactions: 4 } })).json;
   assert.equal((await s.call("GET", "/api/state", { token: parent })).json.incidents.length, 0, "parents never see drill tickets");
-  assert.equal((await s.call("GET", "/api/state", { token: parent })).json.modes.drill.active, true, "…but are told a drill is on");
+  assert.equal((await s.call("GET", "/api/state", { token: parent })).json.modes.drill.active, false, "…and are not told a drill is on");
   const seen = (await s.call("GET", "/api/state", { token: responder })).json.incidents[0];
   assert.equal(seen.drill, true);
   assert.equal(seen.metrics.toReportMs, 12000);
@@ -698,6 +700,7 @@ test("drill mode: parents are not alarmed, metrics are captured, ending the dril
   await hc(s.call, teacher, incident.id, { present: 28 });
   const end = await s.call("PUT", "/api/modes/drill", { token: principal, body: { active: false } });
   assert.equal(end.json.summary.incidents, 1);
+  assert.equal(end.json.summary.scope, "simulation");
   assert.equal(end.json.summary.avgToReportMs, 12000);
   assert.equal(end.json.summary.avgToAckMs, 20000);
   assert.equal(end.json.summary.avgToOnSiteMs, 50000);
@@ -869,6 +872,40 @@ test("deactivated accounts cannot sign in and their sessions are revoked", async
 
   const adminId = (await s.call("GET", "/api/admin/accounts", { token: admin })).json.accounts.find((a) => a.email === ADMIN_EMAIL).id;
   assert.equal((await s.call("POST", `/api/admin/accounts/${adminId}/deactivate`, { token: admin })).status, 400, "Super Admin cannot deactivate their own account");
+  await s.close();
+});
+
+test("an Admin can provision a Teacher with section, room and registry; the new teacher signs in into that section", async () => {
+  const s = await boot();
+  const admin = await s.loginSuper();
+
+  // A teacher without a section or room is refused exactly as the server documents.
+  const bare = await s.call("POST", "/api/admin/accounts", {
+    token: admin,
+    body: { email: "bare.teacher@example.com", name: "Bare Teacher", role: "teacher" },
+  });
+  assert.equal(bare.status, 400);
+  assert.equal(bare.json.message, "Grade / section is required.");
+
+  const created = await s.call("POST", "/api/admin/accounts", {
+    token: admin,
+    body: {
+      email: "new.teacher@example.com", name: "Ms. Nueva", role: "teacher",
+      section: "Grade 3 - Sec A", room: "Bldg A | Flr 2 | Rm 205", registry: 28,
+      password: "New-Teacher-2026!",
+    },
+  });
+  assert.equal(created.status, 201, JSON.stringify(created.json));
+  assert.equal(created.json.account.role, "teacher");
+  assert.equal(created.json.account.section, "Grade 3 - Sec A");
+
+  const signIn = await s.loginWith("new.teacher@example.com", "New-Teacher-2026!");
+  assert.equal(signIn.status, 200, "the new teacher can sign in");
+  const state = await s.call("GET", "/api/state", { token: signIn.json.token });
+  assert.equal(state.status, 200);
+  assert.equal(state.json.me.section, "Grade 3 - Sec A", "the teacher lands in the right section");
+  assert.equal(state.json.me.room, "Bldg A | Flr 2 | Rm 205", "with the default room");
+  assert.equal(state.json.me.registry, 28, "and today's registry");
   await s.close();
 });
 
@@ -1389,7 +1426,7 @@ test("roster creation and section edits keep the structured fields in step", asy
   // A new roster row derives its parts from the composed string.
   const created = await s.call("POST", "/api/roster", {
     token: principal,
-    body: { name: "Mr. Santos", section: "Kinder - Sec M", room: "Bldg A | Flr 1 | Rm 101" },
+    body: { name: "Mr. Santos", email: "msantos@sinalhanes.deped.ph", section: "Kinder - Sec M", room: "Bldg A | Flr 1 | Rm 101" },
   });
   assert.equal(created.status, 201, JSON.stringify(created.json));
   assert.deepEqual([created.json.teacher.grade, created.json.teacher.sectionName], ["K", "M"]);
@@ -1430,7 +1467,7 @@ test("a new teacher whose registry is 28 and who reports 28 present gets no mism
 
   const created = await s.call("POST", "/api/roster", {
     token: principal,
-    body: { name: "Mr. Lopez", section: "Grade 1 - Sec A", room: "Bldg A | Flr 2 | Rm 205", registry: 30 },
+    body: { name: "Mr. Lopez", email: "mlopez-registry@sinalhanes.deped.ph", section: "Grade 1 - Sec A", room: "Bldg A | Flr 2 | Rm 205", registry: 30 },
   });
   assert.equal(created.status, 201, JSON.stringify(created.json));
   const id = created.json.teacher.id;

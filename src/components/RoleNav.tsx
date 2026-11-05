@@ -31,8 +31,11 @@ function Rail<T extends string>({ tab, setTab, tabs, subtitle }: RailProps<T>) {
 
 type RoleProps<T extends string> = { tab: T; setTab: (t: T) => void };
 
+/** The teacher rail carries the live pending-headcount count on its Headcount tab. */
+export type TeacherNavExtras = { pendingHeadcount?: number };
+
 export type RoleNavProps =
-  | ({ role: "teacher" } & RoleProps<TeacherTab>)
+  | ({ role: "teacher" } & RoleProps<TeacherTab> & TeacherNavExtras)
   | ({ role: "parent" } & RoleProps<ParentTab>)
   | ({ role: "principal" } & RoleProps<PrincipalTab>)
   | ({ role: "responder" } & RoleProps<ResponderTab>)
@@ -40,8 +43,12 @@ export type RoleNavProps =
 
 export function RoleNav(props: RoleNavProps) {
   switch (props.role) {
-    case "teacher":
-      return <Rail tab={props.tab} setTab={props.setTab} tabs={TEACHER_TABS} subtitle="Teacher" />;
+    case "teacher": {
+      const tabs = TEACHER_TABS.map((t) =>
+        t.id === "headcount" ? { ...t, badge: props.pendingHeadcount ?? 0 } : t,
+      );
+      return <Rail tab={props.tab} setTab={props.setTab} tabs={tabs} subtitle="Teacher" />;
+    }
     case "parent":
       return <Rail tab={props.tab} setTab={props.setTab} tabs={PARENT_TABS} subtitle="Parent/PTA" />;
     case "principal":

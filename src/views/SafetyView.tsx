@@ -41,15 +41,22 @@ function HazardCard() {
   );
 }
 
+/** The two drill scopes, chosen before a drill starts. */
+const DRILL_SCOPES: { id: "school" | "simulation"; label: string; hint: string }[] = [
+  { id: "school", label: "School only (default)", hint: "Responders see nothing and no responder times are recorded." },
+  { id: "simulation", label: "Include responders (simulation)", hint: "Responders practise acknowledge and on-site." },
+];
+
 function DrillCard() {
   const { modes, setDrill, incidents } = useApp();
   const [label, setLabel] = useState("Quarterly earthquake drill");
+  const [scope, setScope] = useState<"school" | "simulation">(modes.drill.scope ?? "school");
   const [busy, setBusy] = useState(false);
   const dr = modes.drill;
   const live = incidents.filter((i) => (i.drill && i.status !== "RESOLVED") || (i.drill && i.outcome === "drill" && dr.active));
   async function toggle() {
     setBusy(true);
-    try { await setDrill(!dr.active, label); } finally { setBusy(false); }
+    try { await setDrill(!dr.active, label, dr.active ? undefined : scope); } finally { setBusy(false); }
   }
   return (
     <section className={card}>
@@ -57,19 +64,49 @@ function DrillCard() {
         <h2 className={h2}><FlaskConical size={14} /> Drill mode</h2>
         <InfoButton title="Drill mode">
           <p>Runs a school drill on the live workflow. Reports are marked as drill, parents are not alarmed, and response times and taps per report are recorded for the drill report.</p>
+          <p>School only keeps responders out of the drill; a simulation lets them practise.</p>
           <p>Every finished drill is kept, read-only, under More → Incidents &amp; Records → Drill Records.</p>
         </InfoButton>
       </div>
       <input value={label} onChange={(e) => setLabel(e.target.value.slice(0, 80))} disabled={dr.active} aria-label="Drill name" placeholder="Drill name"
         className="mb-2 min-h-12 w-full rounded-xl border border-slate-300 px-3 text-sm" />
+      {!dr.active && (
+        <div className="mb-2">
+          <p className="text-sm font-medium text-slate-700">Who takes part?</p>
+          <div role="radiogroup" aria-label="Drill scope" className="mt-1 grid gap-2 sm:grid-cols-2">
+            {DRILL_SCOPES.map((s) => {
+              const on = scope === s.id;
+              return (
+                <button
+                  key={s.id}
+                  type="button"
+                  role="radio"
+                  aria-checked={on}
+                  onClick={() => setScope(s.id)}
+                  className={`min-h-12 rounded-xl border px-3 py-2 text-left text-xs font-bold ${
+                    on ? "border-brand-600 bg-brand-50 text-brand-800" : "border-slate-300 bg-white text-slate-700"
+                  }`}
+                >
+                  {s.label}
+                  <span className="mt-0.5 block text-[11px] font-normal leading-snug text-slate-500">{s.hint}</span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
       <button onClick={() => void toggle()} disabled={busy || (!dr.active && !label.trim())} aria-pressed={dr.active}
         className={`min-h-14 w-full rounded-xl text-sm font-bold ${dr.active ? "bg-blush text-brand-900" : "bg-brand-600 text-white"}`}>
         {dr.active ? "End drill & save metrics" : "Start drill"}
       </button>
       {dr.active && (
         <div className="mt-3 rounded-xl bg-accent-100 p-3" aria-live="polite">
-          <p className="text-sm font-bold text-accent-700">{dr.label} — running since {dr.startedAt ? dateTime(dr.startedAt) : ""}</p>
-          <p className="mt-0.5 text-xs text-accent-700">{live.length} drill report(s) so far.</p>
+          <p className="text-sm font-bold text-accent-700">
+            {dr.label} — running since {dr.startedAt ? dateTime(dr.startedAt) : ""}
+          </p>
+          <p className="mt-0.5 text-xs text-accent-700">
+            {dr.scope === "simulation" ? "Includes responders ·" : "School only ·"} {live.length} drill report(s) so far.
+          </p>
         </div>
       )}
       <p className="mt-3 rounded-xl bg-slate-50 px-3 py-2 text-xs text-slate-500">

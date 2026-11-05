@@ -3,6 +3,7 @@ import { api, ApiError, clearToken, getToken, setToken } from "./api";
 import { POLICY_TEXT } from "./password";
 import { notificationsSupported, showSystemNotification } from "./pwa";
 import { STATUS_LABEL } from "../../shared/domain.js";
+import { splitLocation } from "./format";
 import { ESCALATION_TIERS, HAZARD_KINDS } from "../../shared/domain.js";
 import type {
   AlertItem, AppConfig, DrillSummary, Incident, LoginResult, Modes, QueuedReport, ReportPayload, RosterEntry, ServerState, Status, User,
@@ -12,7 +13,7 @@ const QUEUE_KEY = "aspire.queue";
 const CACHE_KEY = "aspire.cache";
 
 type SubmitResult = { status: "sent" | "queued"; merged?: boolean; confirmedBy?: number };
-export interface TeacherValues { name: string; section: string; room: string; status?: "active" | "inactive"; registry?: number }
+export interface TeacherValues { name: string; section: string; room: string; email?: string; status?: "active" | "inactive"; registry?: number }
 export interface AckInput { mode?: string; distanceKm?: number }
 
 export type LocationSetBy = "saved_room" | "gps_detected" | "selected_room" | "selected_area" | "unverified";
@@ -27,6 +28,8 @@ interface Ctx {
   ready: boolean;
   config: AppConfig | null;
   incidents: Incident[];
+  /** Teacher's dedicated Headcount work (their class + live whole-school alerts). */
+  headcountTasks: Incident[];
   roster: RosterEntry[];
   sections: string[];
   modes: Modes;
@@ -58,7 +61,7 @@ interface Ctx {
   act: (id: string, action: "ack" | "onsite" | "resolve", body?: { outcome?: "resolved" | "false_alarm" } & AckInput) => Promise<void>;
   recordHeadcount: (id: string, v: { present: number; expected?: number; section?: string }) => Promise<void>;
   setHazard: (active: boolean, kind?: string, note?: string) => Promise<void>;
-  setDrill: (active: boolean, label?: string) => Promise<DrillSummary | null>;
+  setDrill: (active: boolean, label?: string, scope?: "school" | "simulation") => Promise<DrillSummary | null>;
   setRoute: (status: string, note?: string) => Promise<void>;
   markSeen: (id: string) => void;
   cancelReport: (id: string) => Promise<void>;
@@ -69,7 +72,9 @@ interface Ctx {
   /** Hide/unhide a closed ticket from THIS user's lists only. */
   hideIncident: (id: string, hidden: boolean) => Promise<void>;
   saveProfile: (v: TeacherValues) => Promise<void>;
-  addTeacher: (v: TeacherValues) => Promise<void>;
+  /** Save today's class registry through the existing profile endpoint. */
+  updateRegistry: (registry: number) => Promise<void>;
+  addTeacher: (v: TeacherValues) => Promise<{ teacherId: string; email: string; tempPassword: string }>;
   editTeacher: (id: string, v: TeacherValues) => Promise<void>;
   /** Archive a teacher (removes them from live rosters; reversible from the Admin console). */
   archiveTeacher: (id: string, reason?: string) => Promise<void>;
@@ -96,6 +101,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [ready, setReady] = useState(false);
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [incidents, setIncidents] = useState<Incident[]>([]);
+  const [headcountTasks, setHeadcountTasks] = useState<Incident[]>([]);
   const [roster, setRoster] = useState<RosterEntry[]>([]);
   const [sections, setSections] = useState<string[]>([]);
   const [modes, setModes] = useState<Modes>(DEFAULT_MODES);
@@ -152,19 +158,19 @@ export function AppProvider({ children }: { children: ReactNode }) {
               kind: "new",
               category: i.category,
               title: role === "parent" ? "🔔 NEW EMERGENCY ALERT" : "🚨 New incident reported",
-              body: `${i.categoryLabel} — ${i.subLabel} · ${i.room}`,
+              body: `${i.categoryLabel} — ${i.subLabel} · ${splitLocation(i.room).area}`,
             }, true);
           }
           continue;
         }
         if (role !== "parent" && i.escalationLevel > p.level && i.status !== "RESOLVED") {
-          pushAlert({ kind: "new", category: i.category, title: `⏫ Escalated to ${ESCALATION_TIERS[i.escalationLevel]}`, body: `${i.subLabel} · ${i.room} — not acknowledged in time` }, true);
+          pushAlert({ kind: "new", category: i.category, title: `⏫ Escalated to ${ESCALATION_TIERS[i.escalationLevel]}`, body: `${i.subLabel} · ${splitLocation(i.room).area} — not acknowledged in time` }, true);
         }
         if (role !== "parent" && i.accountability.status === "mismatch" && p.acc !== "mismatch" && i.status !== "RESOLVED") {
-          pushAlert({ kind: "new", category: i.category, title: "⚠ Headcount mismatch — Critical", body: `${i.subLabel} · ${i.room}: pupils not fully accounted for` }, true);
+          pushAlert({ kind: "new", category: i.category, title: "⚠ Headcount mismatch — Critical", body: `${i.subLabel} · ${splitLocation(i.room).area}: pupils not fully accounted for` }, true);
         }
         if (i.confirmedBy > p.confirmedBy && (role === "principal" || role === "responder") && !mine) {
-          pushAlert({ kind: "update", category: i.category, title: `Confirmed by ${i.confirmedBy} reports`, body: `${i.subLabel} · ${i.room}` });
+          pushAlert({ kind: "update", category: i.category, title: `Confirmed by ${i.confirmedBy} reports`, body: `${i.subLabel} · ${splitLocation(i.room).area}` });
         }
         if (i.status !== p.status) {
           if (i.status === "RESOLVED" && (role === "parent" || role === "teacher")) {
@@ -176,10 +182,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
               }, true);
             }
           } else if ((role === "parent" || role === "teacher") && i.status !== "SEEN") {
-            pushAlert({ kind: "update", category: i.category, title: `Update: ${STATUS_LABEL[i.status as Status]}`, body: `${i.subLabel} · ${i.room}` }, true);
+            pushAlert({ kind: "update", category: i.category, title: `Update: ${STATUS_LABEL[i.status as Status]}`, body: `${i.subLabel} · ${splitLocation(i.room).area}` }, true);
           } else if ((role === "principal" || role === "responder") && !mine && i.status !== "SEEN") {
             const closedTitle = i.outcome === "cancelled" ? "Cancelled by reporter" : i.outcome === "false_alarm" ? "False alarm" : "Resolved";
-            pushAlert({ kind: "update", category: i.category, title: `${i.status === "RESOLVED" ? closedTitle : STATUS_LABEL[i.status as Status]}: ${i.subLabel}`, body: i.room });
+            pushAlert({ kind: "update", category: i.category, title: `${i.status === "RESOLVED" ? closedTitle : STATUS_LABEL[i.status as Status]}: ${i.subLabel}`, body: splitLocation(i.room).area });
           }
         }
       }
@@ -194,8 +200,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
         const kind = HAZARD_KINDS.find((k: { id: string; label: string }) => k.id === m.hazard.kind)?.label ?? "Hazard";
         pushAlert({ kind: m.hazard.active ? "new" : "clear", title: m.hazard.active ? `🌧 ${kind} — Hazard Mode ON` : "🟢 Hazard Mode OFF", body: m.hazard.active ? (role === "parent" ? "Stay safe. Avoid flooded roads." : "Ground-floor and low-lying areas are now prioritised.") : "Back to normal priority." }, true);
       }
-      if (m.drill.active !== pm.drill.active) {
-        pushAlert({ kind: "info", title: m.drill.active ? "🧪 Drill started" : "Drill ended", body: m.drill.active ? (role === "parent" ? "A school safety drill is in progress. This is only a drill." : `${m.drill.label} — reports are recorded as drill data.`) : "Drill metrics were saved." });
+      // Drills are never announced to parents, or to responders in a school-only
+      // drill: the notification audience is the ticket audience.
+      if (m.drill.active !== pm.drill.active && role !== "parent" && (role !== "responder" || m.drill.scope === "simulation")) {
+        pushAlert({ kind: "info", title: m.drill.active ? "🧪 Drill started" : "Drill ended", body: m.drill.active ? `${m.drill.label} — reports are recorded as drill data.` : "Drill metrics were saved." });
       }
       if (role !== "parent" && m.route.status !== pm.route.status) {
         pushAlert({ kind: "info", title: `Approach route: ${m.route.status}`, body: "Responder ETAs were re-estimated." });
@@ -209,6 +217,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     diffAlerts(s);
     setUser(s.me);
     setIncidents(s.incidents);
+    setHeadcountTasks(s.headcountTasks ?? []);
     setRoster(s.roster);
     setSections(s.sections);
     setModes(s.modes ?? DEFAULT_MODES);
@@ -223,7 +232,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     prev.current = null;
     prevModes.current = null;
     seenSent.current.clear();
-    setIncidents([]); setRoster([]); setSections([]); setHidden([]); setLive(false);
+    setIncidents([]); setHeadcountTasks([]); setRoster([]); setSections([]); setHidden([]); setLive(false);
     localStorage.removeItem(CACHE_KEY);
   }, []);
 
@@ -415,8 +424,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
     await refresh();
   }, [refresh]);
   const setHazard = useCallback(async (active: boolean, kind?: string, note?: string) => { await api("PUT", "/api/modes/hazard", { active, kind, note }); await refresh(); }, [refresh]);
-  const setDrill = useCallback(async (active: boolean, label?: string) => {
-    const r = await api<{ summary: DrillSummary | null }>("PUT", "/api/modes/drill", { active, label });
+  const setDrill = useCallback(async (active: boolean, label?: string, scope?: "school" | "simulation") => {
+    const r = await api<{ summary: DrillSummary | null }>("PUT", "/api/modes/drill", { active, label, scope });
     await refresh();
     return r.summary;
   }, [refresh]);
@@ -469,7 +478,18 @@ export function AppProvider({ children }: { children: ReactNode }) {
     setUser(r.user);
     await refresh();
   }, [refresh]);
-  const addTeacher = useCallback(async (v: TeacherValues) => { await api("POST", "/api/roster", v); await refresh(); }, [refresh]);
+  const updateRegistry = useCallback(async (registry: number) => {
+    const me = userRef.current;
+    if (!me) throw new Error("Not signed in.");
+    const r = await api<{ user: User }>("PUT", "/api/profile", { name: me.name, section: me.section, room: me.room, registry });
+    setUser(r.user);
+    await refresh();
+  }, [refresh]);
+  const addTeacher = useCallback(async (v: TeacherValues) => {
+    const r = await api<{ teacher: { id: string }; account: { email: string }; tempPassword: string }>("POST", "/api/roster", v);
+    await refresh();
+    return { teacherId: r.teacher.id, email: r.account.email, tempPassword: r.tempPassword };
+  }, [refresh]);
   const changeSavedRoom = useCallback(async (roomId: string) => { await api("PUT", "/api/profile/room", { roomId }); await refresh(); }, [refresh]);
   const editTeacher = useCallback(async (id: string, v: TeacherValues) => { await api("PUT", `/api/roster/${id}`, v); await refresh(); }, [refresh]);
   const archiveTeacher = useCallback(async (id: string, reason?: string) => {
@@ -487,10 +507,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const notify = useCallback((a: Omit<AlertItem, "id">) => pushAlert(a, false), [pushAlert]);
 
   const value: Ctx = {
-    user, ready, config, incidents, roster, sections, modes, drills, now, online, connected, live,
+    user, ready, config, incidents, headcountTasks, roster, sections, modes, drills, now, online, connected, live,
     queue, alerts, dismissAlert, notifPermission, enableNotifications, mustChange, passwordPolicy, login, changePassword, logout, refresh, submit, cancelQueued,
     act, recordHeadcount, setHazard, setDrill, setRoute, markSeen, cancelReport, archiveIncident, archiveResolved, hideIncident, hidden,
-    saveProfile, addTeacher, editTeacher, archiveTeacher, changeSavedRoom, notify,
+    saveProfile, updateRegistry, addTeacher, editTeacher, archiveTeacher, changeSavedRoom, notify,
   };
   return <AppCtx.Provider value={value}>{children}</AppCtx.Provider>;
 }

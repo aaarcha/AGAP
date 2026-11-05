@@ -3,7 +3,8 @@ import { Archive, Eye, EyeOff, History as HistoryIcon } from "lucide-react";
 import { OUTCOME_LABEL, TRANSPORT_MODES, agencyFor } from "../../shared/domain.js";
 import { useApp } from "../lib/store";
 import { catTheme } from "../lib/theme";
-import { dateTime, duration, elapsed, escalationLabel, fmtMs, plainOverride } from "../lib/format";
+import { canSeeReportedFrom, dateTime, duration, elapsed, escalationLabel, fmtMs, plainOverride, prettyRoom, splitLocation } from "../lib/format";
+import { LocationLine, locationName } from "./Location";
 import type { Incident, User } from "../lib/types";
 import { ConfirmModal, Modal } from "./Modal";
 import { FilterBar } from "./FilterBar";
@@ -72,10 +73,13 @@ function useHistoryActions() {
     isPrincipal: role === "principal",
     // The archive is read-only for the roles that may open it.
     canViewArchive: role === "principal" || role === "responder",
-    // Responders have no hide and no delete — only Teachers (own reports) and Parents may hide.
-    canHide: role === "teacher" || role === "parent",
+    // Hide is a per-account list action for Teachers (own reports), Parents and
+    // Responders (their own history). The ticket itself never changes.
+    canHide: role === "teacher" || role === "parent" || role === "responder",
     canHideThis: (inc: Incident) =>
-      (role === "teacher" && (inc.reporterIds ?? [inc.reporterId ?? ""]).includes(user?.id ?? "")) || role === "parent",
+      role === "responder" ||
+      role === "parent" ||
+      (role === "teacher" && (inc.reporterIds ?? [inc.reporterId ?? ""]).includes(user?.id ?? "")),
     archiveIncident,
     archiveResolved,
     hideIncident,
@@ -83,11 +87,12 @@ function useHistoryActions() {
 }
 
 export function IncidentDetails({ inc, onClose, hiddenView = false }: { inc: Incident; onClose: () => void; hiddenView?: boolean }) {
-  const { isPrincipal, canHideThis, archiveIncident, hideIncident } = useHistoryActions();
+  const { user, isPrincipal, canHideThis, archiveIncident, hideIncident } = useHistoryActions();
   const [confirm, setConfirm] = useState(false);
   const ct = catTheme(inc.category);
   const outcome = outcomeOf(inc);
   const closedAt = inc.resolvedAt ?? inc.createdAt;
+  const place = splitLocation(inc.room);
 
   const rows: [string, string | undefined][] = [
     ["Incident type", `${inc.categoryLabel} — ${inc.subLabel}`],
@@ -95,7 +100,8 @@ export function IncidentDetails({ inc, onClose, hiddenView = false }: { inc: Inc
     ["Reported", dateTime(inc.createdAt)],
     ["Closed", dateTime(closedAt)],
     ["Time to close", duration(inc.createdAt, closedAt)],
-    ["Location", inc.room],
+    ["Location", place.area],
+    ["Reported from", place.from && canSeeReportedFrom(user?.role) ? prettyRoom(place.from) : undefined],
     ["Affected", `${inc.populationLabel ?? "—"}${inc.linkedSection === "ALL" ? " · whole school" : ` · ${inc.linkedSection}`}`],
     ["Reports received", String(inc.confirmedBy)],
     ["Reported by", inc.reporterName],
@@ -214,6 +220,13 @@ export default function HistorySection({ title = "Incident history", onOpenArchi
           </span>
         </h2>
         <div className="flex items-center gap-2">
+          {records.length > 0 && !showHidden && (
+            <FilterBar
+              compact
+              period={{ value: range, onChange: setRange }}
+              results={{ label: "Records", shown: closed.length, total: records.length }}
+            />
+          )}
           {canHide && hiddenRecords.length > 0 && (
             <button onClick={() => setShowHidden((v) => !v)} aria-pressed={showHidden}
               className={`min-h-12 rounded-lg px-3 text-xs font-bold ${showHidden ? "bg-brand-600 text-white" : "bg-slate-100 text-slate-700"}`}>
@@ -233,15 +246,6 @@ export default function HistorySection({ title = "Incident history", onOpenArchi
         </div>
       </div>
 
-      {records.length > 0 && !showHidden && (
-        <div className="mb-2">
-          <FilterBar
-            period={{ value: range, onChange: setRange }}
-            results={{ label: "Records", shown: closed.length, total: records.length }}
-          />
-        </div>
-      )}
-
       {list.length === 0 ? (
         <div className="rounded-2xl border border-slate-200 bg-white px-4 py-8 text-center">
           <p className="text-sm text-slate-500">
@@ -258,11 +262,11 @@ export default function HistorySection({ title = "Incident history", onOpenArchi
             return (
               <li key={i.id} className="flex items-stretch">
                 <button onClick={() => setOpen(i.id)} className="flex min-h-16 min-w-0 flex-1 items-center gap-3 px-3 py-3 text-left hover:bg-slate-50"
-                  aria-label={`View details: ${i.subLabel}, ${i.room}`}>
+                  aria-label={`View details: ${i.subLabel}, ${locationName(i.room)}`}>
                   <span className="text-xl" aria-hidden>{catTheme(i.category).emoji}</span>
                   <span className="min-w-0 flex-1">
-                    <span className="block truncate text-sm font-bold text-slate-800">{i.subLabel}{i.drill ? " · Drill" : ""}</span>
-                    <span className="block truncate text-xs text-slate-500">{i.room}</span>
+                    <span className="block break-words hyphens-none text-sm font-bold text-slate-800">{i.subLabel}{i.drill ? " · Drill" : ""}</span>
+                    <LocationLine room={i.room} pin={false} className="block text-xs text-slate-500" />
                     <span className="block text-xs text-slate-400">
                       {relationFor(i, user) ? <span className="font-bold text-brand-700">{relationFor(i, user)} · </span> : null}
                       {i.resolvedAt ? `${elapsed(i.resolvedAt, now)} · ${dateTime(i.resolvedAt)}` : ""}

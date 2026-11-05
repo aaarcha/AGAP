@@ -75,6 +75,8 @@ export interface Incident {
   resolvedAt: number | null;
   /** Step timestamps, locked by the server once recorded — never rewritten. */
   seenAt?: number | null;
+  /** The school track: the Principal acknowledged (never an en-route step). */
+  acknowledgedAt?: number | null;
   enRouteAt?: number | null;
   onSiteAt?: number | null;
   // Not sent to parents:
@@ -101,9 +103,13 @@ export interface Incident {
   eta: Eta | null;
   accountability: { status: "pending" | "partial" | "verified" | "mismatch" | "not_required"; reported: number; total: number };
   headcounts: Headcount[];
+  /** Server-computed headcount rights for THIS viewer (never derived on the client). */
+  headcount?: HeadcountAccess;
   baseLocationRisk?: number;
   hazardApplied?: boolean;
   drill?: boolean;
+  /** "school" = staff only; "simulation" = responders take part. */
+  drillScope?: "school" | "simulation" | null;
   metrics?: Metrics;
   /** Urgency band from the server (bandFor): CRITICAL, HIGH, or MODERATE. Never compute on client. */
   tier?: "CRITICAL" | "HIGH" | "MODERATE";
@@ -136,6 +142,21 @@ export interface Eta {
 
 export interface Headcount { section: string; expected: number; present: number; at: number; by?: string }
 
+/** One answer to "may this viewer count, and against which registry?". */
+export interface HeadcountAccess {
+  required: boolean;
+  /** Only the class owner and the Principal ever see headcount UI. */
+  visible: boolean;
+  canRecord: boolean;
+  /** Set for a single-class ticket; null for whole-school (each teacher owns a section). */
+  ownerSection: string | null;
+  sections: string[];
+  /** The viewer's own section to count, or null until the Principal chooses one. */
+  section: string | null;
+  /** The OWNER's registry — never the reporter's. */
+  registry: number | null;
+}
+
 export interface Metrics {
   toReportMs: number | null;
   toAckMs: number | null;
@@ -147,12 +168,14 @@ export interface Metrics {
 
 export interface Modes {
   hazard: { active: boolean; kind: string; note: string; since: number | null; by: string | null };
-  drill: { active: boolean; label: string; startedAt: number | null };
+  drill: { active: boolean; label: string; startedAt: number | null; scope?: "school" | "simulation" };
   route: { status: "passable" | "flooded" | "blocked"; note?: string; updatedAt?: number | null; by?: string | null };
 }
 
 export interface DrillSummary {
   id: string; label: string; startedAt: number; endedAt: number; startedBy: string; endedBy: string; incidents: number;
+  /** "school" (staff only) or "simulation" (responders took part). */
+  scope?: "school" | "simulation";
   avgToReportMs: number | null; avgToAckMs: number | null; avgToOnSiteMs: number | null; avgToHeadcountMs: number | null; avgInteractions: number | null;
 }
 
@@ -175,6 +198,8 @@ export interface ServerState {
   serverTime: number;
   me: User;
   incidents: Incident[];
+  /** Teachers only: live headcount work (whole-school tasks are never in `incidents`). */
+  headcountTasks?: Incident[];
   roster: RosterEntry[];
   sections: string[];
   modes: Modes;
@@ -318,6 +343,9 @@ export interface AuditEntry {
   /** Actor id (never a name, password or token). */
   by: string | null;
   target: string | null;
+  /** Resolved by the Admin endpoint for display; the raw id stays in by/target. */
+  actorLabel?: string | null;
+  targetLabel?: string | null;
   detail: string;
   ip: string;
   /** Actor role and organisation, for the archive/purge/data-request actions. */

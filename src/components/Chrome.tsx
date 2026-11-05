@@ -7,18 +7,25 @@ import type { NavTab } from "../lib/navigation";
 
 export type { NavTab };
 
-export function BackBarFor({ title, onBack, backLabel = "Back" }: { title: string; onBack: () => void; backLabel?: string }) {
+export function BackBarFor({ title, onBack, backLabel = "Back", actions }: {
+  title: string;
+  onBack: () => void;
+  backLabel?: string;
+  /** Right-aligned on the title row — page-level filter / action buttons. */
+  actions?: ReactNode;
+}) {
   return (
     <div data-testid="back-bar" className="flex items-center gap-2 border-b border-slate-200 px-3 py-2">
       <button type="button" onClick={onBack} className="min-h-12 flex items-center gap-1.5 rounded-xl bg-brand-100 px-3 text-sm font-bold text-brand-800">
         <ArrowLeft size={16} /> {backLabel}
       </button>
-      <h2 className="text-sm font-bold text-slate-700">{title}</h2>
+      <h2 className="min-w-0 flex-1 truncate text-sm font-bold text-slate-700">{title}</h2>
+      {actions && <div data-back-bar-actions className="flex shrink-0 items-center gap-1.5">{actions}</div>}
     </div>
   );
 }
 
-export function Header({ title, subtitle }: { title: string; subtitle?: string }) {
+export function Header({ title, subtitle, action }: { title: string; subtitle?: string; /** Page-level pill (e.g. Headcount needed). */ action?: ReactNode }) {
   const { user, notifPermission, enableNotifications } = useApp();
   return (
     <header className="sticky top-0 z-30 text-white pt-[env(safe-area-inset-top)]"
@@ -31,6 +38,7 @@ export function Header({ title, subtitle }: { title: string; subtitle?: string }
           <p className="truncate text-base font-black leading-tight tracking-tight">{title}</p>
           {subtitle && <p className="truncate text-xs leading-tight text-white/80">{subtitle}</p>}
         </div>
+        {action}
         {user && notifPermission === "default" && (
           <button onClick={() => void enableNotifications()} aria-label="Turn on alert notifications"
             title="Turn on alert notifications" className="flex h-12 w-12 items-center justify-center rounded-lg bg-white/15 hover:bg-white/25">
@@ -123,24 +131,41 @@ export function AlertToasts() {
   );
 }
 
+function NavBadge({ count }: { count: number }) {
+  return (
+    <span data-testid="nav-badge" className="min-w-4 rounded-full bg-blush-600 px-1 text-center text-[10px] leading-4 font-bold text-white">
+      {count}
+    </span>
+  );
+}
+
 function navButton<T extends string>(t: NavTab<T>, tab: T, setTab: (t: T) => void, layout: "bottom" | "side"): ReactNode {
   const Icon = t.icon;
   const active = tab === t.id;
+  const badge = typeof t.badge === "number" && t.badge > 0 ? t.badge : 0;
+  const label = badge ? `${t.label}, ${badge} pending` : t.label;
   if (layout === "bottom") {
     return (
-      <button key={t.id} onClick={() => setTab(t.id)} aria-current={active ? "page" : undefined}
+      <button key={t.id} onClick={() => setTab(t.id)} aria-current={active ? "page" : undefined} aria-label={label}
         className="flex min-h-14 flex-1 flex-col items-center justify-center gap-0.5 py-2">
-        <Icon size={20} className={active ? "text-brand-600" : "text-slate-400"} />
+        <span className="relative">
+          <Icon size={20} className={active ? "text-brand-600" : "text-slate-400"} />
+          {badge > 0 && <span className="absolute -right-3 -top-2"><NavBadge count={badge} /></span>}
+        </span>
         <span className={`text-[11px] font-bold ${active ? "text-brand-600" : "text-slate-500"}`}>{t.label}</span>
       </button>
     );
   }
   return (
     <button key={t.id} onClick={() => setTab(t.id)} aria-current={active ? "page" : undefined}
-      aria-label={t.label} title={t.label}
+      aria-label={label} title={label}
       className={`flex min-h-12 w-full items-center justify-center gap-3 rounded-xl px-3 text-sm font-bold lg:justify-start ${active ? "bg-white/15 text-white" : "text-white/70 hover:bg-white/10"}`}>
-      <Icon size={18} className="shrink-0" />
+      <span className="relative shrink-0">
+        <Icon size={18} className="shrink-0" />
+        {badge > 0 && <span className="absolute -right-3 -top-2 lg:hidden"><NavBadge count={badge} /></span>}
+      </span>
       <span className="hidden lg:inline">{t.label}</span>
+      {badge > 0 && <span className="ml-auto hidden lg:inline"><NavBadge count={badge} /></span>}
     </button>
   );
 }

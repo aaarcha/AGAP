@@ -60,7 +60,7 @@ const archiveIds = async (s, token) => (await s.call("GET", "/api/incidents/arch
 async function addClassmate(s, principal) {
   const created = await s.call("POST", "/api/roster", {
     token: principal,
-    body: { name: "Ms. Santos", section: "Grade 3 - Sec A", room: "Bldg A | Flr 2 | Rm 205" },
+    body: { name: "Ms. Santos", email: "msantos-classmate@sinalhanes.deped.ph", section: "Grade 3 - Sec A", room: "Bldg A | Flr 2 | Rm 205" },
   });
   assert.equal(created.status, 201, JSON.stringify(created.json));
   const token = await s.loginWith(created.json.account.email, created.json.tempPassword);
@@ -111,7 +111,7 @@ test("a section-linked ticket shows for a classmate, never for another section",
   await s.close();
 });
 
-test("a whole-school ticket appears for every teacher", async () => {
+test("a whole-school ticket is a Headcount task for every teacher, never a My Reports row", async () => {
   const s = await boot();
   const principal = await s.login("principal@sinalhanes.deped.ph");
   const t1 = await s.login("t1@sinalhanes.deped.ph");
@@ -124,7 +124,9 @@ test("a whole-school ticket appears for every teacher", async () => {
   assert.equal(wide.linkedSection, "ALL");
 
   for (const [name, token] of [["t1", t1], ["t2", t2], ["t3", t3]]) {
-    assert.ok(has(await mine(s, token), wide.id), `${name} sees the whole-school ticket`);
+    const st = (await s.call("GET", "/api/state", { token })).json;
+    assert.equal(has(st.incidents, wide.id), false, `${name}'s lists carry no whole-school report`);
+    assert.ok((st.headcountTasks ?? []).some((i) => i.id === wide.id), `${name} sees it as a live Headcount task`);
   }
   await s.close();
 });

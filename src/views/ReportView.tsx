@@ -7,6 +7,7 @@ import {
   Search,
   ShieldAlert,
   Siren,
+  Users,
   Waves,
   WifiOff,
   X,
@@ -27,10 +28,11 @@ import {
 import { useApp } from "../lib/store";
 import { catTheme } from "../lib/theme";
 import { locationSetByLabel } from "../lib/format";
+import { locationName } from "../components/Location";
 import type { Incident, ReportPayload } from "../lib/types";
 import { ConfirmModal } from "../components/Modal";
 import { WaitingLine } from "../components/Incident";
-import { HeadcountPanel, RuleBadges } from "../components/Rules";
+import { RuleBadges } from "../components/Rules";
 import { CampusPicker, type DetectedPlace, type PickedPlace } from "../components/CampusPicker";
 import { Select } from "../components/Select";
 import { useMediaQuery } from "../lib/hooks";
@@ -173,10 +175,11 @@ type Loc = Pick<
   "locationKind" | "areaId" | "roomId" | "locationSetBy"
 >;
 
-export default function ReportView({ onOpenProfile }: { onOpenProfile?: () => void } = {}) {
+export default function ReportView({ onOpenProfile, onOpenHeadcount }: { onOpenProfile?: () => void; onOpenHeadcount?: () => void } = {}) {
   const {
     user,
     incidents,
+    headcountTasks,
     sections,
     submit,
     queue,
@@ -222,16 +225,15 @@ export default function ReportView({ onOpenProfile }: { onOpenProfile?: () => vo
     (i) => i.reporterId === user!.id
   );
 
-  const headcountTask = isTeacher
-    ? incidents.find(
+  // Only a small pill here — the headcount form lives on its own page, so the
+  // three-tap report flow is never pushed down or covered.
+  const pendingHeadcount = isTeacher
+    ? headcountTasks.filter(
         (i) =>
           i.status !== "RESOLVED" &&
-          (i.linkedSection === "ALL" ||
-            i.linkedSection === user!.section) &&
-          i.accountability.status !== "not_required" &&
           !i.headcounts.some((h) => h.section === user!.section)
-      )
-    : undefined;
+      ).length
+    : 0;
 
   function flash(n: Notice) {
     setNotice(n);
@@ -564,6 +566,16 @@ export default function ReportView({ onOpenProfile }: { onOpenProfile?: () => vo
         taps.current += 1;
       }}
     >
+      {pendingHeadcount > 0 && onOpenHeadcount && (
+        <button
+          type="button"
+          onClick={onOpenHeadcount}
+          className="mb-3 inline-flex min-h-9 items-center gap-1.5 rounded-full border border-blush-200 bg-white px-3 text-xs font-bold text-blush-700"
+        >
+          <Users size={14} /> Headcount needed · {pendingHeadcount}
+        </button>
+      )}
+
       <div className="grid w-full gap-3 md:grid-cols-[minmax(0,1fr)_20rem] md:items-start lg:grid-cols-[minmax(0,1fr)_22rem]">
         {/* Left column: the tap-through steps */}
         <div className="min-w-0 space-y-3 md:pr-1">
@@ -627,31 +639,6 @@ export default function ReportView({ onOpenProfile }: { onOpenProfile?: () => vo
               </li>
             ))}
           </ul>
-        </section>
-      )}
-
-      {/* Group-scope headcount request: priority card above the tiles */}
-      {headcountTask && (
-        <section
-          className={
-            "mx-auto max-w-xl space-y-2 rounded-2xl border-2 border-blush-200 bg-white p-3"
-          }
-          aria-label="Headcount needed"
-        >
-          <div className="space-y-1">
-            <p className="text-xs font-extrabold uppercase tracking-wide text-blush-700">
-              Headcount needed now
-            </p>
-            <p className="mt-0.5 text-sm font-bold text-slate-800">
-              {catTheme(headcountTask.category).emoji}{" "}
-              {headcountTask.categoryLabel} · 📍{" "}
-              {headcountTask.room}
-            </p>
-            <p className="text-xs text-slate-500">
-              Count your pupils so the principal can account for everyone.
-            </p>
-          </div>
-          <HeadcountPanel inc={headcountTask} onOpenProfile={onOpenProfile} />
         </section>
       )}
 
@@ -855,18 +842,13 @@ export default function ReportView({ onOpenProfile }: { onOpenProfile?: () => vo
               Your last report · {last.categoryLabel}
             </p>
             <p className="text-xs text-slate-600">
-              📍 {last.room} · {locationSetByLabel(last)}
+              📍 {locationName(last.room)} · {locationSetByLabel(last)}
             </p>
             <WaitingLine inc={last} />
             <div className="mt-2">
               <RuleBadges inc={last} />
             </div>
 
-            {last.status !== "RESOLVED" && (
-              <div className="mt-3">
-                <HeadcountPanel inc={last} onOpenProfile={onOpenProfile} />
-              </div>
-            )}
             {last.canCancel && (
               <button
                 onClick={() => setConfirmCancel(true)}

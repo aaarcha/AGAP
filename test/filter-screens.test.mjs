@@ -71,7 +71,7 @@ globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
 // Desktop viewport: both the master-detail split (1024) and the Filters
 // popover (768) are on, exactly like the >=1024 layout in the browser.
-const viewportWidth = 1280;
+let viewportWidth = 1280;
 w.matchMedia = (query) => {
   const m = /min-width:\s*(\d+)px/.exec(query);
   return {
@@ -125,6 +125,7 @@ const { render, cleanup, fireEvent, waitFor } = await import("@testing-library/r
 test.afterEach(() => {
   cleanup();
   clearSessionStates();
+  viewportWidth = 1280;
 });
 
 /* ------------------------------------------------------------------ helpers */
@@ -156,11 +157,11 @@ function openFilters() {
   fireEvent.click(b);
 }
 
-/** Toggle one quick filter row inside the panel (Locked, Drill, Escalated…). */
+/** Toggle one chip inside the panel (Quick filters, or a section chip). */
 function toggleInPanel(label) {
-  const b = [...document.querySelectorAll('button[role="switch"]')]
-    .find((x) => (x.getAttribute("aria-label") || "") === label);
-  assert.ok(b, `the "${label}" toggle is in the Filters panel`);
+  const b = [...document.querySelectorAll("[data-filter-section] button")]
+    .find((x) => (x.getAttribute("aria-label") || "") === label || (x.textContent || "").trim().startsWith(label));
+  assert.ok(b, `the "${label}" chip is in the Filters panel`);
   fireEvent.click(b);
   return b;
 }
@@ -179,26 +180,18 @@ function chipButtons(groupLabel) {
   return [...g.querySelectorAll("button")];
 }
 
-/**
- * Choose one value in the Period dropdown inside the Filters sheet.
- * `scope` picks which FilterBar to open when a screen has more than one.
- */
-function pickPeriod(label, scope) {
-  const root = scope ? document.querySelector(scope) : document;
-  assert.ok(root, `scope "${scope}" is on screen`);
-  const btn = [...root.querySelectorAll("button[aria-label]")]
+/** Pick a period chip inside the Filters panel's Period section. */
+function pickPeriod(label) {
+  const btn = [...document.querySelectorAll("button[aria-label]")]
     .find((x) => (x.getAttribute("aria-label") || "").startsWith("Filters"));
   assert.ok(btn, "the Filters icon button is on screen");
   fireEvent.click(btn);
-  const g = document.querySelector("[data-period-group]");
-  assert.ok(g, "the Period group is inside the Filters sheet");
-  const trigger = g.querySelector('button[aria-haspopup="listbox"]');
-  assert.ok(trigger, "the Period dropdown exists");
-  fireEvent.click(trigger);
-  const opt = [...document.querySelectorAll('ul[role="listbox"] li[role="option"]')]
+  const g = document.querySelector("[data-period-section]");
+  assert.ok(g, "the Period section is inside the Filters panel");
+  const chip = [...g.querySelectorAll('[role="radio"]')]
     .find((b) => (b.textContent || "").trim().startsWith(label));
-  assert.ok(opt, `period "${label}" is offered`);
-  fireEvent.click(opt);
+  assert.ok(chip, `period "${label}" is offered`);
+  fireEvent.click(chip);
 }
 
 function chipButton(groupLabel, labelText) {
@@ -291,7 +284,7 @@ test("roster: grade chips filter the list and move the results header", async ()
   assert.equal(resultsText(), "Teachers 3 of 3");
 });
 
-test("My Reports: status chips filter the teacher's own open reports", async () => {
+test("My Reports: one filter, one list, and the Status section narrows it", async () => {
   __resetCtx({
     user: USERS.teacher,
     incidents: [
@@ -307,23 +300,40 @@ test("My Reports: status chips filter the teacher's own open reports", async () 
   render(React.createElement(App));
 
   clickRail("My Reports");
-  assert.equal(resultsText(), "Reports 3 of 3", "own reports plus the class-linked one");
+  assert.equal(document.querySelectorAll("button[aria-label^=\"Filters\"]").length, 1, "exactly ONE Filter button");
+  assert.equal(document.querySelectorAll("[data-results]").length, 1, "exactly ONE results header");
+  assert.equal(document.body.textContent.includes("Report history"), false, "the second list/heading is gone");
+  assert.equal(document.querySelectorAll('section[aria-label="Report history"]').length, 0);
+
+  assert.equal(resultsText(), "Reports 4 of 4", "own reports (open and closed) plus the class-linked one");
   assert.ok(document.body.textContent.includes("Reported in your class"), "the relation label explains why it is here");
   assert.ok(!document.body.textContent.includes("Other class report"), "another section's ticket stays out");
+  assert.ok(document.body.textContent.includes("Active"), "open tickets sit under an Active subheading");
+  assert.ok(document.body.textContent.includes("Earlier"), "closed tickets sit under an Earlier subheading");
 
-  clickChip("Status", "Seen");
-  assert.equal(resultsText(), "Reports 1 of 3");
+  clickChip("Report status", "Resolved");
+  assert.equal(resultsText(), "Reports 1 of 1");
+  assert.ok(document.body.textContent.includes("Already closed"));
+  assert.ok(!document.body.textContent.includes("Broken arm"), "the live report is filtered out");
+
+  clickChip("Report status", "All");
+  openFilters();
+  toggleInPanel("Seen");
+  closeFilters();
+  assert.equal(resultsText(), "Reports 1 of 4");
   assert.ok(document.body.textContent.includes("Broken arm"), "only the SEEN report is listed");
   assert.ok(!document.body.textContent.includes("Fever in Grade 3"), "the SENT report is filtered out");
 });
 
-test("the Urgency dropdown is portalled out of the filters panel with every option in order", async () => {
+test("the Urgency section is a set of chips inside the filters panel, in order", async () => {
   __resetCtx({ user: USERS.principal, incidents: [inc("u1", { subLabel: "Smoke in the lab" })] });
   render(React.createElement(App));
 
   clickRail("More");
   clickButton("Incidents & Records");
-  await waitFor(() => assert.ok(document.body.textContent.includes("Real Incidents"), "the records view opened"));
+  await waitFor(() => assert.ok(document.body.textContent.includes("Incidents"), "the records view opened"));
+  assert.equal(document.querySelector("[data-analytics-link]"), null, "the dead analytics link is gone");
+  assert.ok(!document.body.textContent.includes("See analytics for this period"));
 
   fireEvent.click(document.querySelector('button[aria-haspopup="dialog"][aria-label="Filters"]'));
   const panel = await waitFor(() => {
@@ -331,21 +341,13 @@ test("the Urgency dropdown is portalled out of the filters panel with every opti
     assert.ok(p, "the filters panel opened");
     return p;
   });
-  const trigger = await waitFor(() => {
-    const t = document.querySelector('[data-group-trigger][aria-label^="Urgency:"]');
-    assert.ok(t, "the Urgency dropdown is in the panel");
-    return t;
-  });
-  fireEvent.click(trigger);
-
-  const list = document.querySelector("[data-group-menu]");
-  assert.ok(list, "the group menu rendered");
-  assert.equal(panel.contains(list), false, "the menu is portalled, so the panel cannot clip it");
-  assert.match(list.className, /overflow-y-auto/);
-  assert.match(list.className, /max-h-/);
-
-  const options = [...list.querySelectorAll('[role="option"]')].map((o) => (o.textContent ?? "").trim().split(" (")[0]);
-  assert.deepEqual(options, ["Any urgency", "CRITICAL", "HIGH", "MODERATE"]);
+  assert.equal(panel.querySelector('[aria-haspopup="listbox"]'), null, "no dropdown is used");
+  const heading = [...panel.querySelectorAll("[data-filter-section] h3")]
+    .find((h) => (h.textContent || "").trim() === "Urgency");
+  assert.ok(heading, "the Urgency section is in the panel");
+  const chips = [...heading.closest("section").querySelectorAll("button")]
+    .map((b) => (b.textContent ?? "").trim().split(" · ")[0]);
+  assert.deepEqual(chips, ["CRITICAL", "HIGH", "MODERATE"]);
 });
 
 test("Command queue: the Drill and Escalated toggles in the Filters panel narrow the queue", async () => {
@@ -364,7 +366,7 @@ test("Command queue: the Drill and Escalated toggles in the Filters panel narrow
 
   openFilters();
   const drill = toggleInPanel("Drill");
-  assert.equal(drill.getAttribute("aria-checked"), "true");
+  assert.equal(drill.getAttribute("aria-pressed"), "true");
   assert.equal(resultsText(), "Incidents 1 of 3");
   assert.equal(summaryText(), "Drill", "the header summarises the active filter");
   const rows = document.querySelectorAll("[data-incident-id]");
@@ -439,7 +441,7 @@ test("Admin accounts: the role row and the Locked toggle filter the list", async
   assert.equal(resultsText(), "Users 4 of 4");
 });
 
-test("My Reports: the Period dropdown filters the record history", async () => {
+test("My Reports: the Period section filters the one list", async () => {
   __resetCtx({
     user: USERS.teacher,
     incidents: [
@@ -452,24 +454,20 @@ test("My Reports: the Period dropdown filters the record history", async () => {
   render(React.createElement(App));
 
   clickRail("My Reports");
-  const hist = () => document.querySelector('section[aria-label="Report history"]');
-  assert.ok(hist(), "the report history is on the screen");
-  assert.equal(hist().querySelectorAll("li").length, 2, "both records are listed");
-  assert.match(hist().querySelector("h2").textContent, /\(2\)/, "the header counts both");
+  assert.equal(resultsText(), "Reports 2 of 2", "both records are in the one list");
 
-  pickPeriod("Today", 'section[aria-label="Report history"]');
+  pickPeriod("Today");
   closeFilters();
-  assert.equal(hist().querySelectorAll("li").length, 1, "only today's record stays");
-  assert.ok(hist().textContent.includes("Closed today"));
-  assert.ok(!hist().textContent.includes("Closed last week"), "older record is filtered out");
-  assert.match(hist().querySelector("h2").textContent, /1 of 2/, "the header shows shown of total");
+  assert.equal(resultsText(), "Reports 1 of 2", "only today's record stays");
+  assert.ok(document.body.textContent.includes("Closed today"));
+  assert.ok(!document.body.textContent.includes("Closed last week"), "older record is filtered out");
 
-  pickPeriod("Any time", 'section[aria-label="Report history"]');
+  pickPeriod("Any time");
   closeFilters();
-  assert.equal(hist().querySelectorAll("li").length, 2, "Any time brings both back");
+  assert.equal(resultsText(), "Reports 2 of 2", "Any time brings both back");
 });
 
-test("Admin audit: the period control sits in the header toolbar and filters the records", async () => {
+test("Admin audit: the filter icon sits in the page header row and filters the records", async () => {
   __resetCtx({ user: USERS.super_admin });
   render(React.createElement(App));
 
@@ -478,32 +476,189 @@ test("Admin audit: the period control sits in the header toolbar and filters the
   clickButton("Audit log");
   await waitFor(() => assert.ok(document.body.textContent.includes("3 events")));
 
-  // The control belongs to the page header toolbar, not a row of its own.
-  const control = document.querySelector("[data-period-control]");
-  assert.ok(control, "the period control is on the page");
-  const toolbar = control.closest("[data-audit-toolbar]");
-  assert.ok(toolbar, "it sits in the header toolbar");
-  assert.equal(document.querySelectorAll("[data-period-control]").length, 1, "exactly one period control");
-  const header = toolbar.parentElement;
-  for (const cls of ["flex", "flex-wrap", "items-center", "justify-between"]) {
-    assert.ok(header.className.split(/\s+/).includes(cls), `the header toolbar is ${cls}`);
-  }
+  // The Filter icon belongs to the back bar's actions slot, in line with "More".
+  const bar = document.querySelector('[data-testid="back-bar"]');
+  assert.ok(bar, "the page header bar exists");
+  const actions = bar.querySelector("[data-back-bar-actions]");
+  assert.ok(actions, "the back bar has an actions slot");
+  assert.equal(actions.parentElement, bar, "the slot is on the title row itself");
+  assert.ok(actions.parentElement.querySelector('button').textContent.includes("More"), "in line with the More back button");
+  const trigger = actions.querySelector('button[aria-label^="Filters"]');
+  assert.ok(trigger, "the Filter icon is in the header row");
+  assert.equal(document.querySelectorAll("[data-period-control]").length, 0, "no stand-alone period control remains");
+
+  fireEvent.click(trigger);
+  const panel = document.querySelector('[role="dialog"][aria-label="Audit filters"]');
+  assert.ok(panel, "the filter panel opens");
+  const headings = [...panel.querySelectorAll("[data-filter-section] h3")].map((h) => h.textContent.trim());
+  assert.deepEqual(headings, ["Period", "Category", "Result"], "the sheet has the three sections");
 
   const pick = (label) => {
-    fireEvent.click(control.querySelector('button[aria-haspopup="listbox"]'));
-    const opt = [...document.querySelectorAll('[role="option"]')].find((o) => (o.textContent || "").trim().startsWith(label));
-    assert.ok(opt, `option "${label}" exists`);
-    fireEvent.click(opt);
+    const chip = [...panel.querySelectorAll('[data-period-section] [role="radio"]')]
+      .find((c) => (c.textContent || "").trim().startsWith(label));
+    assert.ok(chip, `period "${label}" exists`);
+    fireEvent.click(chip);
   };
 
   pick("Last 7 days");
   assert.ok(document.body.textContent.includes("1 event"), "only the recent entry is in range");
-  assert.ok(document.body.textContent.includes("login"));
+  assert.ok(document.body.textContent.includes("Sign-in succeeded"));
   assert.ok(!document.body.textContent.includes("config.save"), "the 40-day-old entry is filtered out");
+  assert.equal(trigger.getAttribute("aria-label"), "Filters, 1 active");
 
   pick("Last 30 days");
   assert.ok(document.body.textContent.includes("2 events"));
 
+  const chipIn = (sectionLabel, chipLabel) => {
+    const section = [...panel.querySelectorAll("[data-filter-section]")]
+      .find((s) => s.querySelector("h3").textContent.trim() === sectionLabel);
+    const chip = [...section.querySelectorAll("button")].find((b) => (b.textContent || "").trim().startsWith(chipLabel));
+    assert.ok(chip, `${chipLabel} exists in ${sectionLabel}`);
+    fireEvent.click(chip);
+  };
+  chipIn("Category", "Sign-ins");
+  assert.ok(document.body.textContent.includes("1 event"), "only sign-ins remain");
+  // No sign-in failed, so the zero-count chip stays visible but cannot be chosen.
+  const failed = [...panel.querySelectorAll("[data-filter-section]")]
+    .find((s) => s.querySelector("h3").textContent.trim() === "Result")
+    .querySelectorAll("button")[1];
+  assert.equal(failed.textContent.trim(), "Failed · 0");
+  assert.notEqual(failed.getAttribute("disabled"), null, "a zero-count chip is disabled");
+  chipIn("Result", "Success");
+  assert.ok(document.body.textContent.includes("1 event"), "the sign-in succeeded");
+
   pick("Any time");
+  chipIn("Result", "Success");
+  chipIn("Category", "Sign-ins");
   assert.ok(document.body.textContent.includes("3 events"));
+});
+test("My Reports at phone width: plain flow, relative cards, full-screen detail with Back", async () => {
+  viewportWidth = 390;
+  __resetCtx({
+    user: USERS.teacher,
+    incidents: [
+      inc("p1", { reporterId: "t1", status: "SENT", subLabel: "Fever in Grade 3" }),
+      inc("p2", { reporterId: "t1", status: "RESOLVED", outcome: "resolved", resolvedAt: 1_700_000_500_000, subLabel: "Closed spill" }),
+    ],
+  });
+  render(React.createElement(App));
+
+  assert.ok(document.querySelector('[data-page="flow"]'), "the page is a flow page");
+  clickRail("My Reports");
+
+  const list = document.querySelector('ul[aria-label="My reports — select a report"]');
+  assert.ok(list, "the one report list is on screen");
+  assert.ok(!/overflow/.test(list.className || ""), "the list has no inner scroll box at phone width");
+  assert.ok(!/max-h/.test(list.className || ""), "the list has no max height at phone width");
+
+  for (const el of [list, ...list.querySelectorAll("*")]) {
+    const cls = String(el.className?.baseVal ?? el.className ?? "");
+    assert.ok(!/(^|\s)(absolute|sticky)(\s|$)/.test(cls), `no ${cls.includes("sticky") ? "sticky" : "absolute"} positioning inside the list: "${cls}"`);
+    assert.ok(!/(^|\s)-m[tblrxy]?-/.test(cls) && !/(^|\s)-m[tblrxy]-/.test(cls), `no negative margin inside the list: "${cls}"`);
+  }
+
+  const cards = [...list.querySelectorAll('button[data-md-item] > div')];
+  assert.ok(cards.length >= 2, "each report is a card");
+  for (const card of cards) assert.ok(card.className.includes("relative"), "cards are relative so nothing can overlap them");
+
+  assert.equal(document.querySelector('[role="dialog"][aria-modal="true"]'), null, "nothing is open on top of the list yet");
+  fireEvent.click(list.querySelector("button[data-md-item]"));
+  const detail = await waitFor(() => {
+    const d = document.querySelector('[role="dialog"][aria-modal="true"]');
+    assert.ok(d, "tapping a report opens a full-screen detail");
+    return d;
+  });
+  assert.ok(detail.textContent.includes("Back"), "the detail has a Back button");
+  assert.ok(detail.textContent.includes("Fever in Grade 3"), "the chosen report is shown");
+});
+
+test("location: the area is the location; the reported-from line is Principal/Admin only", async () => {
+  const room = "Quadrangle (reassigned from Bldg A | Flr 1 | Principal's Office)";
+  __resetCtx({ user: USERS.principal, incidents: [inc("l1", { room, subLabel: "Student collapsed" })] });
+  render(React.createElement(App));
+  assert.ok(document.body.textContent.includes("Quadrangle"), "the area name is the location");
+  assert.ok(!document.body.textContent.includes("reassigned from"), "the stored reassignment text is never shown");
+  assert.ok(document.body.textContent.includes("Reported from Bldg A, Floor 1, Principal's Office"), "the Principal sees the origin line");
+
+  cleanup();
+  __resetCtx({ user: USERS.teacher, incidents: [inc("l2", { room, reporterId: "t1", subLabel: "Student collapsed" })] });
+  render(React.createElement(App));
+  clickRail("My Reports");
+  assert.ok(document.body.textContent.includes("Quadrangle"), "a teacher sees the area name");
+  assert.ok(!document.body.textContent.includes("Reported from"), "…but not the origin line");
+  assert.ok(!document.body.textContent.includes("reassigned from"), "and never the stored text");
+});
+
+test("Admin audit: day groups on phones and a six-column table at the wide breakpoint", async () => {
+  __resetCtx({ user: USERS.super_admin });
+  render(React.createElement(App));
+  clickRail("More");
+  await waitFor(() => assert.ok(document.body.textContent.includes("Audit log")));
+  clickButton("Audit log");
+  await waitFor(() => assert.ok(document.body.textContent.includes("3 events")));
+
+  const summary = document.querySelector("[data-audit-summary]");
+  assert.ok(summary, "the event count sits under the title");
+  assert.ok(summary.textContent.includes("3 events"));
+
+  const list = document.querySelector("[data-audit-list]");
+  assert.ok(list, "the phone list is rendered");
+  const days = [...list.querySelectorAll("[data-audit-day]")];
+  assert.ok(days.length >= 2, "events are grouped by day");
+  assert.equal(days[0].getAttribute("data-audit-day"), "Today", "today's group is named");
+  const first = list.querySelector("[data-audit-event]");
+  assert.ok(first.querySelector("svg"), "a category icon sits by each event");
+  assert.ok(first.textContent.includes("Sign-in succeeded"), "the action is humanized");
+  assert.ok(first.textContent.includes("Sys Admin"), "the actor is shown in full");
+  assert.equal(/truncate|line-clamp/.test(first.innerHTML), false, "no truncated label in the row");
+
+  const table = document.querySelector("[data-audit-table]");
+  assert.ok(table, "the wide breakpoint gets a table");
+  assert.deepEqual([...table.querySelectorAll("thead th")].map((th) => th.textContent.trim()),
+    ["Time", "Action", "Actor", "Target", "Detail", "IP"], "six fixed columns");
+  assert.equal(/overflow-x/.test(table.className), false, "no horizontal scroll wrapper");
+  assert.ok(table.querySelectorAll("[data-audit-row]").length >= 1);
+});
+
+test("My Reports: the card carries the five-dot progress and the relation chip", async () => {
+  __resetCtx({
+    user: USERS.teacher,
+    incidents: [inc("d1", { reporterId: "t1", status: "EN_ROUTE", subLabel: "Hallway fall" })],
+  });
+  render(React.createElement(App));
+  clickRail("My Reports");
+
+  const progress = document.querySelector("[data-progress]");
+  assert.ok(progress, "the card shows a progress indicator");
+  const dots = [...progress.querySelectorAll("span")];
+  assert.equal(dots.length, 5, "Sent, Seen, En route, On site, Resolved");
+  assert.equal(dots.filter((d) => d.className.includes("bg-brand-600")).length, 3, "the first three are filled");
+  assert.equal(progress.getAttribute("data-progress"), "EN_ROUTE");
+  assert.ok(document.body.textContent.includes("You reported"), "the relation chip explains why it is here");
+  assert.ok(document.body.textContent.includes("ago"), "the card says how long ago");
+
+  const list = document.querySelector('ul[aria-label="My reports — select a report"]');
+  assert.equal(list.querySelectorAll('[class*="truncate"]').length, 0, "no truncated label in the card");
+});
+
+test("Incidents & Records: one title (the back bar), short tabs, no duplicate counts", async () => {
+  __resetCtx({ user: USERS.principal, incidents: [inc("r1", { subLabel: "Smoke in the lab" })] });
+  render(React.createElement(App));
+  clickRail("More");
+  await waitFor(() => assert.ok(document.body.textContent.includes("Incidents & Records")));
+  clickButton("Incidents & Records");
+  await waitFor(() => assert.ok(document.querySelector("#records-tab-real"), "the records tabs render"));
+
+  const page = document.querySelector("[data-page]");
+  assert.equal(page.querySelectorAll("h1").length, 0, "the back bar already shows the title");
+  assert.equal(document.querySelector("[data-headline-counts]"), null, "the duplicate counts line is gone");
+  assert.ok(document.querySelector("[data-sy-chip]"), "the school-year chip stays");
+
+  const tabs = [...page.querySelectorAll('[role="tab"][id^="records-tab-"]')];
+  assert.deepEqual(tabs.map((t) => t.querySelector("span").textContent), ["Incidents", "Drills", "Archive"]);
+  for (const tab of tabs) {
+    assert.ok(tab.querySelector("svg"), "each tab has an icon");
+    assert.ok(tab.className.includes("flex-1"), "the tabs share the width equally");
+  }
+  assert.equal(page.querySelectorAll('[class*="truncate"]').length, 0, "no truncated label on the screen");
 });

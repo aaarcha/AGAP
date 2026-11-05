@@ -66,7 +66,7 @@ test.afterEach(() => cleanup());
 // The expected sets are hard-coded on purpose: a stray tab from another role
 // must fail this test, not silently follow the implementation.
 const ROLES = {
-  teacher: { tab: "report", labels: ["Report", "My Reports", "Account"] },
+  teacher: { tab: "report", labels: ["Report", "My Reports", "Headcount", "Account"] },
   parent: { tab: "alerts", labels: ["Alerts", "Account"] },
   principal: { tab: "command", labels: ["Command", "Report", "Analytics", "More"] },
   responder: { tab: "queue", labels: ["Queue", "Escalation", "History", "Account"] },

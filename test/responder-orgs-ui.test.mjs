@@ -290,7 +290,9 @@ const EN_ROUTE = incident({
 });
 
 test("the status stepper marks completed steps, the single active step and upcoming steps", async () => {
-  __resetCtx({ user: PRINCIPAL, incidents: [EN_ROUTE] });
+  // The Principal has its own three-step school track; the overall five-step
+  // track belongs to the school-facing views (a parent's alert card here).
+  __resetCtx({ user: PARENT, incidents: [EN_ROUTE] });
   render(React.createElement(App));
   await waitFor(() => assert.ok(text().includes("Electrical fire"), "the command queue rendered"));
 
@@ -484,13 +486,13 @@ test("the main action label and function follow the ticket status, and no earlie
   assert.equal(has("Mark as Resolved"), true);
   cleanup();
 
-  // A principal walks the same status-driven order.
+  // The Principal has school-level actions only: acknowledge, then close.
   __resetCtx({ user: PRINCIPAL, incidents: [EN_ROUTE] });
   render(React.createElement(App));
   await waitFor(() => assert.ok(text().includes("Electrical fire")));
   assert.equal(labels().some((l) => l.includes("Acknowledge")), false);
-  assert.equal(has("Mark as On Site"), true);
-  assert.equal(has("Mark as Resolved"), false);
+  assert.equal(has("Mark as On Site"), false, "the Principal never gets a responder step");
+  assert.ok(labels().some((l) => l.includes("Close — resolved")), "the Principal can close it instead");
   cleanup();
 
   // RESOLVED: no main action at all, only the disabled badge.

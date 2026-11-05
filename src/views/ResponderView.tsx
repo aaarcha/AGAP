@@ -5,6 +5,7 @@ import { STATUS_LABEL, bandFor } from "../../shared/domain.js";
 import { useApp } from "../lib/store";
 import type { Incident } from "../lib/types";
 import { BAND_STYLE, catTheme } from "../lib/theme";
+import { LocationLine } from "../components/Location";
 import { IncidentCard } from "../components/Incident";
 import Escalation from "../components/Escalation";
 import HistorySection from "../components/History";
@@ -35,7 +36,7 @@ export function QueueRow({ inc, active }: { inc: Incident; active: boolean }) {
         <span className="shrink-0 rounded-full px-2 py-0.5 text-[10px] font-extrabold uppercase tracking-wide"
           style={{ background: bs.bg, color: bs.color, border: `1px solid ${bs.color}55` }}>{band}</span>
       </div>
-      <p className="mt-0.5 truncate text-xs text-slate-500">📍 {inc.room}</p>
+      <LocationLine room={inc.room} className="mt-0.5 block text-xs text-slate-500" />
       <p className="mt-0.5 text-[11px] font-bold uppercase tracking-wide text-slate-500">{STATUS_LABEL[inc.status]}{inc.drill ? " · Drill" : ""}</p>
     </div>
   );
@@ -48,6 +49,8 @@ export function IncidentQueue({ incidents, title, empty }: { incidents: Incident
   const [state, setState] = useFilterState("responder-queue", () => initialFilterState({ sort: "priority" }));
   // Real emergencies first, then critical overrides, then by urgency, then oldest first.
   const active = useMemo(() => filterQueue(open, state), [open, state]);
+  // A simulation drill reaches responders on purpose: say loudly that it is not real.
+  const hasDrill = useMemo(() => open.some((i) => i.drill), [open]);
   const filterBar = (
     <FilterBar {...incidentFilterBarProps({ open, state, setState, resultsLabel: "Incidents" })} />
   );
@@ -61,6 +64,11 @@ export function IncidentQueue({ incidents, title, empty }: { incidents: Incident
         </div>
       ) : (
         <div className="lg:min-h-0 lg:flex-1">
+          {hasDrill && (
+            <p data-drill-banner className="mb-2 rounded-xl border border-accent-200 bg-accent-50 px-3 py-2 text-xs font-bold text-accent-700">
+              DRILL, no real response needed
+            </p>
+          )}
           <MasterDetail
             items={active}
             ariaLabel={`${title} — select a ticket`}

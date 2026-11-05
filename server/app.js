@@ -160,6 +160,50 @@ export function createApp(opts = {}) {
   const orgOf = (acc) =>
     acc && acc.role === "responder" ? (D.orgLabel(acc.org) || "Responder") : D.SCHOOL.name;
 
+  // ---- audit labels -------------------------------------------------------
+  // Entries keep storing ids. The Admin view resolves them to something a
+  // person can read, while the raw id stays available as the "Reference".
+  const maskEmail = (e) => {
+    const [name, domain] = String(e ?? "").split("@");
+    return domain ? `${name.slice(0, 1)}***@${domain}` : "****";
+  };
+  const shortTicket = (id) => `Ticket ${String(id).replace(/^INC-/, "#")}`;
+  const friendlyPlace = (room) => {
+    const text = String(room ?? "").replace(/\s*\(reassigned from\s+.*\)\s*$/i, "").trim();
+    const parts = text.split("|").map((x) => x.trim()).filter(Boolean).map((x) => {
+      const m = /^Flr\s+(\d+)$/i.exec(x);
+      return m ? `Floor ${m[1]}` : x;
+    });
+    return parts.join(", ") || "School";
+  };
+  function accountForRef(ref) {
+    const raw = String(ref ?? "").trim();
+    if (!raw) return null;
+    return accountById(raw) || findAccount(raw.toLowerCase()) || store.db.accounts.find((a) => a.teacherId === raw) || null;
+  }
+  function labelAccount(acc) {
+    if (!acc) return null;
+    if (acc.status === "purged") return "Deleted account";
+    const roleLabel = { teacher: "Teacher", principal: "Principal", super_admin: "Admin", responder: "Responder", parent: "Parent/PTA" }[acc.role] || acc.role;
+    return `${acc.email} (${roleLabel}, ${orgOf(acc)})`;
+  }
+  function actorLabelFor(ref) {
+    const raw = String(ref ?? "").trim();
+    if (!raw) return "System";
+    return labelAccount(accountForRef(raw)) || raw;
+  }
+  function targetLabelFor(ref) {
+    const raw = String(ref ?? "").trim();
+    if (!raw) return null;
+    const parts = raw.split(/,\s*/).filter(Boolean);
+    if (parts.length > 1) return parts.map((x) => targetLabelFor(x)).join(", ");
+    const acc = accountForRef(raw);
+    if (acc) return labelAccount(acc);
+    const inc = store.db.incidents.find((i) => i.id === raw);
+    if (inc) return inc.anonymizedAt ? `${shortTicket(raw)} (anonymised)` : `${shortTicket(raw)} · ${inc.subLabel} · ${friendlyPlace(inc.room)}`;
+    return raw;
+  }
+
   // Admin configuration: versioned records, cached active version, safe fallback.
   // ESCALATION_MINUTES from the environment only seeds the very first version.
   const config = createConfigService({
@@ -395,9 +439,25 @@ export function createApp(opts = {}) {
     res.end(data);
   }
 
+  // A live change notification never carries the identity of a ticket the
+  // client may not see. The version still bumps, so the client refetches its
+  // own filtered state (a whole-school alert reaches a teacher as a task).
+  function viewerForAccount(accountId) {
+    const acc = accountById(accountId);
+    return acc ? userFromAccount(acc) : null;
+  }
+
   function broadcast(evt) {
-    const payload = `event: change\ndata: ${JSON.stringify({ version: store.db.version, ...evt })}\n\n`;
     for (const c of sseClients) {
+      // A per-ticket event reaches ONLY that ticket's audience. Everyone else
+      // gets the version bump alone: no event type, no id, no status, no title.
+      let safe = evt;
+      if (evt && evt.id) {
+        const inc = store.db.incidents.find((i) => i.id === evt.id);
+        const viewer = viewerForAccount(c.accountId);
+        if (!inc || !viewer || (!canSee(inc, viewer) && !headcountAccess(inc, viewer).visible)) safe = {};
+      }
+      const payload = `event: change\ndata: ${JSON.stringify({ version: store.db.version, ...safe })}\n\n`;
       try { c.res.write(payload); } catch { sseClients.delete(c); }
     }
   }
@@ -502,16 +562,105 @@ export function createApp(opts = {}) {
   // ------------------------------------------------------------ role views
   const isHiddenFor = (i, user) => (i.hiddenBy || []).includes(user.id);
 
+  /**
+   * ONE description of who a ticket belongs to. Every list, stream and
+   * notification is derived from this; the client is never the privacy boundary.
+   */
+  function audienceOf(i) {
+    return {
+      drill: Boolean(i.drill),
+      scope: drillScopeOf(i),
+      reporters: Array.isArray(i.reporterIds) ? i.reporterIds : i.reporterId ? [i.reporterId] : [],
+      section: ownerSectionOf(i),
+      wholeSchool: i.linkedSection === "ALL",
+      active: i.status !== "RESOLVED" && !i.archivedAt,
+    };
+  }
+
   function canSee(i, user) {
     if (user.role === "super_admin") return false; // console-only role: accounts + audit, never incident data
-    if (user.role === "principal" || user.role === "responder") return true;
+    if (user.role === "principal") return true;
+    const a = audienceOf(i);
+    // A school-only drill is staff-only: responders never see it. A simulation
+    // drill does reach them, so they can rehearse acknowledge and on-site.
+    if (user.role === "responder") return !a.drill || a.scope === "simulation";
     if (user.role === "teacher") {
       // Drill tickets stay with the teachers who took part, never the whole section.
-      if (i.drill) return i.reporterIds.includes(user.id);
-      return i.reporterIds.includes(user.id) || i.linkedSection === user.section || i.linkedSection === "ALL";
+      if (a.drill) return a.reporters.includes(user.id);
+      if (a.reporters.includes(user.id)) return true;
+      // The owner of the room/class the ticket concerns. A whole-school alert is
+      // never a report in a teacher's list — it reaches them only as a live
+      // Headcount task (see headcountTasksFor).
+      return Boolean(user.section) && a.section === user.section;
     }
-    if (i.drill) return false; // parents are not alarmed by drills
-    return i.linkedSection === user.section || i.linkedSection === "ALL";
+    // Parents: the class their child is in (the affected class, never the
+    // reporter's), and a whole-school alert ONLY while it is active. Drills
+    // never reach a parent.
+    if (a.drill) return false;
+    if (a.wholeSchool) return a.active;
+    return Boolean(user.section) && a.section === user.section;
+  }
+
+  /**
+   * The class a ticket belongs to. A classroom inherits the section of the
+   * teacher who owns that room (stamped on the ticket at creation); a common
+   * area keeps the class chosen on the report. Whole floor/school stays "ALL".
+   */
+  /** "school" (staff only) or "simulation" (responders take part). */
+  function drillScopeOf(i) {
+    return i.drillScope === "simulation" ? "simulation" : "school";
+  }
+
+  function ownerSectionOf(i) {
+    if (i.linkedSection) return i.linkedSection;
+    const owner = i.room ? store.db.roster.find((r) => r.status === "active" && r.room === i.room) : null;
+    return owner?.section || null;
+  }
+
+  /**
+   * ONE function of (ticket, viewer) for headcount rights and visibility.
+   * Only the owner of the class counts (the Principal may count any section);
+   * a reporter who is not the owner sees NO headcount UI at all, not even
+   * read-only. Closed tickets stay readable to the owner but are read-only.
+   */
+  function headcountAccess(i, user) {
+    const sections = expectedSections(i);
+    const required = sections.length > 0;
+    const open = i.status !== "RESOLVED" && !i.archivedAt;
+    let section = null;
+    if (required && user.role === "teacher" && user.section && sections.includes(user.section)) section = user.section;
+    if (required && user.role === "principal") section = sections.length === 1 ? sections[0] : null;
+    const registry = section ? (store.db.roster.find((r) => r.section === section)?.registry ?? null) : null;
+    const visible = required && (user.role === "principal" || (user.role === "teacher" && Boolean(user.section) && sections.includes(user.section)));
+    return {
+      required,
+      visible,
+      canRecord: visible && open && Boolean(section || user.role === "principal"),
+      ownerSection: sections.length === 1 ? sections[0] : null,
+      sections,
+      section,
+      // The OWNER's registry — never the reporter's.
+      registry,
+    };
+  }
+
+  /**
+   * A teacher's headcount work: their own class, plus a whole-school alert
+   * while it is active. A count they submitted stays readable after closing.
+   */
+  function headcountTasksFor(user) {
+    if (user.role !== "teacher" || !user.section) return [];
+    return store.db.incidents
+      .filter((i) => !i.archivedAt && !isHiddenFor(i, user))
+      .filter((i) => {
+        const access = headcountAccess(i, user);
+        if (!access.visible) return false;
+        if (i.status !== "RESOLVED") return true;
+        return i.headcounts.some((h) => h.section === user.section);
+      })
+      .sort((a, b) => b.createdAt - a.createdAt)
+      .slice(0, 60)
+      .map((i) => publicIncident(i, user));
   }
 
   // A reporter may cancel their own ticket until a responder is on site, unless other people also reported it.
@@ -632,6 +781,7 @@ export function createApp(opts = {}) {
       label: d.label,
       startedAt: d.startedAt,
       endedAt: d.endedAt,
+      scope: d.scope === "simulation" ? "simulation" : "school",
       incidents: d.incidents,
       avgToReportMs: d.avgToReportMs ?? null,
       avgToAckMs: d.avgToAckMs ?? null,
@@ -675,8 +825,10 @@ export function createApp(opts = {}) {
       room: i.room,
       createdAt: i.createdAt,
       status: i.status,
+      drillScope: i.drill ? drillScopeOf(i) : null,
       // Step timestamps — audit facts, never rewritten once recorded.
       seenAt: i.seenAt ?? null,
+      acknowledgedAt: i.acknowledgedAt ?? null,
       enRouteAt: i.enRouteAt ?? null,
       onSiteAt: i.onSiteAt ?? null,
       confirmedBy: i.confirmedBy,
@@ -689,6 +841,9 @@ export function createApp(opts = {}) {
       escalationLevel: i.escalationLevel,
       eta: i.eta,
       accountability: acc,
+      // One server-computed answer to "can this viewer count, and against which
+      // registry?" — the client never decides headcount visibility on its own.
+      headcount: headcountAccess(i, user),
       // Parents only ever see aggregate counts for their own section.
       headcounts: role === "parent" ? i.headcounts.filter((h) => h.section === user.section).map((h) => ({ section: h.section, expected: h.expected, present: h.present, at: h.at })) : i.headcounts,
     };
@@ -731,7 +886,21 @@ export function createApp(opts = {}) {
 
   function publicModes(user) {
     const m = store.db.modes;
-    const out = { hazard: m.hazard, route: m.route, drill: { active: m.drill.active, label: m.drill.label, startedAt: m.drill.startedAt } };
+    const scope = m.drill.scope === "simulation" ? "simulation" : "school";
+    // Drills are never announced to parents. A school-only drill is not
+    // announced to responders either — the notification audience is the ticket
+    // audience.
+    const drillVisible = user.role !== "parent" && (user.role !== "responder" || scope === "simulation");
+    const out = {
+      hazard: m.hazard,
+      route: m.route,
+      drill: {
+        active: drillVisible && m.drill.active,
+        label: drillVisible ? m.drill.label : "",
+        startedAt: drillVisible ? m.drill.startedAt : null,
+        scope,
+      },
+    };
     if (user.role === "parent") out.route = { status: m.route.status };
     return out;
   }
@@ -757,6 +926,9 @@ export function createApp(opts = {}) {
       serverTime: now(),
       me: user,
       incidents,
+      // Teachers only: live headcount work, including whole-school alerts that
+      // deliberately stay out of their lists.
+      headcountTasks: headcountTasksFor(user),
       hidden: hiddenIncidents,
       roster,
       sections: user.role === "principal" ? sections() : [],
@@ -970,6 +1142,7 @@ export function createApp(opts = {}) {
       firstHeadcountAt: null,
       drill: Boolean(drillMode.active),
       drillId: drillMode.active ? drillMode.id : null,
+      drillScope: drillMode.active ? (drillMode.scope === "simulation" ? "simulation" : "school") : null,
       interactions,
       eta: null,
       // Step timestamps: written once, then locked (see transition()).
@@ -1041,6 +1214,10 @@ export function createApp(opts = {}) {
   function transition(user, id, action, body = {}) {
     const inc = store.db.incidents.find((i) => i.id === id);
     if (!inc) throw new HttpError(404, "not_found", "Incident not found.");
+    // A responder cannot act on a ticket that is not theirs, including a
+    // school-only drill they never saw.
+    if (user.role === "responder" && !canSee(inc, user))
+      throw new HttpError(404, "not_found", "Incident not found.");
     if (inc.status === "RESOLVED") {
       if (action === "seen") return { incident: inc, changed: false };
       if (action === "resolve" && inc.resolvedByOrg)
@@ -1059,7 +1236,8 @@ export function createApp(opts = {}) {
     };
     // Which organization (if any) is acting — responders always carry one.
     const org = user.role === "responder" && D.orgById(user.org) ? user.org : null;
-    const actor = org ? D.orgLabel(org) : user.name;
+    // The Principal acts for the school, never as a responder organization.
+    const actor = org ? D.orgLabel(org) : user.role === "principal" ? "School (Principal)" : user.name;
     const push = (act, note) => inc.log.push({ at: t, by: actor, role: user.role, action: act, note, ...(org ? { org } : {}) });
     const rs = responsesOf(inc);
     const mine = org ? rs[org] : null;
@@ -1068,6 +1246,17 @@ export function createApp(opts = {}) {
       inc.seenAt = stamp("seenAt");
       inc.status = "SEEN"; push("seen"); changed = true;
     } else if (action === "ack") {
+      // The Principal acknowledges FOR THE SCHOOL: a school track stamp, SENT →
+      // SEEN. The Principal is never en route or on site — only responders are.
+      if (user.role === "principal") {
+        if (inc.status !== "SENT" && inc.status !== "SEEN") return { incident: inc, changed: false };
+        inc.seenAt = stamp("seenAt");
+        inc.acknowledgedAt = stamp("acknowledgedAt");
+        inc.acknowledgedBy = "School (Principal)";
+        inc.status = "SEEN";
+        push("acknowledged", "Acknowledged");
+        return { incident: inc, changed: true };
+      }
       // Any open ticket can be acknowledged by either org, even while the other is
       // already on site. Acknowledging is one-way per actor: an org that already
       // acknowledged cannot trigger it again, and the ticket never steps back.
@@ -1106,6 +1295,9 @@ export function createApp(opts = {}) {
       if (inc.status === "SENT" || inc.status === "SEEN") inc.status = "EN_ROUTE";
       push("en_route", note); changed = true;
     } else if (action === "onsite") {
+      // On site is a responder organization's step. The Principal never gets it.
+      if (user.role === "principal")
+        throw new HttpError(403, "forbidden", "Only responders mark a ticket on site.");
       // On site follows En route at the ticket level: it can never be the first
       // step, so the recorded report → acknowledged → on site order stays true.
       if (inc.status === "SENT" || inc.status === "SEEN") {
@@ -1452,16 +1644,16 @@ export function createApp(opts = {}) {
       return send(res, 200, { user, mustChange: Boolean(account.mustChange), policy: POLICY_TEXT });
     }
 
-    // HIDE — a per-user "remove from my list" for Teachers and Parents.
-    // The record itself never changes and stays visible to everyone else.
+    // HIDE — a per-user "remove from my list" for Teachers, Parents and
+    // Responders. The record itself never changes and stays visible to everyone
+    // else; each responder account hides independently.
     if (p === "/api/me/hidden" && m === "POST") {
       const { account, user } = authenticate(req, url, p);
-      need(user, "teacher", "parent"); // responders have no hide; principals archive instead
+      need(user, "teacher", "parent", "responder"); // principals archive instead
       rateLimit(req, "write", 120);
       const body = await readJson(req);
       const inc = store.db.incidents.find((i) => i.id === String(body.incidentId ?? ""));
-      if (!inc || (user.role === "parent" && !canSee(inc, user)))
-        throw new HttpError(404, "not_found", "Incident not found.");
+      if (!inc || !canSee(inc, user)) throw new HttpError(404, "not_found", "Incident not found.");
       if (user.role === "teacher" && !inc.reporterIds.includes(user.id))
         throw new HttpError(403, "forbidden", "You can only hide your own reports.");
       if (inc.status !== "RESOLVED" && !inc.archivedAt)
@@ -1564,10 +1756,9 @@ export function createApp(opts = {}) {
       return send(res, 201, { account: publicAccount(acc), tempPassword: temp ? password : null, teacherId });
     }
 
-    // Edit an existing account. The Super Admin can fix the display name, assign a
-    // responder's organization (accounts created before orgs existed have none),
-    // and move a Parent/PTA account to another section. Email and role are
-    // identity fields and stay fixed.
+    // Edit an existing account. The Super Admin owns the email and display name;
+    // a teacher's class fields use the same roster edit path as the Principal's
+    // form, a Parent/PTA account moves section, and a responder gets its org.
     let medit = p.match(/^\/api\/admin\/accounts\/([\w-]+)$/);
     if (medit && m === "PUT") {
       need(user, "super_admin");
@@ -1576,6 +1767,16 @@ export function createApp(opts = {}) {
       if (acc.status === "purged") throw new HttpError(409, "purged", "This account was purged and can no longer be edited.");
       const body = await readJson(req);
       const changed = [];
+
+      // Email: unique (case-insensitive), validated, and a change revokes every session.
+      let email = acc.email;
+      if (body.email !== undefined) {
+        email = normEmail(body.email);
+        if (!email) throw bad("Email is required.", "email_required");
+        if (!emailOk(email)) throw bad("Enter a valid email address.", "invalid_email");
+        if (email !== acc.email && store.db.accounts.some((a) => a.id !== acc.id && a.email.toLowerCase() === email.toLowerCase()))
+          throw new HttpError(409, "email_taken", "An account with that email already exists.");
+      }
 
       let name = acc.name;
       if (body.name !== undefined) {
@@ -1593,7 +1794,21 @@ export function createApp(opts = {}) {
         section = clean(body.section, 60);
         if (!section) throw bad("Grade / section is required for a Parent/PTA account.");
       }
+      // A teacher's section, room and registry live on the roster row.
+      if (acc.role === "teacher" && acc.teacherId) {
+        const entry = store.db.roster.find((r) => r.id === acc.teacherId);
+        if (entry) {
+          const fields = parseTeacherFields(body, { partial: true });
+          delete fields.name;
+          if (Object.keys(fields).length) {
+            applyTeacherEdit(entry, fields, { by: user.email, req });
+            changed.push(...Object.keys(fields));
+            section = entry.section;
+          }
+        }
+      }
 
+      const oldEmail = acc.email;
       if (name !== acc.name) { acc.name = name; changed.push("name"); }
       if (acc.role === "responder" && org !== acc.org) { acc.org = org; changed.push("org"); }
       if (acc.role === "parent" && section !== acc.section) {
@@ -1603,6 +1818,7 @@ export function createApp(opts = {}) {
         acc.sectionName = structured.sectionName;
         changed.push("section");
       }
+      if (email !== acc.email) { acc.email = email; changed.push("email"); }
       // A teacher's name IS the roster entry's name: keep the two in step.
       if (changed.includes("name") && acc.teacherId) {
         const entry = store.db.roster.find((r) => r.id === acc.teacherId);
@@ -1610,6 +1826,14 @@ export function createApp(opts = {}) {
           entry.name = acc.name;
           for (const inc of store.db.incidents) if (inc.reporterId === entry.id) inc.reporterName = entry.name;
         }
+      }
+      if (changed.includes("email")) {
+        const revoked = revokeSessions(acc.id);
+        closeStreamsFor(acc.id);
+        audit("email_changed", {
+          by: account.id, role: user.role, org: orgOf(acc), target: acc.id,
+          detail: `email ${maskEmail(oldEmail)} → ${maskEmail(email)} · ${revoked} session(s) revoked`, req,
+        });
       }
       if (changed.length) {
         store.save();
@@ -1830,7 +2054,13 @@ export function createApp(opts = {}) {
     if (p === "/api/admin/audit" && m === "GET") {
       need(user, "super_admin"); // read-only view of the audit log
       const limit = Math.min(500, Math.max(1, Number(url.searchParams.get("limit")) || 200));
-      return send(res, 200, { entries: store.db.audit.slice(-limit).reverse(), total: store.db.audit.length });
+      const entries = store.db.audit.slice(-limit).reverse().map((e) => ({
+        ...e,
+        // Ids stay stored; the console reads them as actors and targets.
+        actorLabel: actorLabelFor(e.by),
+        targetLabel: targetLabelFor(e.target),
+      }));
+      return send(res, 200, { entries, total: store.db.audit.length });
     }
 
     if (p === "/api/admin/school-year" && m === "GET") {
@@ -1947,7 +2177,7 @@ export function createApp(opts = {}) {
         analytics: R.summarizeRecords(real, period),
         drills: {
           ongoing: dm.active
-            ? { id: dm.id, label: dm.label, startedAt: dm.startedAt, active: true }
+            ? { id: dm.id, label: dm.label, startedAt: dm.startedAt, active: true, scope: dm.scope === "simulation" ? "simulation" : "school" }
             : null,
           // Drill scheduling is not part of the drill-mode data model yet; the
           // section exists so a future scheduled drill can appear there.
@@ -2117,6 +2347,12 @@ export function createApp(opts = {}) {
       const page = Math.max(1, Number(url.searchParams.get("page")) || 1);
       let items = store.db.incidents.filter((i) => i.archivedAt);
       if (user.role === "teacher") items = items.filter((i) => canSee(i, user));
+      // A responder's archive is the organization's own work: a ticket their org
+      // took part in, and never a drill they could not see.
+      if (user.role === "responder") {
+        const org = user.org;
+        items = items.filter((i) => canSee(i, user) && Boolean(org && (i.responses?.[org] || i.acknowledgedByOrg === org || i.resolvedByOrg === org)));
+      }
       items = [...items].sort((a, b) => (b.archivedAt || 0) - (a.archivedAt || 0));
       const total = items.length;
       const start = (page - 1) * limit;
@@ -2130,13 +2366,20 @@ export function createApp(opts = {}) {
     let mh = p.match(/^\/api\/incidents\/([\w-]+)\/headcount$/);
     if (mh && m === "POST") {
       need(user, "teacher", "principal");
-      const inc = store.db.incidents.find((i) => i.id === mh[1] && canSee(i, user));
+      const inc = store.db.incidents.find((i) => i.id === mh[1]);
       if (!inc) throw new HttpError(404, "not_found", "Incident not found.");
+      const access = headcountAccess(inc, user);
+      if (user.role === "teacher" && !canSee(inc, user) && !access.visible)
+        throw new HttpError(404, "not_found", "Incident not found.");
       if (inc.status === "RESOLVED") throw new HttpError(409, "already_resolved", "This incident is already closed.");
+      if (!access.required) throw new HttpError(403, "forbidden", "This incident has no class to count.");
+      // Only the owner of the class (or the Principal) may record or update it.
+      if (user.role === "teacher" && !access.canRecord)
+        throw new HttpError(403, "forbidden", "Only the teacher who owns this class can record its headcount.");
       const body = await readJson(req);
-      const need_ = expectedSections(inc);
-      const section = user.role === "teacher" ? user.section : clean(body.section, 60);
-      if (!need_.includes(section)) throw new HttpError(403, "forbidden", "That section is not part of this incident.");
+      const need_ = access.sections;
+      const section = user.role === "teacher" ? access.section : (clean(body.section, 60) || access.section || "");
+      if (!section || !need_.includes(section)) throw new HttpError(403, "forbidden", "That section is not part of this incident.");
       const roster = store.db.roster.find((r) => r.section === section && r.status === "active") || store.db.roster.find((r) => r.section === section);
       const expected = body.expected !== undefined && body.expected !== null && body.expected !== "" ? Number(body.expected) : roster ? roster.registry : NaN;
       const present = Number(body.present);
@@ -2193,7 +2436,10 @@ export function createApp(opts = {}) {
       const t = now();
       let summary = null;
       if (body.active && !dm.active) {
-        Object.assign(dm, { active: true, id: store.nextId("DRL-"), label: clean(body.label, 80) || "Campus disaster drill", startedAt: t, by: user.name });
+        // The scope is chosen when the drill starts: "school" keeps responders
+        // out entirely, "simulation" sends them the drill tickets.
+        const scope = body.scope === "simulation" ? "simulation" : "school";
+        Object.assign(dm, { active: true, id: store.nextId("DRL-"), label: clean(body.label, 80) || "Campus disaster drill", startedAt: t, by: user.name, scope });
       } else if (!body.active && dm.active) {
         summary = endDrill(user, t);
       }
@@ -2279,18 +2525,22 @@ export function createApp(opts = {}) {
     if (p === "/api/roster" && m === "POST") {
       need(user, "principal");
       const body = await readJson(req);
+      // The Principal supplies the sign-in email. The server never invents one.
+      const email = normEmail(body.email);
+      if (!email) throw bad("Email is required.", "email_required");
+      if (!emailOk(email)) throw bad("Enter a valid email address.", "invalid_email");
+      if (findAccount(email)) throw new HttpError(409, "email_taken", "An account with that email already exists.");
       const fields = parseTeacherFields(body);
       const gps = /^-?\d{1,3}\.\d+, ?-?\d{1,3}\.\d+$/.test(String(body.gps || "")) ? String(body.gps) : DEFAULT_GPS;
       const entry = { id: store.nextId("t"), registry: 30, ...fields, gps, status: body.status === "inactive" ? "inactive" : "active" };
       store.db.roster.push(entry);
       // No self-registration: creating a roster row also provisions its sign-in account.
-      const email = `${entry.id}@sinalhanes.deped.ph`;
       const tempPassword = makeTempPassword({ email, name: entry.name });
       const acc = newAccount({ email, role: "teacher", name: entry.name, password: tempPassword, mustChange: true, temp: true, teacherId: entry.id, section: entry.section });
       store.save();
       audit("account_created", { by: user.email, target: email, detail: "teacher (via roster)", req });
       commit({ type: "roster_updated", id: entry.id });
-      return send(res, 201, { teacher: entry, account: publicAccount(acc), tempPassword });
+      return send(res, 201, { teacher: entry, account: publicAccount(acc), tempPassword, email });
     }
 
     mt = p.match(/^\/api\/roster\/([\w-]+)\/archive$/);
@@ -2350,6 +2600,7 @@ export function createApp(opts = {}) {
   function endDrill(user, t) {
     const db = store.db;
     const dm = db.modes.drill;
+    const scope = dm.scope === "simulation" ? "simulation" : "school";
     const items = db.incidents.filter((i) => i.drillId === dm.id);
     for (const inc of items) {
       if (inc.status === "RESOLVED") continue;
@@ -2357,9 +2608,19 @@ export function createApp(opts = {}) {
       inc.log.push({ at: t, by: user.name, role: user.role, action: "drill_end", note: "Drill ended" });
     }
     const avg = (arr) => { const v = arr.filter((x) => x !== null && x !== undefined); return v.length ? Math.round(v.reduce((a, b) => a + b, 0) / v.length) : null; };
-    const rows = items.map((i) => ({ id: i.id, subLabel: i.subLabel, toReportMs: i.createdAt - dm.startedAt, toAckMs: i.enRouteAt ? i.enRouteAt - i.createdAt : null, toOnSiteMs: i.onSiteAt ? i.onSiteAt - i.createdAt : null, toHeadcountMs: i.firstHeadcountAt ? i.firstHeadcountAt - i.createdAt : null, interactions: i.interactions }));
+    // A school-only drill records no responder metrics at all.
+    const rows = items.map((i) => ({
+      id: i.id,
+      subLabel: i.subLabel,
+      toReportMs: i.createdAt - dm.startedAt,
+      toAckMs: scope === "simulation" && i.enRouteAt ? i.enRouteAt - i.createdAt : null,
+      toOnSiteMs: scope === "simulation" && i.onSiteAt ? i.onSiteAt - i.createdAt : null,
+      toHeadcountMs: i.firstHeadcountAt ? i.firstHeadcountAt - i.createdAt : null,
+      interactions: i.interactions,
+    }));
     const summary = {
       id: dm.id, label: dm.label, startedAt: dm.startedAt, endedAt: t, startedBy: dm.by, endedBy: user.name,
+      scope,
       incidents: rows.length,
       avgToReportMs: avg(rows.map((r) => r.toReportMs)),
       avgToAckMs: avg(rows.map((r) => r.toAckMs)),
@@ -2370,7 +2631,7 @@ export function createApp(opts = {}) {
     };
     db.drills.push(summary);
     if (db.drills.length > 30) db.drills.shift();
-    Object.assign(dm, { active: false, id: null, label: "", startedAt: null, by: null });
+    Object.assign(dm, { active: false, id: null, label: "", startedAt: null, by: null, scope: "school" });
     return summary;
   }
 

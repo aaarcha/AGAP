@@ -5,7 +5,8 @@ import { Check, CheckCircle2, ChevronDown, Clock, Eye, Navigation, Siren } from 
 import { STATUS_LABEL, STATUS_ORDER, agencyFor, bandFor, orgLabel } from "../../shared/domain.js";
 import { useApp } from "../lib/store";
 import { BAND_STYLE, catTheme } from "../lib/theme";
-import { clockTime, elapsed, escalationLabel, locationSetByLabel, plainOverride } from "../lib/format";
+import { canSeeReportedFrom, clockTime, elapsed, escalationLabel, locationSetByLabel, plainOverride, prettyRoom, splitLocation } from "../lib/format";
+import { LocationLine } from "./Location";
 import type { Incident, OrgResponse, ResponderOrg, Status } from "../lib/types";
 import { ConfirmModal } from "./Modal";
 import { AckModal, EtaLine, HeadcountPanel, ResponseLines, RuleBadges } from "./Rules";
@@ -147,7 +148,7 @@ export function StatusStepper({ inc }: { inc: Incident }) {
               )}
               <span className={`h-0.5 flex-1 ${i === steps.length - 1 ? "bg-transparent" : i < current ? "bg-emerald-500" : "border-t-2 border-dashed border-slate-300"}`} />
             </div>
-            <span className={`mt-1 w-full truncate text-center text-[10px] uppercase tracking-wide ${
+            <span className={`mt-1 w-full break-words hyphens-none text-center text-[10px] uppercase leading-tight tracking-wide ${
               state === "done" ? "font-bold text-emerald-700" : state === "active" ? "font-extrabold text-brand-800" : "font-medium text-slate-400"
             }`}>{STATUS_LABEL[status]}</span>
             {state === "active" && (
@@ -163,15 +164,46 @@ export function StatusStepper({ inc }: { inc: Incident }) {
   );
 }
 
+/** The Principal's school track: Sent → Acknowledged → Closed. */
+function PrincipalStepper({ inc }: { inc: Incident }) {
+  const closed = inc.status === "RESOLVED";
+  // Merely opening the card records Seen; only the Acknowledge action (or a
+  // responder moving the ticket on) completes the school track's second step.
+  const acknowledged = Boolean(inc.acknowledgedAt || inc.enRouteAt || closed);
+  const steps = [
+    { label: "Sent", at: inc.createdAt, done: true },
+    { label: "Acknowledged", at: inc.acknowledgedAt ?? inc.seenAt ?? null, done: acknowledged },
+    { label: "Closed", at: inc.resolvedAt ?? null, done: closed },
+  ];
+  return (
+    <ol aria-label="School track" data-principal-stepper className="flex items-start pt-1">
+      {steps.map((s, i) => (
+        <li key={s.label} data-step={s.label} data-state={s.done ? "done" : "upcoming"} className="flex min-w-0 flex-1 flex-col items-center">
+          <div className="flex w-full items-center" aria-hidden>
+            <span className={`h-0.5 flex-1 ${i === 0 ? "bg-transparent" : steps[i - 1].done && s.done ? "bg-emerald-500" : "border-t-2 border-dashed border-slate-300"}`} />
+            <span className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[10px] font-bold ${s.done ? "bg-emerald-600 text-white" : "border-2 border-dashed border-slate-300 bg-white text-slate-400"}`}>
+              {s.done ? <Check size={13} strokeWidth={3} /> : i + 1}
+            </span>
+            <span className={`h-0.5 flex-1 ${i === steps.length - 1 ? "bg-transparent" : s.done ? "bg-emerald-500" : "border-t-2 border-dashed border-slate-300"}`} />
+          </div>
+          <span className={`mt-1 w-full break-words hyphens-none text-center text-[10px] uppercase leading-tight tracking-wide ${s.done ? "font-bold text-emerald-700" : "font-medium text-slate-400"}`}>{s.label}</span>
+          {s.done && s.at != null && <span className="font-mono text-[9px] text-slate-400">{clockTime(s.at)}</span>}
+        </li>
+      ))}
+    </ol>
+  );
+}
+
 const ACTION_LABEL: Record<string, string> = {
   reported: "Reported", cancelled: "Cancelled", headcount: "Headcount", override: "Override", hazard: "Hazard mode", route: "Route",
-  drill_end: "Drill ended", merged: "Corroborated", escalated: "Escalated", seen: "Seen", en_route: "En route",
-  on_site: "On site", resolved: "Resolved", false_alarm: "False alarm",
+  drill_end: "Drill ended", merged: "Corroborated", escalated: "Escalated", seen: "Seen", acknowledged: "Acknowledged",
+  en_route: "En route", on_site: "On site", resolved: "Resolved", false_alarm: "False alarm",
 };
 
 export function IncidentCard({ inc, showActions, showLog, defaultExpanded = false }: { inc: Incident; showActions?: boolean; showLog?: boolean; defaultExpanded?: boolean }) {
   const { now, modes, act, markSeen, user } = useApp();
   const isResponder = user?.role === "responder";
+  const isPrincipal = user?.role === "principal";
   const myOrg = (user?.org ?? null) as ResponderOrg | null;
   const myTrack = myOrg ? inc.responses?.[myOrg] ?? null : null;
   const ct = catTheme(inc.category);
@@ -189,18 +221,24 @@ export function IncidentCard({ inc, showActions, showLog, defaultExpanded = fals
   // ON_SITE → Mark as Resolved, RESOLVED → no button (a disabled badge instead).
   // A responder's next step comes from their OWN track, never the shared
   // ticket status: the CDRRMO must still acknowledge after the Barangay is on site.
+  // The Principal has school-level actions only: Acknowledge (Sent → Seen) and
+  // Close with an outcome. En route and On site belong to responder orgs.
   const nextStep: "ack" | "onsite" | "resolve" | null = isResponder
     ? closed || myTrack?.status === "resolved"
       ? null
       : !myTrack ? "ack"
         : myTrack.status === "en_route" ? "onsite"
           : "resolve"
-    : closed
-      ? null
-      : inc.status === "SENT" || inc.status === "SEEN" ? "ack"
-        : inc.status === "EN_ROUTE" ? "onsite"
-          : inc.status === "ON_SITE" ? "resolve"
-            : null;
+    : isPrincipal
+      ? closed
+        ? null
+        : inc.status === "SENT" || inc.status === "SEEN" ? "ack" : "resolve"
+      : closed
+        ? null
+        : inc.status === "SENT" || inc.status === "SEEN" ? "ack"
+          : inc.status === "EN_ROUTE" ? "onsite"
+            : inc.status === "ON_SITE" ? "resolve"
+              : null;
 
   // First time a principal/responder sees a "Sent" ticket, tell the server it was seen.
   useEffect(() => { if (showActions && inc.status === "SENT") markSeen(inc.id); }, [showActions, inc.id, inc.status, markSeen]);
@@ -221,10 +259,12 @@ export function IncidentCard({ inc, showActions, showLog, defaultExpanded = fals
     try { await act(inc.id, "ack", v); } finally { setBusy(false); }
   }
 
+  const place = splitLocation(inc.room);
   const reasons: [string, string][] = [
     ["Incident type", `${inc.categoryLabel} — ${inc.subLabel}`],
     ["Who is affected", `${inc.populationLabel ?? "—"}${inc.linkedSection === "ALL" ? " · whole school" : inc.linkedSection ? ` · ${inc.linkedSection}` : ""}`],
-    ["Location", inc.room],
+    ["Location", place.area],
+    ...(place.from && canSeeReportedFrom(user?.role) ? [["Reported from", prettyRoom(place.from)] as [string, string]] : []),
     ["Location set by", locationSetByLabel(inc)],
     ["Hazard mode", inc.hazardApplied ? "On — flooding/typhoon conditions" : "Off"],
     ["Escalation", escalationLabel(inc)],
@@ -257,7 +297,7 @@ export function IncidentCard({ inc, showActions, showLog, defaultExpanded = fals
           </p>
         ) : null}
         <p className="text-xs text-slate-500">{inc.reporterName ? `${inc.reporterName} · ` : ""}{elapsed(inc.createdAt, now)} · {clockTime(inc.createdAt)}</p>
-        <p className="text-sm text-slate-600">📍 {inc.room}</p>
+        <LocationLine room={inc.room} className="block text-sm text-slate-600" />
         <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Location set by {locationSetByLabel(inc)}</p>
         <p className="text-xs font-semibold" style={{ color: ct.color }}>Recommended: {agencyFor(inc.category)}</p>
         <RuleBadges inc={inc} />
@@ -270,6 +310,8 @@ export function IncidentCard({ inc, showActions, showLog, defaultExpanded = fals
               <p className="mt-1 text-xs font-semibold text-blush-700">Your organization is not assigned. Ask the System Administrator.</p>
             )}
           </section>
+        ) : isPrincipal ? (
+          <PrincipalStepper inc={inc} />
         ) : (
           <StatusStepper inc={inc} />
         )}
@@ -279,9 +321,14 @@ export function IncidentCard({ inc, showActions, showLog, defaultExpanded = fals
 
         {showActions && nextStep && (isResponder ? Boolean(myOrg) : true) && (
           <div className="space-y-2 pt-1">
-            {nextStep === "ack" && (
+            {nextStep === "ack" && (isPrincipal ? (
+              <button data-principal-ack disabled={busy} onClick={() => void run("ack")}
+                className="flex min-h-10 w-full items-center justify-center gap-2 rounded-xl bg-brand-600 text-sm font-bold text-white disabled:opacity-60">
+                <Check size={15} /> Acknowledge
+              </button>
+            ) : (
               <MobileAckButton disabled={busy} onClick={() => setAckOpen(true)} gradient={ct.gradient} />
-            )}
+            ))}
             {nextStep === "onsite" && (
               <button disabled={busy} onClick={() => void run("onsite")}
                 className="flex min-h-10 w-full items-center justify-center gap-2 rounded-xl bg-teal-700 text-sm font-bold text-white disabled:opacity-60">
@@ -293,10 +340,10 @@ export function IncidentCard({ inc, showActions, showLog, defaultExpanded = fals
                 <button disabled={busy} onClick={() => setConfirm("resolved")}
                   className="flex min-h-10 w-full items-center justify-center gap-2 rounded-xl bg-white text-sm font-bold disabled:opacity-60"
                   style={{ border: `2px solid ${ct.border}`, color: ct.color }}>
-                  <CheckCircle2 size={15} /> Mark as Resolved
+                  <CheckCircle2 size={15} /> {isPrincipal ? "Close — resolved" : "Mark as Resolved"}
                 </button>
                 <button disabled={busy} onClick={() => setConfirm("false_alarm")} className="flex min-h-10 w-full items-center justify-center gap-2 rounded-xl border border-slate-300 bg-white text-sm font-bold text-slate-600 disabled:opacity-60">
-                  Cancel — false alarm
+                  {isPrincipal ? "Close — false alarm" : "Cancel — false alarm"}
                 </button>
               </>
             )}

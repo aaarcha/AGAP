@@ -19,6 +19,8 @@ export function MasterDetail<T extends { id: string }>({
   ariaLabel,
   listWidth = "22rem",
   listHeader,
+  /** Optional subheading per item; rows are grouped under it when it changes. */
+  groupHeading,
 }: {
   items: T[];
   renderList: (item: T, active: boolean) => ReactNode;
@@ -29,6 +31,7 @@ export function MasterDetail<T extends { id: string }>({
   listWidth?: string;
   /** Filters or a search box shown above the list, inside the list pane. */
   listHeader?: ReactNode;
+  groupHeading?: (item: T) => string;
 }) {
   const wide = useMediaQuery("screen and (min-width: 1024px)");
   const [selId, setSelId] = useState<string | null>(null);
@@ -84,17 +87,24 @@ export function MasterDetail<T extends { id: string }>({
         ref={listRef}
         aria-label={ariaLabel}
         onKeyDown={onKeyDown}
-        className="scroll-area space-y-2 lg:min-h-0 lg:flex-1 lg:overflow-y-auto lg:pr-1"
+        /* Below 1024 the list is plain document flow — no inner scroll box. */
+        className={wide ? "scroll-area space-y-3 lg:min-h-0 lg:flex-1 lg:overflow-y-auto lg:pr-1" : "space-y-3"}
       >
         {items.length === 0 ? (
           <li className="rounded-2xl border border-slate-200 bg-white px-4 py-10 text-center text-sm text-slate-500">
             {emptyList}
           </li>
         ) : (
-          items.map((item) => {
+          items.map((item, index) => {
             const active = item.id === selectedId;
+            const heading = groupHeading?.(item);
+            const previous = index > 0 ? groupHeading?.(items[index - 1]) : undefined;
+            const showHeading = Boolean(heading) && heading !== previous;
             return (
               <li key={item.id}>
+                {showHeading && (
+                  <p className="mb-1 mt-2 text-[11px] font-bold uppercase tracking-wide text-slate-500">{heading}</p>
+                )}
                 <button
                   data-md-item
                   type="button"

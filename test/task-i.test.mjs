@@ -239,9 +239,10 @@ test("archive bookkeeping is internal: teachers and responders never receive it"
       `the internal "${a}" entry is stripped`);
   }
 
-  const responderView = (await s.call("GET", "/api/incidents/archive", { token: rs })).json.items[0];
-  assert.equal(responderView.archivedAt, undefined, "responders see no archive metadata either");
-  assert.equal((responderView.log ?? []).some((l) => l.action === "archived"), false);
+  // A responder's archive is its own organization's work, so this ticket
+  // (never worked by that org) is not there at all — nothing to leak.
+  const responderArchive = (await s.call("GET", "/api/incidents/archive", { token: rs })).json;
+  assert.equal(responderArchive.total, 0, "responders never see records their org did not work");
 
   const principalView = (await s.call("GET", "/api/incidents/archive", { token: pr })).json.items[0];
   assert.equal(typeof principalView.archivedAt, "number", "the Principal keeps the archive metadata");

@@ -1,15 +1,15 @@
 import { useEffect, useMemo, useState } from "react";
-import { Archive, ArrowLeft, Calendar, CalendarDays, ChevronRight, Folder, MapPin, Tag } from "lucide-react";
+import { Archive, ArrowLeft, CalendarDays, ChevronRight, Folder, MapPin, Tag } from "lucide-react";
 import { STATUS_LABEL, STATUS_ORDER } from "../../shared/domain.js";
 import { useMediaQuery } from "../lib/hooks";
 import { useFilterState } from "../lib/filters";
 import { catTheme } from "../lib/theme";
-import { dateTime } from "../lib/format";
+import { dateTime, locationLabel, prettyRoom, splitLocation } from "../lib/format";
 import { MasterDetail } from "./MasterDetail";
 import { BoundedPane } from "./PageShell";
 import { Modal } from "./Modal";
 import { FilterBar, type FilterGroupProps } from "./FilterBar";
-import { TIER_TOKEN } from "./AnalyticsKit";
+import { TIER_TOKEN, TIME_TOKEN } from "./AnalyticsKit";
 import {
   ACTION_LABEL, OUTCOME_LABEL, RECENT_WINDOW_MS, buildExplorerTree, findNode, findZonePath, nodePath, readRecordsDeepLink, tierMix,
   type ExplorerNode, type RecordItem, type RecordTier,
@@ -22,13 +22,6 @@ import {
  */
 
 const TIER_ORDER: RecordTier[] = ["CRITICAL", "HIGH", "MODERATE"];
-
-const LEVEL_ICON: Record<string, typeof Calendar> = {
-  year: Calendar,
-  month: CalendarDays,
-  category: Tag,
-  zone: MapPin,
-};
 
 const SORT_OPTIONS = [
   { value: "newest", label: "Newest first" },
@@ -116,12 +109,12 @@ function OutcomeChip({ outcome }: { outcome: string | null }) {
   );
 }
 
-/** Thin stacked tier-mix bar; its icon-plus-text legend appears on hover/focus. */
+/** Thin stacked tier-mix bar, with its icon-plus-text legend always visible. */
 function MixBar({ records }: { records: RecordItem[] }) {
   const mix = tierMix(records);
   const total = TIER_ORDER.reduce((n, t) => n + mix[t], 0);
   return (
-    <span className="group relative mt-1 block">
+    <span className="mt-1.5 block min-w-0">
       <span
         className="flex h-1.5 w-full overflow-hidden rounded-full bg-slate-100"
         role="img"
@@ -131,13 +124,14 @@ function MixBar({ records }: { records: RecordItem[] }) {
           <span key={t} className={TIER_TOKEN[t].bar} style={{ width: `${(mix[t] / Math.max(1, total)) * 100}%` }} />
         ) : null))}
       </span>
-      <span data-mix-legend className="mt-1 hidden flex-wrap gap-x-2 gap-y-0.5 text-[10px] font-bold text-slate-600 group-hover:flex group-focus-within:flex">
+      <span data-mix-legend className="mt-1 flex flex-wrap gap-x-2 gap-y-0.5 text-[10px] font-bold text-slate-600">
         {TIER_ORDER.map((t) => {
           const Icon = TIER_TOKEN[t].icon;
           return (
-            <span key={t} data-mix-item={t} className="inline-flex items-center gap-1">
-              <Icon size={11} aria-hidden />
-              {TIER_TOKEN[t].label} {mix[t]}
+            <span key={t} data-mix-item={t} className="inline-flex min-w-0 items-center gap-1">
+              <Icon size={11} className="shrink-0" aria-hidden />
+              <span className="break-words hyphens-none">{TIER_TOKEN[t].label}</span>
+              <span className="font-mono tabular-nums">{" "}{mix[t]}</span>
             </span>
           );
         })}
@@ -149,7 +143,6 @@ function MixBar({ records }: { records: RecordItem[] }) {
 /* ------------------------------------------------------------- folder card */
 
 function FolderCard({ node, onOpen, grid }: { node: ExplorerNode; onOpen: () => void; grid: boolean }) {
-  const Icon = LEVEL_ICON[node.level] ?? Folder;
   const theme = catTheme(dominantCategory(node.records));
   return (
     <button
@@ -161,10 +154,10 @@ function FolderCard({ node, onOpen, grid }: { node: ExplorerNode; onOpen: () => 
       }`}
     >
       <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl" style={{ background: theme.bg, color: theme.color }}>
-        <Icon size={18} aria-hidden />
+        <Folder size={18} aria-hidden />
       </span>
       <span className="min-w-0 flex-1">
-        <span className="block break-words text-sm font-bold text-slate-800">{node.label}</span>
+        <span className="block break-words hyphens-none text-sm font-bold text-slate-800">{node.label}</span>
         <span className="mt-0.5 block text-xs text-slate-500">{countLabel(node.records.length)}</span>
         <MixBar records={node.records} />
         <span data-last-incident className="mt-1 block break-words text-[11px] text-slate-400">
@@ -207,17 +200,21 @@ function RecordRow({ record, active, onOpen, onArchive }: {
       <button type="button" onClick={onOpen} className="flex min-h-16 min-w-0 flex-1 flex-col gap-1.5 px-2.5 py-2 text-left">
         <span className="flex flex-wrap items-center gap-1.5">
           <TierBadge tier={record.tier} compact />
-          <span aria-hidden>{ct.emoji}</span>
-          <span className="min-w-0 flex-1 break-words text-sm font-bold text-slate-800">{record.subLabel}</span>
+          <span className="shrink-0" aria-hidden>{ct.emoji}</span>
+          <span className="min-w-0 flex-1 break-words hyphens-none text-sm font-bold text-slate-800">{record.subLabel}</span>
           {record.confirmedBy > 1 && (
             <span data-reports-badge className="shrink-0 rounded-full bg-brand-50 px-1.5 py-0.5 text-[10px] font-bold text-brand-700">
               {record.confirmedBy} reports
             </span>
           )}
         </span>
-        <span className="block break-words text-xs text-slate-500">{record.zone.label}</span>
+        {/* Friendly location only: the area name, never the stored origin text. */}
+        <span className="block break-words hyphens-none text-xs text-slate-500">{locationLabel(record.room)}</span>
         <span className="flex flex-wrap items-center gap-1.5">
           <span className="text-[11px] text-slate-400">{dateTime(record.createdAt)}</span>
+          <span data-status-chip className="inline-flex items-center rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-bold text-slate-600">
+            {STATUS_LABEL[record.status as keyof typeof STATUS_LABEL] ?? record.status}
+          </span>
           <ResponseChip record={record} />
           <OutcomeChip outcome={record.outcome} />
         </span>
@@ -294,7 +291,9 @@ export function RecordDetailPanel({ record }: { record: RecordItem }) {
 
       <dl className="divide-y divide-slate-100 text-sm">
         {([
-          ["Location", record.room],
+          ["Location", splitLocation(record.room).area],
+          // Records & Archives is a Principal/Admin screen: the origin line belongs here.
+          ["Reported from", splitLocation(record.room).from ? prettyRoom(splitLocation(record.room).from!) : undefined],
           ["Zone", record.zone.label],
           ["How it was set", record.locationNote || record.locationSetBy || undefined],
           ["Reported", dateTime(record.createdAt)],
@@ -335,11 +334,36 @@ export function RecordDetailPanel({ record }: { record: RecordItem }) {
   );
 }
 
-/** Modal form used by the System Archives tab. */
-export function RecordDetail({ record, onClose }: { record: RecordItem; onClose: () => void }) {
+/**
+ * Modal form used by the System Archives tab. The irreversible purge lives
+ * here — never on a list row — and only for the Super Admin, gated by the
+ * record's own retention eligibility.
+ */
+export function RecordDetail({ record, onClose, purge }: {
+  record: RecordItem;
+  onClose: () => void;
+  purge?: { eligible: boolean; onPurge: () => void };
+}) {
   return (
     <Modal title="Incident record (read-only)" onClose={onClose} wide>
       <RecordDetailPanel record={record} />
+      {purge && (
+        <div className="mt-3 rounded-xl border border-slate-200 bg-slate-50 p-3">
+          <p className="break-words text-[11px] leading-snug text-slate-500">
+            {purge.eligible
+              ? "The retention period for this record has passed. Purging erases names, notes and the timeline for good."
+              : "This record is inside its retention period, so it cannot be purged yet."}
+          </p>
+          <button
+            type="button"
+            onClick={purge.onPurge}
+            disabled={!purge.eligible}
+            className="mt-2 flex min-h-11 w-full items-center justify-center gap-1.5 rounded-xl bg-blush-100 text-xs font-bold text-blush-700 disabled:opacity-50"
+          >
+            <Archive size={14} aria-hidden /> Purge record…
+          </button>
+        </div>
+      )}
     </Modal>
   );
 }
@@ -357,6 +381,7 @@ export default function RecordsExplorer({ records, onArchive }: { records: Recor
   const [urgency, setUrgency] = useState<string[]>(deep.tier ? [deep.tier] : []);
   const [outcome, setOutcome] = useState<string[]>([]);
   const [conditions, setConditions] = useState<string[]>([]);
+  const [timeWindow, setTimeWindow] = useState(deep.time ?? "");
   const [sort, setSort] = useState("newest");
   const [view, setView] = useFilterState<"list" | "grid">("records-explorer-view", () => "list");
   const [deepApplied, setDeepApplied] = useState(false);
@@ -371,6 +396,7 @@ export default function RecordsExplorer({ records, onArchive }: { records: Recor
         const on = r.hazardMode;
         if (!conditions.includes(on ? "on" : "normal")) return false;
       }
+      if (timeWindow && r.timeOfDay !== timeWindow) return false;
       if (q && !`${r.subLabel} ${r.categoryLabel} ${r.room} ${r.zone.label} ${r.reporterRole}`.toLowerCase().includes(q)) return false;
       return true;
     });
@@ -411,7 +437,7 @@ export default function RecordsExplorer({ records, onArchive }: { records: Recor
     },
   ];
   const activeCount = urgency.length + outcome.length + conditions.length;
-  const resetFilters = () => { setUrgency([]); setOutcome([]); setConditions([]); setCategory("all"); };
+  const resetFilters = () => { setUrgency([]); setOutcome([]); setConditions([]); setCategory("all"); setTimeWindow(""); };
 
   const tree = useMemo(() => buildExplorerTree(filtered), [filtered]);
   const node = findNode(tree, path) ?? tree;
@@ -478,7 +504,8 @@ export default function RecordsExplorer({ records, onArchive }: { records: Recor
         results={{ label: "Records", shown: searching || recent ? shownRecords.length : node.records.length, total: records.length }}
       />
 
-      {/* Breadcrumbs: clickable segments on desktop; Up + title/parent on phones. */}
+      {/* Breadcrumbs: clickable segments on desktop; "Records" alone at the
+          root on phones, Up + parent from the first folder on. */}
       {wide ? (
         <nav aria-label="Record breadcrumb" className="flex min-w-0 flex-wrap items-center gap-1 rounded-xl border border-slate-200 bg-white px-2 py-1.5 text-xs font-semibold">
           <button type="button" data-crumb="Records" onClick={() => go([])} className="flex min-h-9 items-center gap-1 rounded-lg px-2 text-brand-700 hover:bg-brand-50">
@@ -496,16 +523,40 @@ export default function RecordsExplorer({ records, onArchive }: { records: Recor
           {recent && <span className="px-2 text-slate-500">Recent (last 7 days)</span>}
           {searching && <span className="px-2 text-slate-500">Search results</span>}
         </nav>
-      ) : (
+      ) : recent || crumbs.length > 1 ? (
         <div className="flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-2 py-1.5">
-          <button type="button" onClick={upOne} disabled={!recent && crumbs.length <= 1}
-            aria-label="Up one folder" className="flex h-12 w-12 shrink-0 items-center justify-center rounded-lg text-brand-700 hover:bg-brand-50 disabled:opacity-40">
+          <button type="button" onClick={upOne}
+            aria-label="Up one folder" className="flex h-12 w-12 shrink-0 items-center justify-center rounded-lg text-brand-700 hover:bg-brand-50">
             <ArrowLeft size={18} aria-hidden />
           </button>
           <div className="min-w-0 flex-1">
-            <p data-folder-title className="break-words text-sm font-bold text-slate-800">{currentTitle}</p>
-            <p className="break-words text-[11px] text-slate-500">{parentTitle}</p>
+            <p data-folder-title className="break-words hyphens-none text-sm font-bold text-slate-800">{currentTitle}</p>
+            <p className="break-words hyphens-none text-[11px] text-slate-500">{parentTitle}</p>
           </div>
+        </div>
+      ) : (
+        <p data-crumb="Records" className="flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-bold text-slate-600">
+          <Folder size={14} className="shrink-0 text-brand-700" aria-hidden /> Records
+        </p>
+      )}
+
+      {timeWindow && TIME_TOKEN[timeWindow] && (
+        <div data-deep-time className="flex flex-wrap items-center gap-2 rounded-xl border border-brand-200 bg-brand-50 px-3 py-2 text-xs font-bold text-brand-800">
+          <span>Time of day: {TIME_TOKEN[timeWindow].label} · {TIME_TOKEN[timeWindow].window}</span>
+          <button type="button" onClick={() => setTimeWindow("")}
+            className="ml-auto min-h-8 rounded-lg px-2 text-[11px] font-bold text-brand-700 underline underline-offset-2 hover:bg-brand-100">
+            Clear
+          </button>
+        </div>
+      )}
+
+      {timeWindow && TIME_TOKEN[timeWindow] && (
+        <div data-deep-time className="flex flex-wrap items-center gap-2 rounded-xl border border-brand-200 bg-brand-50 px-3 py-2 text-xs font-bold text-brand-800">
+          <span>Time of day: {TIME_TOKEN[timeWindow].label} · {TIME_TOKEN[timeWindow].window}</span>
+          <button type="button" onClick={() => setTimeWindow("")}
+            className="ml-auto min-h-8 rounded-lg px-2 text-[11px] font-bold text-brand-700 underline underline-offset-2 hover:bg-brand-100">
+            Clear
+          </button>
         </div>
       )}
 
@@ -523,10 +574,10 @@ export default function RecordsExplorer({ records, onArchive }: { records: Recor
         <div className={`grid gap-2 ${wide ? "lg:grid-cols-3 xl:grid-cols-4" : "grid-cols-1 sm:grid-cols-2"}`}>
           {crumbs.length === 1 && (
             <button type="button" data-recent onClick={() => { setRecent(true); setPath([]); }}
-              className={`min-w-0 rounded-2xl border border-slate-200 bg-white p-3 text-left shadow-sm hover:border-brand-300 hover:bg-brand-50/40 ${wide ? "flex flex-col gap-2" : "flex items-start gap-3"}`}>
-              <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-brand-50 text-brand-700"><CalendarDays size={18} aria-hidden /></span>
+              className={`min-w-0 rounded-2xl border border-brand-300 bg-brand-50/60 p-3 text-left shadow-sm ring-1 ring-brand-100 hover:border-brand-400 hover:bg-brand-50 ${wide ? "flex flex-col gap-2" : "flex items-start gap-3"}`}>
+              <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-brand-100 text-brand-700"><CalendarDays size={18} aria-hidden /></span>
               <span className="min-w-0 flex-1">
-                <span className="block break-words text-sm font-bold text-slate-800">Recent (last 7 days)</span>
+                <span className="block break-words hyphens-none text-sm font-bold text-brand-900">Recent (last 7 days)</span>
                 <span className="mt-0.5 block text-xs text-slate-500">{countLabel(recentRecords.length)}</span>
                 <MixBar records={recentRecords} />
               </span>

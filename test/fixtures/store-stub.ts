@@ -16,7 +16,7 @@ export const POLICY_TEXT = "8–64 characters; one uppercase letter, one lowerca
 
 const DEFAULT_MODES = {
   hazard: { active: false, kind: "flood", note: "", since: null, by: null },
-  drill: { active: false, label: "", startedAt: null },
+  drill: { active: false, label: "", startedAt: null, scope: "school" as const },
   route: { status: "passable" },
 };
 
@@ -36,6 +36,7 @@ const base: Ctx = {
     },
   },
   incidents: [],
+  headcountTasks: [],
   roster: [],
   sections: ["Grade 3 - Sec A"],
   modes: DEFAULT_MODES,
@@ -71,7 +72,8 @@ const base: Ctx = {
   archiveResolved: async () => 0,
   hideIncident: async () => {},
   saveProfile: async () => {},
-  addTeacher: async () => {},
+  updateRegistry: async () => {},
+  addTeacher: async () => ({ teacherId: "t-new", email: "new@sinalhanes.deped.ph", tempPassword: "Temp-Password-2026!" }),
   editTeacher: async () => {},
   archiveTeacher: async () => {},
 };

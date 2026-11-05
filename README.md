@@ -65,7 +65,7 @@ live updates over Server-Sent Events with polling fallback, browser notification
 ## History, archive, hide and purge
 Every resolved, false-alarm or cancelled incident moves to **History** for teachers, parents and responders (the responder rail reads **Queue · Escalation · History · Account** — their queue stays open tickets only, closed work lives on History), with full details (urgency reasons in plain words, timeline, who acknowledged/closed). The Principal's official record is **More → Incidents & Records** — three tabs (Real Incidents, Drill Records, System Archives) with a Records → School Year → Month → Category → Zone browser and reporter-by-role detail; past drill logs are read-only there, so Safety only carries the drill/hazard switches. The post-incident breakdown charts live on their own **Analytics** rail tab. Scoring math is not shown to teachers or parents. **Nothing is ever deleted through the UI or the API — no route accepts HTTP `DELETE`.**
 * **Per-organization response** — Barangay Sinalhan and CDRRMO each keep their own track (`incident.responses`): the responder's "Your response" card, its stepper and the single next-action button follow only that org, "Other responders" is read-only below it, and the status line names who is furthest ("On site · Barangay Sinalhan") or who closed the ticket ("Resolved by …"). The acting org always comes from the signed-in account — never from the request — each track's timestamps are written once, ticket-level stamps stay the earliest across orgs, and an org may only resolve after its own on-site step. Principal, Teacher and Parent keep the shared ticket-level stepper.
-* **My Reports visibility** — a teacher sees a ticket when they are one of its reporters, when its linked section is their class, or when it is whole-school; rows are labelled "You reported", "You also reported" or "Reported in your class" (never another teacher's name). Drill tickets go only to the teachers who took part, the archive follows the same rule, and hiding stays per user.
+* **My Reports visibility** — a teacher sees a ticket when they are one of its reporters, when its linked section is their class, or when it is whole-school; rows are labelled "You reported", "You also reported" or "Reported in your class" (never another teacher's name) and sit under **Active** or **Earlier** in ONE list with ONE filter. Top chips are All · Active · Resolved · Archived · Hidden; the Filters section carries Status, Relation and Period. Drill tickets go only to the teachers who took part, the archive follows the same rule, and hiding stays per user.
 * **HIDE** (Teacher for their own reports, Parent for closed alerts) — a per-user "remove from my list": reversible from the **Hidden** chip, the record itself is unchanged and stays visible to everyone else. Responders have **no hide and no delete**; they can only filter closed tickets out of their queue.
 * **ARCHIVE** (Principal) — organization-wide, from **More → Incidents & Records → Real Incidents**: the archive icon on any resolved record moves just that ticket, and the **Archive all resolved** action at the top of the tab moves every resolved report at once (active and ongoing tickets are never touched). A sweep also runs on server start and then hourly (`ASPIRE_ARCHIVE_AFTER_DAYS`, placeholder) and writes one audit entry per run. Archived tickets leave `/api/state` for **every** role and live behind `GET /api/incidents/archive` (paginated, limit 50): Principal/Admin see all, a Responder every archived ticket, a Teacher the same rule as the live list (reporter, their linked section or the whole school), a Parent gets 403. **Restore** on an archived row puts a ticket back in Real Incidents. Archived records live in **System Archives**, which is split into two dedicated archives — **Archived tickets** and **Archived accounts** (Admin only); Responder: **History → View archive**, Teacher: **My Reports → Archived**. A Parent never sees archived tickets.
 * **Accounts** — Admin can archive/restore an account (archived = sessions revoked, sign-in blocked with the generic "Invalid email or password.", hidden from rosters; restore forces a password change). The Principal can archive a teacher from the roster, which archives that account. Self-archive and archiving the last active Super Admin are refused.
@@ -77,12 +77,16 @@ The rail reads **Users · Analytics · System Settings · More**. School year, t
 * Reporters can cancel their own alert until a responder is on site, unless other people also reported it.
 
 ## Dropdowns
-Every dropdown in the app is the shared `src/components/Select.tsx` — never a native `<select>`
+Every form dropdown in the app is the shared `src/components/Select.tsx` — never a native `<select>`
 (its popup is drawn by the OS and can't follow the design). It keeps the `<select>`-like API
 (`value`, `onChange(value)`, `options: { value, label, description?, disabled? }`, `placeholder`,
 `label`, `disabled`, `error`), renders a popover on screens ≥ 640px and a bottom sheet below that,
 and is keyboard accessible (arrows/Home/End, type-ahead, Enter, Esc closes only the menu).
-Use it for any new dropdown.
+Use it for form fields. **Filter panels never use a dropdown**: every filter is a section of
+tappable chips (single-choice sections start with an "Any …" chip and use `role="radiogroup"`,
+multi-choice chips use `aria-pressed`), with counts inside the chip, zero-count chips visible but
+disabled, 20px gaps and hairline dividers between sections, and a sticky Reset / "Show N results"
+footer under the scrolling body.
 
 ## Dates
 Date fields use the shared `src/components/DatePicker.tsx` — never a native `<input type="date">`
@@ -91,11 +95,13 @@ Date fields use the shared `src/components/DatePicker.tsx` — never a native `<
 day and emptying clears it — or open the calendar (popover at ≥ 640px, bottom sheet below), where
 the header walks day → month → year grids (and picks walk back out), so nobody arrow-clicks through
 a year, a month or a decade.
-Record lists (every role's History, the Super Admin audit log, Analytics) choose their period from
-one **Period** dropdown inside the Filters sheet — Any time, Today, Last 7 days, Last 30 days, This
-school year, Custom range (which reveals the From/To pickers) — backed by the pure helpers in
-`src/lib/filters.ts` (`DateRangeState`, `setPeriod`, `setDateBound`, `inDateRange`). The period counts
-as an active filter on the Filters badge and in the results summary; there is no chip row anywhere.
+Record lists (every role's History/My Reports, the Super Admin audit log, Analytics) choose their
+period from the **Period** section inside the Filters panel — Any time, Today, Last 7 days, Last 30
+days, This school year, Custom range (which reveals the From/To pickers inline under the chips) —
+backed by the pure helpers in `src/lib/filters.ts` (`DateRangeState`, `setPeriod`, `setDateBound`,
+`inDateRange`). The period counts as an active filter on the Filters badge and in the results
+summary. A page header with a stand-alone filter/period control puts a single Filter icon in the
+`actions` slot of the shared back bar instead (the audit log does this).
 
 ## Branding
 The product name is **ASPIRE**, set in one place: `src/lib/brand.ts`
