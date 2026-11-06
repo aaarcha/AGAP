@@ -646,7 +646,7 @@ export default function ReportView({ onOpenProfile, onOpenHeadcount }: { onOpenP
       {step === 1 && (
         <section className="transition-all duration-200">
           <h2 className="mb-2 text-xs font-bold uppercase tracking-wide text-slate-500">
-            Tap 1 · What is happening?
+            · What is happening?
           </h2>
           <div
             className="relative mb-3 w-full"
@@ -697,7 +697,7 @@ export default function ReportView({ onOpenProfile, onOpenHeadcount }: { onOpenP
       {step === 2 && sel && (
         <section className="transition-all duration-200 w-full">
           <h2 className="mb-2 text-xs font-bold uppercase tracking-wide text-slate-500">
-            Tap 2 · Who is affected?
+            · Who is affected?
           </h2>
 
           <div
@@ -740,7 +740,7 @@ export default function ReportView({ onOpenProfile, onOpenHeadcount }: { onOpenP
       {step === 3 && sel && pop && (
         <section className="w-full transition-all duration-200">
           <h2 className="mb-2 text-xs font-bold uppercase tracking-wide text-slate-500">
-            Tap 3 · Confirm &amp; send
+            · Confirm &amp; send
           </h2>
 
           <div

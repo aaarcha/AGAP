@@ -127,6 +127,7 @@ function DataAccordion() {
     <Accordion title="What data is collected and why">
       <ul className="space-y-1.5 text-sm text-slate-700">
         <li><b>Account details</b> — name, email, role, section/room: to sign you in and show you the right incidents.</li>
+        <li><b>Email</b> — used only for sign-in verification and invitations.</li>
         <li><b>Report details</b> — emergency type, location, who is affected, timestamps: to dispatch help and keep the official record.</li>
         <li><b>Headcount totals</b> — numbers only, never pupil names: to check everyone is accounted for.</li>
         <li><b>Audit log</b> — sign-ins and actions: to keep the record accountable.</li>

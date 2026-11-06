@@ -2,13 +2,13 @@ import { useState, useEffect, useMemo, type ReactNode } from "react";
 import {
   Users, ClipboardList, Calendar, Plus, RefreshCw, Unlock, UserX, UserCheck, Key, Eye, EyeOff, Copy, Check, AlertCircle,
   SlidersHorizontal, Search, X, History, Pencil, RotateCcw, Save, Trash2, FileWarning, Archive, Radio, ShieldCheck, User, ChevronRight,
-  Footprints, Bike, Truck, ShieldAlert,
+  Footprints, Bike, Truck, ShieldAlert, Send, ShieldX,
   LogIn, LogOut, Database, Siren, AlertTriangle,
 } from "lucide-react";
 import { api } from "../lib/api";
 import type { AccountRecord, AuditEntry, ConfigPayload, ConfigVersion, SchoolYear, TempCredential } from "../lib/types";
 import { Modal, ConfirmModal } from "../components/Modal";
-import { TempCredentialModal, PasswordResultModal } from "../components/Credentials";
+import { TempCredentialModal, PasswordResultModal, InviteSentModal, type InviteNotice } from "../components/Credentials";
 import { dateTime } from "../lib/format";
 import { BackBarFor, Header, StatusBanner } from "../components/Chrome";
 import { RoleNav } from "../components/RoleNav";
@@ -79,6 +79,13 @@ const AUDIT_ACTION_LABEL: Record<string, string> = {
   account_created: "Account created",
   account_updated: "Account updated",
   email_changed: "Email changed",
+  email_verified: "Email verified",
+  invite_sent: "Invitation sent",
+  invite_used: "Invitation accepted",
+  invite_revoked: "Invitation revoked",
+  verification_sent: "Verification code sent",
+  password_reset_requested: "Password reset requested",
+  password_reset_completed: "Password reset completed",
   account_deactivated: "Account deactivated",
   account_activated: "Account activated",
   account_archived: "Account archived",
@@ -302,10 +309,13 @@ export default function AdminConsole() {
   const [schoolYear, setSchoolYear] = useState<SchoolYear | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
 
   // Modals
   const [showProvision, setShowProvision] = useState(false);
   const [provisionResult, setProvisionResult] = useState<TempCredential | null>(null);
+  const [inviteNotice, setInviteNotice] = useState<InviteNotice | null>(null);
+  const [inviteRevokeTarget, setInviteRevokeTarget] = useState<AccountRecord | null>(null);
   const [resetTarget, setResetTarget] = useState<AccountRecord | null>(null);
   const [resetResult, setResetResult] = useState<string | null>(null);
   const [deactivateTarget, setDeactivateTarget] = useState<AccountRecord | null>(null);
@@ -462,9 +472,29 @@ export default function AdminConsole() {
   // section, and (for a teacher) the shared class fields.
   async function handleEdit(values: { name: string; email: string; org?: string; section?: string; room?: string; registry?: number }) {
     if (!editTarget) return;
-    await api("PUT", `/api/admin/accounts/${editTarget.id}`, values);
+    const r = await api<{ emailPending?: boolean }>("PUT", `/api/admin/accounts/${editTarget.id}`, values);
     setEditTarget(null);
+    setNotice(r.emailPending ? "Verification code sent to the new address. The old email stays valid until it is confirmed." : "");
     await loadData();
+  }
+  async function handleResendInvite(acc: AccountRecord) {
+    setError("");
+    try {
+      const r = await api<{ maskedEmail?: string | null }>("POST", `/api/admin/accounts/${acc.id}/invite/resend`);
+      setNotice(`Invitation resent${r.maskedEmail ? ` to ${r.maskedEmail}` : ""}.`);
+      await loadData();
+    } catch (e) { setError(e instanceof Error ? e.message : "Failed to resend the invitation"); }
+  }
+  function handleRevokeInvite(acc: AccountRecord) { setInviteRevokeTarget(acc); }
+  async function confirmRevokeInvite() {
+    if (!inviteRevokeTarget) return;
+    setError("");
+    try {
+      await api("POST", `/api/admin/accounts/${inviteRevokeTarget.id}/invite/revoke`);
+      setInviteRevokeTarget(null);
+      setNotice("Invitation revoked. The account cannot sign in until a new invite is sent.");
+      await loadData();
+    } catch (e) { setError(e instanceof Error ? e.message : "Failed to revoke the invitation"); }
   }
   async function handleReset() {
     if (!resetTarget) return;
@@ -497,6 +527,12 @@ export default function AdminConsole() {
               <span>{error}</span>
             </div>
           )}
+          {notice && (
+            <div className="mx-auto mb-3 flex w-full max-w-6xl items-start justify-between gap-2 rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-800">
+              <span className="flex items-center gap-2"><Send size={16} className="shrink-0" /> {notice}</span>
+              <button type="button" onClick={() => setNotice("")} aria-label="Dismiss" className="shrink-0 text-emerald-700"><X size={16} /></button>
+            </div>
+          )}
           {loading && <div className="py-8 text-center text-slate-500">Loading…</div>}
 
           {tab === "accounts" && !loading && (
@@ -514,6 +550,7 @@ export default function AdminConsole() {
                     onUnlock={handleUnlock} onActivate={handleActivate}
                     onReset={setResetTarget} onDeactivate={setDeactivateTarget} onRestore={handleRestore}
                     onPurge={setPurgeTarget} onRequest={setRequestTarget} onEdit={setEditTarget}
+                    onResendInvite={handleResendInvite} onRevokeInvite={handleRevokeInvite}
                     />
                 </BoundedPane>
               </section>
@@ -602,9 +639,21 @@ export default function AdminConsole() {
 
       {showProvision && (
         <ProvisionModal knownSections={accounts.map((a) => a.section ?? "")} onClose={() => setShowProvision(false)}
-          onCreated={(cred) => { setShowProvision(false); setProvisionResult(cred); void loadData(); }} />
+          onCreated={(r) => {
+            setShowProvision(false);
+            setProvisionResult(r.credential);
+            setInviteNotice(r.invite);
+            if (r.mailError) setNotice("Email could not be sent, so a temporary password was issued instead.");
+            void loadData();
+          }} />
       )}
       {provisionResult && <TempCredentialModal title="Account provisioned" credential={provisionResult} onClose={() => setProvisionResult(null)} />}
+      {inviteNotice && <InviteSentModal notice={inviteNotice} onClose={() => setInviteNotice(null)} onChanged={() => void loadData()} />}
+      {inviteRevokeTarget && (
+        <ConfirmModal title="Revoke invitation" danger onClose={() => setInviteRevokeTarget(null)}
+          message={`The current invitation link for ${inviteRevokeTarget.name} stops working immediately. The account stays invited and cannot sign in until a new link is sent.`}
+          confirmLabel="Revoke invite" onConfirm={() => void confirmRevokeInvite()} />
+      )}
       {editTarget && (
         <AccountEditModal acc={editTarget} knownSections={accounts.map((a) => a.section ?? "")}
           onClose={() => setEditTarget(null)} onSave={handleEdit} />
@@ -797,6 +846,11 @@ function StatusBadge({ acc }: { acc: AccountRecord }) {
 /** Secondary warnings (password change, temporary credential, lockout) — not the status itself. */
 function StatusChips({ acc }: { acc: AccountRecord }) {
   const chips = [
+    acc.status === "invited" ? { label: "Invited", className: "bg-sky-100 text-sky-800" } : null,
+    acc.emailVerifiedAt
+      ? { label: "Verified", className: "bg-emerald-100 text-emerald-700" }
+      : { label: "Not verified", className: "bg-slate-100 text-slate-600" },
+    acc.pendingEmail ? { label: "New email pending", className: "bg-amber-100 text-amber-800" } : null,
     acc.mustChange ? { label: "Must change password", className: "bg-amber-100 text-amber-700" } : null,
     acc.temp ? { label: "Temporary credential", className: "bg-blue-100 text-blue-700" } : null,
     acc.locked ? { label: "Locked", className: "bg-blush-100 text-blush-700" } : null,
@@ -848,7 +902,7 @@ function ActionGroup({ title, actions }: { title: string; actions: AccountAction
   );
 }
 
-function AccountActions({ acc, onUnlock, onActivate, onReset, onDeactivate, onRestore, onPurge, onRequest, onEdit }: {
+function AccountActions({ acc, onUnlock, onActivate, onReset, onDeactivate, onRestore, onPurge, onRequest, onEdit, onResendInvite, onRevokeInvite }: {
   acc: AccountRecord;
   onUnlock: (a: AccountRecord) => void; onActivate: (a: AccountRecord) => void;
   onReset: (a: AccountRecord) => void; onDeactivate: (a: AccountRecord) => void;
@@ -856,6 +910,8 @@ function AccountActions({ acc, onUnlock, onActivate, onReset, onDeactivate, onRe
   onPurge?: (a: AccountRecord) => void;
   onRequest?: (a: AccountRecord) => void;
   onEdit?: (a: AccountRecord) => void;
+  onResendInvite?: (a: AccountRecord) => void;
+  onRevokeInvite?: (a: AccountRecord) => void;
 }) {
   const closed = acc.status === "archived" || acc.status === "purged";
   const primary: AccountAction[] = [];
@@ -866,7 +922,15 @@ function AccountActions({ acc, onUnlock, onActivate, onReset, onDeactivate, onRe
       key: "edit", label: "Edit Profile", icon: <Pencil size={15} />, onClick: () => onEdit(acc),
       tone: "primary", title: "Edit the account name and assignment",
     });
-    primary.push({
+    if (acc.status === "invited" && onResendInvite) primary.push({
+      key: "resend-invite", label: "Resend invite", icon: <Send size={15} />, onClick: () => onResendInvite(acc),
+      tone: "secondary", title: "Send a fresh 72-hour invitation link",
+    });
+    if (acc.status === "invited" && onRevokeInvite) primary.push({
+      key: "revoke-invite", label: "Revoke invite", icon: <ShieldX size={15} />, onClick: () => onRevokeInvite(acc),
+      tone: "danger", title: "Invalidate the current invitation link",
+    });
+    if (acc.status !== "invited") primary.push({
       key: "reset", label: "Reset Password", icon: <Key size={15} />, onClick: () => onReset(acc),
       tone: "secondary", title: "Reset password",
     });
@@ -882,7 +946,7 @@ function AccountActions({ acc, onUnlock, onActivate, onReset, onDeactivate, onRe
       key: "deactivate", label: "Deactivate Account", icon: <UserX size={15} />, onClick: () => onDeactivate(acc),
       tone: "danger", title: "Deactivate account",
     });
-    else data.push({
+    else if (acc.status === "inactive") data.push({
       key: "activate", label: "Reactivate Account", icon: <UserCheck size={15} />, onClick: () => onActivate(acc),
       tone: "positive", title: "Reactivate account",
     });
@@ -927,6 +991,7 @@ const ROLE_CHIPS: { value: string; label: string }[] = [
 
 const STATUS_CHIPS: { value: string; label: string }[] = [
   { value: "active", label: "Active" },
+  { value: "invited", label: "Invited" },
   { value: "locked", label: "Locked" },
   { value: "mustchange", label: "Must change" },
   { value: "inactive", label: "Deactivated" },
@@ -936,6 +1001,7 @@ const STATUS_CHIPS: { value: string; label: string }[] = [
 /** Display + colour per account status (archived/purged are their own states). */
 const STATUS_BADGE: Record<string, { label: string; className: string }> = {
   active: { label: "Active", className: "bg-emerald-100 text-emerald-700" },
+  invited: { label: "Invited", className: "bg-sky-100 text-sky-800" },
   inactive: { label: "Deactivated", className: "bg-slate-100 text-slate-500" },
   archived: { label: "Archived", className: "bg-amber-100 text-amber-800" },
   purged: { label: "Purged", className: "bg-slate-200 text-slate-600" },
@@ -976,10 +1042,11 @@ const gradeOf = (a: AccountRecord) => a.grade || parseSection(a.section ?? "").g
 const statusOf = (a: AccountRecord): string[] => {
   const out: string[] = [];
   if (a.status === "active") out.push("active");
+  if (a.status === "invited") out.push("invited");
   if (a.locked) out.push("locked");
   if (a.mustChange) out.push("mustchange");
   if (a.status === "archived") out.push("archived"); // its own bucket: not a suspension
-  else if (a.status !== "active") out.push("inactive");
+  else if (a.status !== "active" && a.status !== "invited") out.push("inactive");
   return out;
 };
 
@@ -1004,7 +1071,7 @@ function DetailRow({ label, value }: { label: string; value: ReactNode }) {
   );
 }
 
-function AccountDetail({ acc, onUnlock, onActivate, onReset, onDeactivate, onRestore, onPurge, onRequest, onEdit }: {
+function AccountDetail({ acc, onUnlock, onActivate, onReset, onDeactivate, onRestore, onPurge, onRequest, onEdit, onResendInvite, onRevokeInvite }: {
   acc: AccountRecord;
   onUnlock: (a: AccountRecord) => void; onActivate: (a: AccountRecord) => void;
   onReset: (a: AccountRecord) => void; onDeactivate: (a: AccountRecord) => void;
@@ -1012,6 +1079,8 @@ function AccountDetail({ acc, onUnlock, onActivate, onReset, onDeactivate, onRes
   onPurge?: (a: AccountRecord) => void;
   onRequest?: (a: AccountRecord) => void;
   onEdit?: (a: AccountRecord) => void;
+  onResendInvite?: (a: AccountRecord) => void;
+  onRevokeInvite?: (a: AccountRecord) => void;
 }) {
   return (
     <div className="space-y-3">
@@ -1069,7 +1138,8 @@ function AccountDetail({ acc, onUnlock, onActivate, onReset, onDeactivate, onRes
 
       {/* 4. Actions: a primary pair, then the data/account pair, evenly aligned. */}
       <AccountActions acc={acc} onUnlock={onUnlock} onActivate={onActivate} onReset={onReset} onDeactivate={onDeactivate}
-        onRestore={onRestore} onPurge={onPurge} onRequest={onRequest} onEdit={onEdit} />
+        onRestore={onRestore} onPurge={onPurge} onRequest={onRequest} onEdit={onEdit}
+        onResendInvite={onResendInvite} onRevokeInvite={onRevokeInvite} />
     </div>
   );
 }
@@ -1089,7 +1159,7 @@ function AccountRow({ acc, active }: { acc: AccountRecord; active: boolean }) {
   );
 }
 
-function AccountsPane({ accounts, onUnlock, onActivate, onReset, onDeactivate, onRestore, onPurge, onRequest, onEdit, summary }: {
+function AccountsPane({ accounts, onUnlock, onActivate, onReset, onDeactivate, onRestore, onPurge, onRequest, onEdit, onResendInvite, onRevokeInvite, summary }: {
   accounts: AccountRecord[];
   /** Compact dashboard tiles, rendered under search + filters (never above them). */
   summary?: ReactNode;
@@ -1099,6 +1169,8 @@ function AccountsPane({ accounts, onUnlock, onActivate, onReset, onDeactivate, o
   onPurge: (a: AccountRecord) => void;
   onRequest: (a: AccountRecord) => void;
   onEdit: (a: AccountRecord) => void;
+  onResendInvite: (a: AccountRecord) => void;
+  onRevokeInvite: (a: AccountRecord) => void;
 }) {
   // One state for search, the role row, the sheet groups and the sort menu —
   // kept per screen for the session.
@@ -1212,7 +1284,8 @@ function AccountsPane({ accounts, onUnlock, onActivate, onReset, onDeactivate, o
       renderList={(acc, active) => <AccountRow acc={acc} active={active} />}
       renderDetail={(acc) => (
         <AccountDetail acc={acc} onUnlock={onUnlock} onActivate={onActivate} onReset={onReset} onDeactivate={onDeactivate}
-          onRestore={onRestore} onPurge={onPurge} onRequest={onRequest} onEdit={onEdit} />
+          onRestore={onRestore} onPurge={onPurge} onRequest={onRequest} onEdit={onEdit}
+          onResendInvite={onResendInvite} onRevokeInvite={onRevokeInvite} />
       )}
     />
   );
@@ -1956,7 +2029,7 @@ export function ConfigTab({ onDirtyChange }: { onDirtyChange: (dirty: boolean) =
 function ProvisionModal({ knownSections, onClose, onCreated }: {
   knownSections: string[];
   onClose: () => void;
-  onCreated: (cred: TempCredential | null) => void;
+  onCreated: (result: { credential: TempCredential | null; invite: InviteNotice | null; mailError: string | null }) => void;
 }) {
   const [email, setEmail] = useState("");
   const [name, setName] = useState("");
@@ -1992,14 +2065,21 @@ function ProvisionModal({ knownSections, onClose, onCreated }: {
     setBusy(true);
     setError("");
     try {
-      const r = await api<{ account: AccountRecord; tempPassword: string | null }>("POST", "/api/admin/accounts", {
+      const r = await api<{
+        account: AccountRecord; tempPassword: string | null;
+        invited?: boolean; maskedEmail?: string | null; mailError?: string | null;
+      }>("POST", "/api/admin/accounts", {
         email, name, role, org: role === "responder" ? org : undefined,
         section: needsSection ? section : undefined,
         room: isTeacher ? room : undefined,
         registry: isTeacher && registry.trim() !== "" ? Number(registry) : undefined,
         password: password || undefined,
       });
-      onCreated(r.tempPassword ? { id: r.account.id, email, name, role, tempPassword: r.tempPassword } : null);
+      onCreated({
+        credential: r.tempPassword ? { id: r.account.id, email, name, role, tempPassword: r.tempPassword } : null,
+        invite: r.invited ? { basePath: `/api/admin/accounts/${r.account.id}`, name, maskedEmail: r.maskedEmail ?? null } : null,
+        mailError: r.mailError ?? null,
+      });
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to create account");
       setBusy(false);
@@ -2124,7 +2204,9 @@ function AccountEditModal({ acc, knownSections, onClose, onSave }: {
     <Modal title="Edit user" onClose={() => { if (!busy) onClose(); }}>
       <div className="space-y-3">
         <p className="text-xs text-slate-500">
-          {acc.role}{acc.status !== "active" ? ` · ${acc.status}` : ""} · changing the email signs this user out everywhere
+          {acc.role}{acc.status !== "active" ? ` · ${acc.status}` : ""} · {acc.status === "invited"
+            ? "changing the email resends the invitation"
+            : "changing the email sends a code to the new address; the old one stays valid until confirmed"}
         </p>
         <label className="block text-sm font-medium text-slate-700">Name
           <input value={name} maxLength={80} onChange={(e) => setName(e.target.value)}

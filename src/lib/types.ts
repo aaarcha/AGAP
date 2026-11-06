@@ -9,6 +9,12 @@ export interface User {
   role: Role;
   name: string;
   subtitle: string;
+  /** Sign-in email; roster/account state is derived on the server. */
+  email?: string;
+  /** Set once an invite has been accepted or a new email confirmed. */
+  emailVerifiedAt?: number | null;
+  /** The new address waiting for its verification code, if any. */
+  pendingEmail?: string | null;
   /** Responders only: the organization they dispatch for. */
   org?: ResponderOrg | null;
   section?: string;
@@ -183,6 +189,12 @@ export interface RosterEntry {
   id: string;
   name: string;
   section: string;
+  /** Principal view: the teacher account's invitation/verification state. */
+  email?: string | null;
+  accountStatus?: "active" | "invited" | "inactive" | "archived" | "purged" | null;
+  emailVerifiedAt?: number | null;
+  pendingEmail?: string | null;
+  invitePending?: boolean;
   /** Structured grade derived from section: "K" or "1".."6" ("" when unparseable). */
   grade?: string;
   /** Section name part of section, e.g. "A" ("" when unparseable). */
@@ -294,9 +306,12 @@ export interface AccountRecord {
   grade?: string;
   /** Section name part of section, e.g. "A" ("" when unparseable). */
   sectionName?: string;
-  status: "active" | "inactive" | "archived" | "purged";
+  status: "active" | "invited" | "inactive" | "archived" | "purged";
   mustChange: boolean;
   temp: boolean;
+  emailVerifiedAt?: number | null;
+  pendingEmail?: string | null;
+  invitePending?: boolean;
   /** Set when the account was archived (blocks sign-in, revokes sessions). */
   archivedAt?: number | null;
   archiveReason?: string | null;

@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
-import { ChevronRight, Info, KeyRound, LogOut, School } from "lucide-react";
+import { ChevronRight, Info, KeyRound, LogOut, Mail, School, ShieldCheck } from "lucide-react";
 import { useApp } from "../lib/store";
+import { api } from "../lib/api";
+import { CodeInput } from "../components/CodeInput";
 import { ConfirmModal, Modal } from "../components/Modal";
 import { validatePassword } from "../lib/password";
 import { BackBarFor } from "../components/Chrome";
@@ -248,6 +250,91 @@ function ProfileEditor({ onBack }: { onBack: () => void }) {
   );
 }
 
+function EmailChangeModal({ onClose }: { onClose: () => void }) {
+  const { user, refresh, notify } = useApp();
+  const [step, setStep] = useState<"request" | "verify">(user?.pendingEmail ? "verify" : "request");
+  const [email, setEmail] = useState(user?.pendingEmail || "");
+  const [pending, setPending] = useState(user?.pendingEmail || "");
+  const [code, setCode] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [cooldown, setCooldown] = useState(0);
+
+  useEffect(() => {
+    if (cooldown <= 0) return;
+    const t = window.setInterval(() => setCooldown((n) => Math.max(0, n - 1)), 1000);
+    return () => window.clearInterval(t);
+  }, [cooldown]);
+
+  async function request(e?: React.FormEvent) {
+    e?.preventDefault();
+    setError("");
+    const address = email.trim();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(address)) { setError("Enter a valid email address."); return; }
+    setBusy(true);
+    try {
+      const r = await api<{ pendingEmail: string }>("POST", "/api/me/email", { email: address });
+      setPending(r.pendingEmail || address);
+      setCode("");
+      setStep("verify");
+      setCooldown(30);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not send the code.");
+    } finally { setBusy(false); }
+  }
+
+  async function verify(e: React.FormEvent) {
+    e.preventDefault();
+    setError("");
+    if (code.replace(/\D/g, "").length !== 6) { setError("Enter the 6-digit code."); return; }
+    setBusy(true);
+    try {
+      await api("POST", "/api/me/email/verify", { code });
+      await refresh();
+      notify({ kind: "info", title: "Email updated", body: "Your new address is verified. Other devices were signed out." });
+      onClose();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not verify the code.");
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Modal title="Change email" onClose={onClose}>
+      {step === "request" ? (
+        <form onSubmit={request} className="space-y-3">
+          <p className="text-xs leading-relaxed text-slate-500">
+            We will send a 6-digit code to the new address. Your current email stays valid until it is confirmed.
+          </p>
+          <label className="block text-sm font-medium text-slate-700">New email
+            <input type="email" value={email} onChange={(e) => { setEmail(e.target.value); setError(""); }}
+              placeholder="name@deped.gov.ph" autoComplete="email"
+              className="mt-1 min-h-12 w-full rounded-xl border border-slate-300 px-3 text-base font-normal outline-none focus:border-brand-500" />
+          </label>
+          <p className="text-xs text-slate-500">Current: {user?.email ?? user?.subtitle}</p>
+          {error && <p role="alert" className="text-sm text-blush-700">{error}</p>}
+          <button type="submit" disabled={busy} className="min-h-12 w-full rounded-xl bg-brand-600 px-3 font-bold text-white disabled:opacity-60">
+            {busy ? "Sending…" : "Send code"}
+          </button>
+        </form>
+      ) : (
+        <form onSubmit={verify} className="space-y-3">
+          <p className="text-sm text-slate-600">Enter the code sent to <span className="font-bold">{pending}</span>.</p>
+          <CodeInput value={code} onChange={(v) => { setCode(v); setError(""); }} disabled={busy} invalid={Boolean(error)} label="Email change code" />
+          <button type="button" disabled={busy || cooldown > 0} onClick={() => void request()}
+            className="min-h-11 w-full rounded-xl border border-slate-300 text-sm font-semibold text-slate-700 disabled:opacity-50">
+            {cooldown > 0 ? `Resend code in ${cooldown} s` : "Resend code"}
+          </button>
+          {error && <p role="alert" className="text-sm text-blush-700">{error}</p>}
+          <button type="submit" disabled={busy} className="min-h-12 w-full rounded-xl bg-brand-600 px-3 font-bold text-white disabled:opacity-60">
+            {busy ? "Verifying…" : "Verify new email"}
+          </button>
+        </form>
+      )}
+    </Modal>
+  );
+}
+
 export default function AccountView({ onBack, openProfileSignal = 0, onProfileOpened }: {
   onBack?: () => void;
   /** Increments when another screen asks for the profile screen (headcount card link). */
@@ -264,7 +351,7 @@ export default function AccountView({ onBack, openProfileSignal = 0, onProfileOp
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
 
-  const [screen, setScreen] = useState<"account" | "profile" | "change" | "about" | null>(
+  const [screen, setScreen] = useState<"account" | "profile" | "change" | "email" | "about" | null>(
     openProfileSignal > 0 ? "profile" : null,
   );
   // Consume the "open My profile" request once, so returning to Account later
@@ -323,6 +410,13 @@ export default function AccountView({ onBack, openProfileSignal = 0, onProfileOp
             {ROLE_LABEL[role] ?? role}
           </p>
           <p className="mt-0.5 text-xs text-slate-500">{org}</p>
+          <p className="mt-1 break-all text-xs text-slate-500">{user!.email ?? user!.subtitle}</p>
+          <span data-email-chip className={`mt-2 inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-bold ${
+            user!.emailVerifiedAt ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-800"
+          }`}>
+            <ShieldCheck size={12} aria-hidden /> {user!.emailVerifiedAt ? "Email verified" : "Not verified"}
+          </span>
+          {user!.pendingEmail && <p className="mt-1 text-xs text-amber-700">New address pending: {user!.pendingEmail}</p>}
         </Card>
 
         {isTeacher && (
@@ -335,6 +429,9 @@ export default function AccountView({ onBack, openProfileSignal = 0, onProfileOp
         )}
 
         <AccountRow icon={KeyRound} label="Change password" onClick={() => setScreen("change")} />
+        <AccountRow icon={Mail} label="Change email"
+          subtitle={user!.pendingEmail ? `Waiting for a code sent to ${user!.pendingEmail}` : user!.email ?? "Add a verified address"}
+          onClick={() => setScreen("email")} />
 
         <AccountRow icon={Info} label="About ASPIRE" onClick={() => setScreen("about")} />
 
@@ -342,11 +439,13 @@ export default function AccountView({ onBack, openProfileSignal = 0, onProfileOp
       </div>
 
       {/* "change" stays a modal on top of the menu. */}
+      {screen === "email" && <EmailChangeModal onClose={() => setScreen(null)} />}
+
       {screen === "change" && (
         <Modal title="Change password" onClose={() => setScreen(null)} fullScreen>
           <ChangePasswordForm
             forced={false}
-            account={{ name: user!.name }}
+            account={{ name: user!.name, email: user!.email }}
             current={current}
             onCurrentChange={setCurrent}
             showCurrent={showCurrent}
