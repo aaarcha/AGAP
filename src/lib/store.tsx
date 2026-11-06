@@ -52,6 +52,8 @@ interface Ctx {
   /** The shared password policy text from the server. */
   passwordPolicy: string;
   login: (email: string, password: string, code?: string) => Promise<boolean>;
+  /** Complete an emailed invitation; it is also the first sign-in. */
+  acceptInvite: (token: string, password: string) => Promise<void>;
   changePassword: (password: string, currentPassword?: string) => Promise<void>;
   changeSavedRoom: (roomId: string) => Promise<void>;
   logout: (message?: string) => void;
@@ -74,7 +76,12 @@ interface Ctx {
   saveProfile: (v: TeacherValues) => Promise<void>;
   /** Save today's class registry through the existing profile endpoint. */
   updateRegistry: (registry: number) => Promise<void>;
-  addTeacher: (v: TeacherValues) => Promise<{ teacherId: string; email: string; tempPassword: string }>;
+  addTeacher: (v: TeacherValues) => Promise<{
+    teacherId: string; email: string; tempPassword: string | null;
+    invited: boolean; maskedEmail: string | null; mailError: string | null;
+  }>;
+  resendTeacherInvite: (id: string) => Promise<{ maskedEmail: string | null }>;
+  revokeTeacherInvite: (id: string) => Promise<void>;
   editTeacher: (id: string, v: TeacherValues) => Promise<void>;
   /** Archive a teacher (removes them from live rosters; reversible from the Admin console). */
   archiveTeacher: (id: string, reason?: string) => Promise<void>;
@@ -274,6 +281,16 @@ export function AppProvider({ children }: { children: ReactNode }) {
     setPasswordPolicy(r.policy ?? POLICY_TEXT);
     if (!r.mustChange) await refresh();
     return Boolean(r.mustChange);
+  }, [refresh, resetLocal]);
+
+  const acceptInvite = useCallback(async (inviteToken: string, password: string) => {
+    const r = await api<LoginResult>("POST", "/api/invite/accept", { token: inviteToken, password });
+    resetLocal();
+    setToken(r.token);
+    setUser(r.user);
+    setMustChange(false);
+    setPasswordPolicy(r.policy ?? POLICY_TEXT);
+    await refresh();
   }, [refresh, resetLocal]);
 
   // Single password field: no confirmation step, just the new password.
@@ -486,9 +503,24 @@ export function AppProvider({ children }: { children: ReactNode }) {
     await refresh();
   }, [refresh]);
   const addTeacher = useCallback(async (v: TeacherValues) => {
-    const r = await api<{ teacher: { id: string }; account: { email: string }; tempPassword: string }>("POST", "/api/roster", v);
+    const r = await api<{
+      teacher: { id: string }; account: { email: string }; tempPassword: string | null;
+      invited?: boolean; maskedEmail?: string | null; mailError?: string | null;
+    }>("POST", "/api/roster", v);
     await refresh();
-    return { teacherId: r.teacher.id, email: r.account.email, tempPassword: r.tempPassword };
+    return {
+      teacherId: r.teacher.id, email: r.account.email, tempPassword: r.tempPassword,
+      invited: Boolean(r.invited), maskedEmail: r.maskedEmail ?? null, mailError: r.mailError ?? null,
+    };
+  }, [refresh]);
+  const resendTeacherInvite = useCallback(async (id: string) => {
+    const r = await api<{ maskedEmail?: string | null }>("POST", `/api/roster/${id}/invite/resend`);
+    await refresh();
+    return { maskedEmail: r.maskedEmail ?? null };
+  }, [refresh]);
+  const revokeTeacherInvite = useCallback(async (id: string) => {
+    await api("POST", `/api/roster/${id}/invite/revoke`);
+    await refresh();
   }, [refresh]);
   const changeSavedRoom = useCallback(async (roomId: string) => { await api("PUT", "/api/profile/room", { roomId }); await refresh(); }, [refresh]);
   const editTeacher = useCallback(async (id: string, v: TeacherValues) => { await api("PUT", `/api/roster/${id}`, v); await refresh(); }, [refresh]);
@@ -508,9 +540,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   const value: Ctx = {
     user, ready, config, incidents, headcountTasks, roster, sections, modes, drills, now, online, connected, live,
-    queue, alerts, dismissAlert, notifPermission, enableNotifications, mustChange, passwordPolicy, login, changePassword, logout, refresh, submit, cancelQueued,
+    queue, alerts, dismissAlert, notifPermission, enableNotifications, mustChange, passwordPolicy, login, acceptInvite, changePassword, logout, refresh, submit, cancelQueued,
     act, recordHeadcount, setHazard, setDrill, setRoute, markSeen, cancelReport, archiveIncident, archiveResolved, hideIncident, hidden,
-    saveProfile, updateRegistry, addTeacher, editTeacher, archiveTeacher, changeSavedRoom, notify,
+    saveProfile, updateRegistry, addTeacher, resendTeacherInvite, revokeTeacherInvite, editTeacher, archiveTeacher, changeSavedRoom, notify,
   };
   return <AppCtx.Provider value={value}>{children}</AppCtx.Provider>;
 }

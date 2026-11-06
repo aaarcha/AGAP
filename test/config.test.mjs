@@ -448,7 +448,7 @@ test("configured responder speeds and the hazard adjustment drive live calculati
     token: admin,
     body: { config: validConfig({ responderSpeeds: { walking: 2, motorcycle: 25, vehicle: 30 }, hazardAdjustment: 0 }), password: ADMIN_PASSWORD, confirmOpenTickets: true },
   });
-  const b = (await s.call("POST", "/api/incidents", { token: teacher, body: report({ categoryId: "medical", subId: "severe_injury", locationKind: "area", areaId: "canteen" }) })).json.incident;
+  const b = (await s.call("POST", "/api/incidents", { token: teacher, body: report({ categoryId: "medical", subId: "injury", locationKind: "area", areaId: "canteen" }) })).json.incident;
   const ack2 = await s.call("POST", `/api/incidents/${b.id}/ack`, { token: responder, body: { mode: "walking", distanceKm: 1 } });
   assert.equal(ack2.json.incident.eta.minutes, 30, "1 km at the configured 2 km/h");
 

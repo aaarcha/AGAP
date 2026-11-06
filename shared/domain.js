@@ -40,8 +40,8 @@ export const CATEGORIES = [
     label: "Medical",
     subs: [
       { id: "heatstroke", label: "Heatstroke", severity: 3, keywords: ["heat", "heatstroke", "hot", "dizzy", "faint", "hilo"] },
-      { id: "severe_injury", label: "Severe Injury", severity: 4, keywords: ["injury", "injured", "bleeding", "fracture", "hurt", "wound", "fall", "sugat"] },
-      { id: "mass_collapse", label: "Mass Collapse", severity: 5, keywords: ["mass", "collapse", "faint", "fainting", "unconscious", "poison", "food poisoning"] },
+      { id: "injury", label: "Injury", severity: 4, keywords: ["injury", "injured", "bleeding", "fracture", "hurt", "wound", "fall", "sugat"] },
+      { id: "collapse", label: "Collapse", severity: 5, keywords: ["collapse", "faint", "fainting", "unconscious", "poison", "food poisoning"] },
     ],
   },
   {
@@ -57,7 +57,7 @@ export const CATEGORIES = [
     label: "Security/Threat",
     subs: [
       { id: "intruder", label: "Intruder", severity: 5, keywords: ["intruder", "stranger", "threat", "weapon", "gun", "bomb", "trespass", "lockdown"] },
-      { id: "structural_collapse", label: "Structural Collapse", severity: 5, keywords: ["collapse", "collapsed", "ceiling", "wall", "roof", "structural"] },
+      { id: "disturbance", label: "Disturbance", severity: 4, keywords: ["disturbance", "noise", "commotion", "chaos", "vandalism", "unruly"] },
     ],
   },
 ];

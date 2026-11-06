@@ -49,6 +49,18 @@ After your first local `npm install`, commit the generated `package-lock.json`, 
 | `ESCALATION_MINUTES` | Minutes without acknowledgement before escalating to Barangay then CDRRMO (default `3,6`) |
 | `HISTORY_DAYS` | How long closed incidents are kept before auto-removal (default 90) |
 | `SEED_DEMO_INCIDENT` / `SEED_DEMO_ACCOUNTS` | `1` seeds demo incidents / demo accounts (both off by default) |
+| `MAIL_DRIVER` | `console` (development/test only), `smtp` (nodemailer), or `resend` (HTTPS API). Leave unset for the original temporary-password provisioning. |
+| `MAIL_FROM` | Sender address for smtp/resend, e.g. `ASPIRE <no-reply@school.example>`. |
+| `APP_BASE_URL` | Public app URL used to build `/#/invite?token=…` links (default `http://localhost:5173`). |
+| `SMTP_HOST` / `SMTP_PORT` / `SMTP_SECURE` / `SMTP_USER` / `SMTP_PASS` | SMTP transport. `SMTP_SECURE=1` for implicit TLS (usually port 465). |
+| `RESEND_API_KEY` | Resend API key. Use this driver when the host blocks outbound SMTP ports. |
+
+### Email verification and invitations
+With a configured mail driver, creating an account (Admin provisioning or Principal → Add teacher) sends a 72-hour, single-use invitation and creates the account as **Invited**; the creator sees only the masked address, with **Resend invite** and **Revoke invite**, never a password. The link lands on `/#/invite?token=…`, which asks for a new password using the live policy checklist and then signs the user in — the invite is also the first sign-in. If mail is not configured or fails, the server keeps the existing behaviour: an active account with a one-time temporary password. Existing demo accounts are unchanged and are never forced to verify.
+
+Forgot password sends a 6-digit code valid for 10 minutes (5 attempts, single use) and never reveals whether an address exists. Success revokes every session and does not sign anyone in automatically. Change email sends a code to the **new** address; the old address stays valid until the code is confirmed, then other sessions are revoked. Sending is limited to 3 messages per account per 15 minutes plus a per-IP limit; only SHA-256 invite hashes and HMAC code hashes are stored, never raw tokens or codes.
+
+`MAIL_DRIVER=console` is for development and tests only: it prints the full message (including the invite link) to the server log and keeps an in-memory outbox. It is disabled in production. Demo/fake `@sinalhanes.deped.ph` addresses are never sent real mail unless the console driver is selected. Some hosts block outbound SMTP ports; use `resend` in that case. See `.env.example` for every variable.
 
 ## What "PWA" means here
 Installable (manifest + icons incl. maskable), app shell cached by a service worker so it opens with no signal,

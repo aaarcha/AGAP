@@ -5,6 +5,7 @@ import { useApp } from "../lib/store";
 import { validatePassword } from "../lib/password";
 import { BRAND } from "../lib/brand";
 import { ChangePasswordForm } from "../components/ChangePassword";
+import { ForgotPassword } from "../components/ForgotPassword";
 import { AboutSheet } from "./AboutView";
 
 /** Plain-language lead-in shown above the forced-change form when the server
@@ -35,6 +36,7 @@ export default function LoginView() {
   const [changeError, setChangeError] = useState<string | null>(null);
   const [changed, setChanged] = useState(false);
   const [about, setAbout] = useState(false);
+  const [forgot, setForgot] = useState(false);
 
   async function handlePasswordChange(e: React.FormEvent) {
     e.preventDefault();
@@ -82,6 +84,8 @@ export default function LoginView() {
 
   // Keep a plain-language hint (never the password) for the forced-change screen.
   const [policyHint, setPolicyHint] = useState<string | null>(null);
+
+  if (forgot) return <ForgotPassword onBack={() => setForgot(false)} />;
 
   // ── Forced password change screen (blocking full-screen step) ──
   if (mustChange && !changed) {
@@ -199,6 +203,12 @@ export default function LoginView() {
 
           {/* Inline validation / server error message – announced to screen readers */}
           {error && <p role="alert" aria-live="assertive" className="text-sm text-blush-300">{error}</p>}
+          <div className="flex justify-end">
+            <button type="button" onClick={() => setForgot(true)}
+              className="min-h-10 text-sm font-semibold text-slate-300 underline underline-offset-2 hover:text-white">
+              Forgot password?
+            </button>
+          </div>
           <button
             type="submit"
             disabled={busy || submitting}
@@ -206,6 +216,7 @@ export default function LoginView() {
           >
             {submitting ? "Signing in…" : "Sign In"}
           </button>
+          <p className="text-center text-xs leading-relaxed text-slate-400">Have an invite? Open the link from your email.</p>
         </form>
 
         <button type="button" onClick={() => setAbout(true)} className="mt-6 min-h-12 text-xs font-semibold text-slate-400 underline">About ASPIRE</button>

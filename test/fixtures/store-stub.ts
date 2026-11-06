@@ -55,6 +55,7 @@ const base: Ctx = {
   mustChange: false,
   passwordPolicy: POLICY_TEXT,
   login: async () => false,
+  acceptInvite: async () => {},
   changePassword: async () => {},
   changeSavedRoom: async () => {},
   logout: () => {},
@@ -73,7 +74,9 @@ const base: Ctx = {
   hideIncident: async () => {},
   saveProfile: async () => {},
   updateRegistry: async () => {},
-  addTeacher: async () => ({ teacherId: "t-new", email: "new@sinalhanes.deped.ph", tempPassword: "Temp-Password-2026!" }),
+  addTeacher: async () => ({ teacherId: "t-new", email: "new@sinalhanes.deped.ph", tempPassword: "Temp-Password-2026!", invited: false, maskedEmail: null, mailError: null }),
+  resendTeacherInvite: async () => ({ maskedEmail: null }),
+  revokeTeacherInvite: async () => {},
   editTeacher: async () => {},
   archiveTeacher: async () => {},
 };

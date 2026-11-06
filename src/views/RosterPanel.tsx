@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
-import { Archive, MoreVertical, Pencil, Plus } from "lucide-react";
+import { Archive, MoreVertical, Pencil, Plus, Send } from "lucide-react";
 import { useApp } from "../lib/store";
 import type { RosterEntry, TempCredential } from "../lib/types";
-import { TempCredentialModal } from "../components/Credentials";
+import { InviteSentModal, TempCredentialModal, type InviteNotice } from "../components/Credentials";
 import { ConfirmModal, Modal } from "../components/Modal";
 import { Select } from "../components/Select";
 import { FilterBar } from "../components/FilterBar";
@@ -28,6 +28,18 @@ function gradeAndSection(t: RosterEntry): string {
   return grade || sec || t.section;
 }
 
+function EmailChip({ entry, compact = false }: { entry: RosterEntry; compact?: boolean }) {
+  const invited = entry.accountStatus === "invited";
+  const verified = !invited && Boolean(entry.emailVerifiedAt);
+  return (
+    <span className={`shrink-0 rounded-full font-bold ${compact ? "px-1.5 py-0.5 text-[10px]" : "px-2 py-1 text-xs"} ${
+      invited ? "bg-sky-100 text-sky-800" : verified ? "bg-emerald-50 text-emerald-700" : "bg-slate-100 text-slate-600"
+    }`}>
+      {invited ? "Invited" : verified ? "Verified" : "Not verified"}
+    </span>
+  );
+}
+
 function StatusChip({ status, compact = false }: { status: RosterEntry["status"]; compact?: boolean }) {
   const on = status === "active";
   return (
@@ -41,13 +53,14 @@ function StatusChip({ status, compact = false }: { status: RosterEntry["status"]
   );
 }
 
-function TeacherForm({ initial, knownSections, onClose, onCreated }: {
+function TeacherForm({ initial, knownSections, onClose, onCreated, onInvited }: {
   initial: RosterEntry | null;
   knownSections: string[];
   onClose: () => void;
   onCreated: (c: TempCredential) => void;
+  onInvited: (n: InviteNotice) => void;
 }) {
-  const { addTeacher, editTeacher } = useApp();
+  const { addTeacher, editTeacher, notify } = useApp();
   const rawSection = initial?.section ?? "";
   const parsed = parseSection(rawSection);
   const [name, setName] = useState(initial?.name ?? "");
@@ -79,9 +92,14 @@ function TeacherForm({ initial, knownSections, onClose, onCreated }: {
     try {
       if (initial) await editTeacher(initial.id, { name, section: composed, room, status, registry: Number(registry) });
       else {
-        // One-time credentials: the password is returned here and never again.
         const created = await addTeacher({ name, section: composed, room, status, registry: Number(registry), email: email.trim() });
-        onCreated({ id: created.teacherId, email: created.email, name, role: "teacher", tempPassword: created.tempPassword });
+        if (created.invited) {
+          onInvited({ basePath: `/api/roster/${created.teacherId}`, name, maskedEmail: created.maskedEmail });
+        } else if (created.tempPassword) {
+          // One-time credentials: the password is returned here and never again.
+          onCreated({ id: created.teacherId, email: created.email, name, role: "teacher", tempPassword: created.tempPassword });
+          if (created.mailError) notify({ kind: "error", title: "Email could not be sent", body: "A temporary password was issued instead." });
+        }
       }
       onClose();
     } catch (e) { setErr(e instanceof Error ? e.message : "Could not save."); setBusy(false); }
@@ -135,9 +153,11 @@ function TeacherForm({ initial, knownSections, onClose, onCreated }: {
 }
 
 export default function RosterPanel() {
-  const { roster, archiveTeacher } = useApp();
+  const { roster, archiveTeacher, resendTeacherInvite, notify, refresh } = useApp();
   const [editing, setEditing] = useState<RosterEntry | "new" | null>(null);
   const [credential, setCredential] = useState<TempCredential | null>(null);
+  const [inviteNotice, setInviteNotice] = useState<InviteNotice | null>(null);
+  const [inviteBusy, setInviteBusy] = useState<string | null>(null);
   const [archiving, setArchiving] = useState<RosterEntry | null>(null);
   const [reason, setReason] = useState("");
   // Grade chips + counts persist per screen for the session (as does the view).
@@ -170,6 +190,16 @@ export default function RosterPanel() {
   const counts = facetCounts(roster, state, spec, { options: GRADE_CODES, valueOf: gradeOf, exclude: "category" });
   const countOf = (value: string) => counts.find((c) => c.value === value)?.count ?? 0;
   const shown = filterItems(roster, state, spec);
+
+  async function resendInvite(t: RosterEntry) {
+    setInviteBusy(t.id);
+    try {
+      const r = await resendTeacherInvite(t.id);
+      notify({ kind: "info", title: "Invitation resent", body: r.maskedEmail ? `A fresh link was sent to ${r.maskedEmail}.` : "A fresh 72-hour link was sent." });
+    } catch (e) {
+      notify({ kind: "error", title: "Could not resend invitation", body: e instanceof Error ? e.message : "Try again." });
+    } finally { setInviteBusy(null); }
+  }
 
   return (
     <PageFlow>
@@ -204,19 +234,29 @@ export default function RosterPanel() {
         <ul data-roster-grid className="grid list-none grid-cols-1 gap-2 min-[360px]:grid-cols-2 md:grid-cols-3 xl:grid-cols-4">
           {shown.map((t) => (
             <li key={t.id} className="min-w-0">
-              <button type="button" data-roster-tile onClick={() => setEditing(t)}
-                className="flex min-h-12 w-full min-w-0 flex-col gap-1 rounded-2xl border border-slate-200 bg-white p-2.5 text-left hover:border-brand-300">
-                <span className="flex w-full min-w-0 items-start justify-between gap-1.5">
-                  <span className="min-w-0 flex-1">
-                    <span className="block truncate text-sm font-bold text-slate-800">{t.name}</span>
-                    <span className="mt-0.5 block truncate text-[11px] text-slate-600">{gradeAndSection(t)}</span>
+              <div className="flex min-h-12 w-full min-w-0 flex-col gap-1 rounded-2xl border border-slate-200 bg-white p-2.5">
+                <button type="button" data-roster-tile onClick={() => setEditing(t)} className="flex w-full min-w-0 flex-1 flex-col gap-1 text-left">
+                  <span className="flex w-full min-w-0 items-start justify-between gap-1.5">
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-sm font-bold text-slate-800">{t.name}</span>
+                      <span className="mt-0.5 block truncate text-[11px] text-slate-600">{gradeAndSection(t)}</span>
+                    </span>
+                    <span className="flex shrink-0 flex-col items-end gap-1">
+                      <StatusChip status={t.status} compact />
+                      <EmailChip entry={t} compact />
+                    </span>
                   </span>
-                  <StatusChip status={t.status} compact />
-                </span>
-                <span className="block text-[11px] text-slate-500">
-                  Registry <span className="font-mono font-bold text-slate-700">{t.registry}</span>
-                </span>
-              </button>
+                  <span className="block text-[11px] text-slate-500">
+                    Registry <span className="font-mono font-bold text-slate-700">{t.registry}</span>
+                  </span>
+                </button>
+                {t.accountStatus === "invited" && (
+                  <button type="button" disabled={inviteBusy === t.id} onClick={() => void resendInvite(t)}
+                    className="flex min-h-10 w-full items-center justify-center gap-1 rounded-lg bg-brand-50 text-[11px] font-bold text-brand-700 disabled:opacity-60">
+                    <Send size={12} /> {inviteBusy === t.id ? "Sending…" : "Resend invite"}
+                  </button>
+                )}
+              </div>
             </li>
           ))}
         </ul>
@@ -237,7 +277,10 @@ export default function RosterPanel() {
                   <span className="block font-mono text-xs font-bold text-slate-700">{t.registry}</span>
                   registry
                 </span>
-                <StatusChip status={t.status} />
+                <span className="flex shrink-0 flex-col items-end gap-1">
+                  <StatusChip status={t.status} />
+                  <EmailChip entry={t} />
+                </span>
               </button>
               <div className="relative shrink-0" data-roster-menu-root>
                 <button type="button" aria-haspopup="menu" aria-expanded={menuFor === t.id}
@@ -254,6 +297,13 @@ export default function RosterPanel() {
                       className="flex min-h-11 w-full items-center gap-2 rounded-lg px-2 text-left text-sm font-semibold text-slate-700 hover:bg-slate-100">
                       <Pencil size={15} /> Edit teacher
                     </button>
+                    {t.accountStatus === "invited" && (
+                      <button type="button" role="menuitem" disabled={inviteBusy === t.id}
+                        onClick={() => { setMenuFor(null); void resendInvite(t); }}
+                        className="flex min-h-11 w-full items-center gap-2 rounded-lg px-2 text-left text-sm font-semibold text-brand-700 hover:bg-brand-50 disabled:opacity-60">
+                        <Send size={15} /> Resend invite
+                      </button>
+                    )}
                     <button type="button" role="menuitem"
                       onClick={() => { setMenuFor(null); setArchiving(t); setReason(""); }}
                       className="flex min-h-11 w-full items-center gap-2 rounded-lg px-2 text-left text-sm font-semibold text-slate-700 hover:bg-slate-100">
@@ -274,9 +324,11 @@ export default function RosterPanel() {
           knownSections={roster.map((t) => t.section)}
           onClose={() => setEditing(null)}
           onCreated={setCredential}
+          onInvited={setInviteNotice}
         />
       )}
       {credential && <TempCredentialModal title="Account created" credential={credential} onClose={() => setCredential(null)} />}
+      {inviteNotice && <InviteSentModal notice={inviteNotice} onClose={() => setInviteNotice(null)} onChanged={() => void refresh()} />}
       {archiving && (
         <ConfirmModal title="Archive teacher?" confirmLabel="Archive teacher" onClose={() => setArchiving(null)}
           onConfirm={() => void archiveTeacher(archiving.id, reason.trim() || undefined)}

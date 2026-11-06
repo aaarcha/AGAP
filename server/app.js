@@ -15,6 +15,7 @@ import { createConfigService, ConfigError } from "./config.js";
 import { createRetention, archiveExpired, incidentExpired, accountExpired, drillExpired } from "./retention.js";
 import { validatePassword, POLICY_TEXT, PASSWORD_MIN, tempPasswordFromBytes } from "../shared/password.js";
 import { parseSection } from "../shared/section.js";
+import { createMailer, inviteMessage, codeMessage } from "./mail.js";
 
 class HttpError extends Error {
   constructor(status, code, message, details = null) {
@@ -56,6 +57,17 @@ const ACCOUNT_ORGS = new Set(D.RESPONDER_ORG_IDS);
 const ADMIN_ROLES = new Set(["super_admin", "principal"]); // role-based idle timeout: short for admins
 const normEmail = (v) => String(v ?? "").trim().toLowerCase();
 const emailOk = (e) => e.length <= 160 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e);
+const maskEmail = (e) => {
+  const [name, domain] = String(e ?? "").split("@");
+  return domain ? `${name.slice(0, 1)}***@${domain}` : "****";
+};
+const MAIL_GENERIC = "If an account exists, we sent a message.";
+const CODE_TTL_MS = 10 * 60 * 1000;
+const INVITE_TTL_MS = 72 * 60 * 60 * 1000;
+const CODE_ATTEMPTS = 5;
+const MAIL_WINDOW_MS = 15 * 60 * 1000;
+const MAIL_ACCOUNT_LIMIT = 3;
+const MAIL_IP_LIMIT = 20;
 const slugify = (s) => String(s).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
 
 const passwordProblem = (pw, account = {}) => validatePassword(String(pw ?? ""), account);
@@ -94,9 +106,14 @@ export function createApp(opts = {}) {
     autoTick = true,
     now = () => Date.now(),
     log = () => {},
+    mailDriver,
+    mailFrom,
+    mailSend,
+    appBaseUrl = process.env.APP_BASE_URL || "http://localhost:5173",
   } = opts;
 
   const store = createStore({ dataDir, onPersistError: (...a) => log(...a) });
+  const mailer = createMailer({ driver: mailDriver, from: mailFrom, sendOverride: mailSend });
   // Placeholder retention periods (see server/retention.js): read once at boot,
   // invalid env values fall back to the defaults with a warning.
   const retention = createRetention({ env: process.env, warn: (msg) => log(msg) });
@@ -163,10 +180,6 @@ export function createApp(opts = {}) {
   // ---- audit labels -------------------------------------------------------
   // Entries keep storing ids. The Admin view resolves them to something a
   // person can read, while the raw id stays available as the "Reference".
-  const maskEmail = (e) => {
-    const [name, domain] = String(e ?? "").split("@");
-    return domain ? `${name.slice(0, 1)}***@${domain}` : "****";
-  };
   const shortTicket = (id) => `Ticket ${String(id).replace(/^INC-/, "#")}`;
   const friendlyPlace = (room) => {
     const text = String(room ?? "").replace(/\s*\(reassigned from\s+.*\)\s*$/i, "").trim();
@@ -269,30 +282,31 @@ export function createApp(opts = {}) {
 
   // ------------------------------------------------------------- accounts
   // The role ALWAYS comes from the stored account – the client can never pick one at sign-in.
-  const findAccount = (email) => store.db.accounts.find((a) => a.email === email) || null;
+  const findAccount = (email) => store.db.accounts.find((a) => normEmail(a.email) === normEmail(email)) || null;
   const accountById = (id) => store.db.accounts.find((a) => a.id === id) || null;
   const teacherAccount = (teacherId) => store.db.accounts.find((a) => a.teacherId === teacherId) || null;
 
   function userFromAccount(acc) {
     const db = store.db;
     if (!acc || acc.status !== "active") return null;
-    if (acc.role === "super_admin") return { id: acc.id, role: "super_admin", name: acc.name, subtitle: acc.email };
-    if (acc.role === "principal") return { id: acc.id, role: "principal", name: acc.name, subtitle: acc.email };
+    const emailState = { email: acc.email, emailVerifiedAt: acc.emailVerifiedAt ?? null, pendingEmail: acc.pendingEmail ?? null };
+    if (acc.role === "super_admin") return { id: acc.id, role: "super_admin", name: acc.name, subtitle: acc.email, ...emailState };
+    if (acc.role === "principal") return { id: acc.id, role: "principal", name: acc.name, subtitle: acc.email, ...emailState };
     if (acc.role === "responder") {
       const org = D.orgById(acc.org) ? acc.org : null;
-      return { id: acc.id, role: "responder", name: acc.name, org, subtitle: `Responder · ${D.orgLabel(org) || "Unassigned org"}` };
+      return { id: acc.id, role: "responder", name: acc.name, org, subtitle: `Responder · ${D.orgLabel(org) || "Unassigned org"}`, ...emailState };
     }
     if (acc.role === "teacher") {
       const t = db.roster.find((r) => r.id === acc.teacherId);
       if (!t || t.status !== "active") return null;
-      return { id: t.id, role: "teacher", name: t.name, section: t.section, room: t.room, gps: t.gps, registry: t.registry, registryUpdatedAt: t.registryUpdatedAt ?? null, subtitle: `Teacher · ${t.section}` };
+      return { id: t.id, role: "teacher", name: t.name, section: t.section, room: t.room, gps: t.gps, registry: t.registry, registryUpdatedAt: t.registryUpdatedAt ?? null, subtitle: `Teacher · ${t.section}`, ...emailState };
     }
     if (acc.role === "parent" && acc.section)
-      return { id: acc.id, role: "parent", name: acc.name, section: acc.section, subtitle: `Parent/PTA · ${acc.section}` };
+      return { id: acc.id, role: "parent", name: acc.name, section: acc.section, subtitle: `Parent/PTA · ${acc.section}`, ...emailState };
     return null;
   }
 
-  function newAccount({ email, role, name, password, mustChange = false, temp = false, id = null, teacherId = null, section = null, org = null }) {
+  function newAccount({ email, role, name, password, mustChange = false, temp = false, id = null, teacherId = null, section = null, org = null, status = "active" }) {
     const { salt, hash } = hashPassword(password);
     const structured = parseSection(section);
     const acc = {
@@ -301,7 +315,8 @@ export function createApp(opts = {}) {
       org: role === "responder" ? (ACCOUNT_ORGS.has(org) ? org : null) : null,
       // Structured grade (K|1..6) + section name derived from the stored string.
       grade: structured.grade, sectionName: structured.sectionName,
-      pwSalt: salt, pwHash: hash, status: "active", mustChange, temp,
+      pwSalt: salt, pwHash: hash, status, mustChange, temp,
+      emailVerifiedAt: null, pendingEmail: null,
       failed: 0, lockedUntil: 0, createdAt: now(), lastLoginAt: null,
     };
     store.db.accounts.push(acc);
@@ -322,6 +337,8 @@ export function createApp(opts = {}) {
       section,
       grade: structured.grade, sectionName: structured.sectionName,
       status: a.status, mustChange: Boolean(a.mustChange), temp: Boolean(a.temp),
+      emailVerifiedAt: a.emailVerifiedAt ?? null, pendingEmail: a.pendingEmail ?? null,
+      invitePending: Boolean(a.status === "invited" && liveInvite(a)),
       locked: a.lockedUntil > t, lockedUntil: a.lockedUntil, failed: a.failed,
       lastLoginAt: a.lastLoginAt, createdAt: a.createdAt,
       archivedAt: a.archivedAt ?? null, archiveReason: a.archiveReason ?? null, archivedAuto: Boolean(a.archivedAuto), purgedAt: a.purgedAt ?? null,
@@ -336,6 +353,115 @@ export function createApp(opts = {}) {
         registry: roster?.registry ?? null,
       } : null,
     };
+  }
+
+  // ------------------------------------------------------- verification tokens
+  // Only hashes live in the store. Invite tokens use SHA-256; six-digit codes
+  // use an HMAC bound to the account, purpose and secret. Raw values are never
+  // audited, persisted or written to the application log.
+  const sha256 = (v) => crypto.createHash("sha256").update(String(v)).digest("hex");
+  const hmacCode = (accountId, purpose, code) =>
+    crypto.createHmac("sha256", secret).update(`${accountId}|${purpose}|${code}`).digest("hex");
+  const verificationLive = (v, t = now()) => Boolean(v && !v.usedAt && v.expiresAt > t && v.attempts < CODE_ATTEMPTS);
+  function liveInvite(acc) {
+    return store.db.verifications.some((v) => v.accountId === acc.id && v.purpose === "invite" && verificationLive(v));
+  }
+  function verificationByInvite(raw) {
+    if (typeof raw !== "string" || raw.length < 16) return null;
+    const hash = sha256(raw);
+    return store.db.verifications.find((v) => v.purpose === "invite" && safeEqual(v.hash, hash)) || null;
+  }
+  function verificationByCode(acc, purpose, code) {
+    const list = store.db.verifications
+      .filter((v) => v.accountId === acc.id && v.purpose === purpose && verificationLive(v))
+      .sort((a, b) => b.createdAt - a.createdAt);
+    const match = list.find((v) => safeEqual(v.hash, hmacCode(acc.id, purpose, code)));
+    return { match: match || null, latest: list[0] || null };
+  }
+  function invalidateVerifications(accountId, purpose = null, exceptId = null) {
+    const t = now();
+    for (const v of store.db.verifications) {
+      if (v.accountId !== accountId || v.usedAt) continue;
+      if (purpose && v.purpose !== purpose) continue;
+      if (exceptId && v.id === exceptId) continue;
+      v.usedAt = t;
+    }
+  }
+  function newVerification(acc, purpose, sentTo, kind) {
+    let raw;
+    if (kind === "invite") {
+      raw = crypto.randomBytes(32).toString("base64url");
+    } else {
+      raw = String(crypto.randomInt(0, 1_000_000)).padStart(6, "0");
+    }
+    const rec = {
+      id: store.nextId("ver"),
+      accountId: acc.id,
+      purpose,
+      hash: kind === "invite" ? sha256(raw) : hmacCode(acc.id, purpose, raw),
+      expiresAt: now() + (kind === "invite" ? INVITE_TTL_MS : CODE_TTL_MS),
+      attempts: 0,
+      usedAt: null,
+      sentTo: maskEmail(sentTo),
+      createdAt: now(),
+    };
+    store.db.verifications.push(rec);
+    if (store.db.verifications.length > 2000) store.db.verifications.splice(0, store.db.verifications.length - 2000);
+    return { raw, id: rec.id };
+  }
+  function mailIpAllowed(req) {
+    const t = now();
+    const key = `mail:${clientIp(req)}`;
+    const recent = (buckets.get(key) || []).filter((x) => t - x < MAIL_WINDOW_MS);
+    if (recent.length >= MAIL_IP_LIMIT) { buckets.set(key, recent); return false; }
+    recent.push(t);
+    buckets.set(key, recent);
+    return true;
+  }
+  function mailAccountAllowed(acc) {
+    const t = now();
+    return store.db.verifications.filter((v) => v.accountId === acc.id && t - v.createdAt < MAIL_WINDOW_MS).length < MAIL_ACCOUNT_LIMIT;
+  }
+  const mailReady = () => Boolean(mailer.enabled && mailer.configured);
+  function realAddressBlocked(acc) {
+    return mailer.driver !== "console" && /@sinalhanes\.deped\.ph$/i.test(String(acc.email));
+  }
+  function discardVerification(acc, purpose, raw, kind) {
+    const hash = kind === "invite" ? sha256(raw) : hmacCode(acc.id, purpose, raw);
+    const v = store.db.verifications.find((x) => x.accountId === acc.id && x.purpose === purpose && safeEqual(x.hash, hash) && !x.usedAt);
+    if (v) v.usedAt = now();
+  }
+  async function sendInvite(acc, { req = null, by = null, role = null } = {}) {
+    if (!mailReady()) return { ok: false, reason: "not_configured" };
+    if (!mailAccountAllowed(acc)) return { ok: false, reason: "rate_limited" };
+    if (realAddressBlocked(acc)) return { ok: false, reason: "send_failed" };
+    const { raw, id } = newVerification(acc, "invite", acc.email, "invite");
+    const result = await mailer.send(inviteMessage({ to: acc.email, token: raw, appBaseUrl }));
+    if (!result.ok) {
+      discardVerification(acc, "invite", raw, "invite");
+      return { ok: false, reason: "send_failed" };
+    }
+    // A resend only replaces the previous link after the new one is delivered,
+    // so a mail outage cannot strand the account without a working invitation.
+    invalidateVerifications(acc.id, "invite", id);
+    store.save();
+    audit("invite_sent", { by, target: acc.id, role, req, detail: "invitation email" });
+    return { ok: true, maskedEmail: maskEmail(acc.email) };
+  }
+  async function sendCode(acc, purpose, to, { req = null, by = null, role = null } = {}) {
+    if (!mailReady()) return { ok: false, reason: "not_configured" };
+    if (!mailAccountAllowed(acc)) return { ok: false, reason: "rate_limited" };
+    if (mailer.driver !== "console" && /@sinalhanes\.deped\.ph$/i.test(String(to))) return { ok: false, reason: "send_failed" };
+    const { raw, id } = newVerification(acc, purpose, to, "code");
+    const result = await mailer.send(codeMessage({ to, code: raw, purpose, appBaseUrl }));
+    if (!result.ok) {
+      discardVerification(acc, purpose, raw, "code");
+      return { ok: false, reason: "send_failed" };
+    }
+    invalidateVerifications(acc.id, purpose, id);
+    store.save();
+    audit("verification_sent", { by, target: acc.id, role, req, detail: purpose });
+    return { ok: true, maskedEmail: maskEmail(to) };
   }
 
   // ------------------------------------------------------------- sessions
@@ -919,8 +1045,19 @@ export function createApp(opts = {}) {
     let roster = [];
     // Archived accounts leave every roster and role list (they stay readable in the Admin console).
     const archivedTeachers = new Set(db.accounts.filter((a) => (a.status === "archived" || a.status === "purged") && a.teacherId).map((a) => a.teacherId));
-    if (user.role === "principal") roster = db.roster.filter((r) => !archivedTeachers.has(r.id));
-    if (user.role === "teacher") roster = db.roster.filter((r) => r.id === user.id);
+    const withAccountState = (r) => {
+      const acc = db.accounts.find((a) => a.teacherId === r.id);
+      return {
+        ...r,
+        email: acc?.email ?? null,
+        accountStatus: acc?.status ?? null,
+        emailVerifiedAt: acc?.emailVerifiedAt ?? null,
+        pendingEmail: acc?.pendingEmail ?? null,
+        invitePending: Boolean(acc && acc.status === "invited" && liveInvite(acc)),
+      };
+    };
+    if (user.role === "principal") roster = db.roster.filter((r) => !archivedTeachers.has(r.id)).map(withAccountState);
+    if (user.role === "teacher") roster = db.roster.filter((r) => r.id === user.id).map(withAccountState);
     return {
       version: db.version,
       serverTime: now(),
@@ -1511,6 +1648,95 @@ export function createApp(opts = {}) {
     if (p === "/api/config" && m === "GET")
       return send(res, 200, { accessCodeRequired: Boolean(accessCode), demoReset: Boolean(allowReset) && process.env.NODE_ENV !== "production", passwordMin: PASSWORD_MIN, passwordPolicy: POLICY_TEXT, school: { ...D.SCHOOL, phone: schoolPhone } });
 
+    // ---- Invitations (public: the link is the bearer credential) ----------
+    if (p === "/api/invite/check" && m === "POST") {
+      const body = await readJson(req);
+      const v = verificationByInvite(body.token);
+      const acc = v ? accountById(v.accountId) : null;
+      if (!v || !acc || acc.status !== "invited" || !verificationLive(v))
+        return send(res, 200, { valid: false, message: "This invitation has expired or was already used. Ask the person who invited you to resend it." });
+      return send(res, 200, { valid: true, email: maskEmail(acc.email), name: acc.name, policy: POLICY_TEXT, expiresAt: v.expiresAt });
+    }
+
+    if (p === "/api/invite/accept" && m === "POST") {
+      rateLimit(req, "invite-accept", 20);
+      const body = await readJson(req);
+      const v = verificationByInvite(body.token);
+      const acc = v ? accountById(v.accountId) : null;
+      if (!v || !acc || acc.status !== "invited" || !verificationLive(v))
+        throw new HttpError(400, "invalid_invite", "This invitation has expired or was already used. Ask the person who invited you to resend it.");
+      const problem = passwordProblem(body.password, acc);
+      if (problem) throw bad(problem, "weak_password");
+      const cred = hashPassword(body.password);
+      acc.pwSalt = cred.salt;
+      acc.pwHash = cred.hash;
+      acc.status = "active";
+      acc.mustChange = false;
+      acc.temp = false;
+      acc.emailVerifiedAt = now();
+      acc.pendingEmail = null;
+      acc.failed = 0;
+      acc.lockedUntil = 0;
+      v.usedAt = now();
+      invalidateVerifications(acc.id, "verify_email");
+      store.save();
+      audit("invite_used", { by: acc.id, target: acc.id, req });
+      audit("email_verified", { by: acc.id, target: acc.id, req });
+      const user = userFromAccount(acc);
+      if (!user) throw new HttpError(401, "invalid_credentials", "This account is not available.");
+      const token = issueSession(acc, req);
+      acc.lastLoginAt = now();
+      store.save();
+      return send(res, 200, { token, user, mustChange: false });
+    }
+
+    // ---- Forgot password (public, generic answer for every address) -------
+    if (p === "/api/password/forgot" && m === "POST") {
+      const body = await readJson(req);
+      const email = normEmail(body.email);
+      if (!mailIpAllowed(req)) return send(res, 200, { ok: true, message: MAIL_GENERIC });
+      const acc = emailOk(email) ? findAccount(email) : null;
+      if (acc && acc.status === "active" && !realAddressBlocked(acc)) {
+        const sent = await sendCode(acc, "reset_password", acc.email, { req });
+        if (sent.ok) {
+          audit("password_reset_requested", { target: acc.id, req });
+          log(`Password reset code sent for account ${acc.id}.`);
+        }
+      }
+      return send(res, 200, { ok: true, message: MAIL_GENERIC });
+    }
+
+    if (p === "/api/password/reset" && m === "POST") {
+      rateLimit(req, "password-reset", 20);
+      const body = await readJson(req);
+      const email = normEmail(body.email);
+      const code = String(body.code ?? "").replace(/\s+/g, "");
+      const acc = emailOk(email) ? findAccount(email) : null;
+      if (!acc || acc.status !== "active" || !/^\d{6}$/.test(code))
+        throw new HttpError(400, "invalid_code", "That code is invalid or expired.");
+      const { match, latest } = verificationByCode(acc, "reset_password", code);
+      if (!match) {
+        if (latest) { latest.attempts += 1; store.save(); }
+        throw new HttpError(400, "invalid_code", "That code is invalid or expired.");
+      }
+      const problem = passwordProblem(body.password, acc);
+      if (problem) throw bad(problem, "weak_password");
+      const cred = hashPassword(body.password);
+      acc.pwSalt = cred.salt;
+      acc.pwHash = cred.hash;
+      acc.mustChange = false;
+      acc.temp = false;
+      acc.emailVerifiedAt = now();
+      acc.failed = 0;
+      acc.lockedUntil = 0;
+      match.usedAt = now();
+      invalidateVerifications(acc.id);
+      const revoked = revokeSessions(acc.id);
+      store.save();
+      audit("password_reset_completed", { by: acc.id, target: acc.id, req, detail: `${revoked} session(s) revoked` });
+      return send(res, 200, { ok: true });
+    }
+
     if (p === "/api/login" && m === "POST") {
       rateLimit(req, "login", 30);
       const body = await readJson(req);
@@ -1644,6 +1870,52 @@ export function createApp(opts = {}) {
       return send(res, 200, { user, mustChange: Boolean(account.mustChange), policy: POLICY_TEXT });
     }
 
+    // ---- Change email (signed in, new address must prove itself) ----------
+    if (p === "/api/me/email" && m === "POST") {
+      const { account } = authenticate(req, url, p);
+      if (!mailIpAllowed(req)) throw new HttpError(429, "rate_limited", "Too many messages. Try again in a few minutes.");
+      if (!mailReady()) throw new HttpError(503, "email_not_configured", "Email delivery is not configured.");
+      const body = await readJson(req);
+      const email = normEmail(body.email);
+      if (!email) throw bad("Email is required.", "email_required");
+      if (!emailOk(email)) throw bad("Enter a valid email address.", "invalid_email");
+      if (email === normEmail(account.email)) throw bad("That is already your email address.");
+      if (store.db.accounts.some((a) => a.id !== account.id &&
+        (normEmail(a.email) === email || normEmail(a.pendingEmail) === email)))
+        throw new HttpError(409, "email_taken", "An account with that email already exists.");
+      const sent = await sendCode(account, "change_email", email, { req, by: account.id });
+      if (sent.reason === "rate_limited") throw new HttpError(429, "rate_limited", "Please wait before requesting another code.");
+      if (!sent.ok) throw new HttpError(503, "email_failed", "Email could not be sent. Check the address and try again.");
+      account.pendingEmail = email;
+      store.save();
+      return send(res, 200, { ok: true, pendingEmail: email, maskedEmail: sent.maskedEmail });
+    }
+
+    if (p === "/api/me/email/verify" && m === "POST") {
+      const { account, session } = authenticate(req, url, p);
+      const body = await readJson(req);
+      if (!account.pendingEmail) throw bad("There is no pending email change.", "no_pending_email");
+      const code = String(body.code ?? "").replace(/\s+/g, "");
+      if (!/^\d{6}$/.test(code)) throw new HttpError(400, "invalid_code", "That code is invalid or expired.");
+      const { match, latest } = verificationByCode(account, "change_email", code);
+      if (!match) {
+        if (latest) { latest.attempts += 1; store.save(); }
+        throw new HttpError(400, "invalid_code", "That code is invalid or expired.");
+      }
+      match.usedAt = now();
+      invalidateVerifications(account.id, "change_email");
+      account.email = account.pendingEmail;
+      account.pendingEmail = null;
+      account.emailVerifiedAt = now();
+      account.failed = 0;
+      const revoked = revokeSessions(account.id, session.id);
+      store.save();
+      audit("email_verified", { by: account.id, target: account.id, req });
+      audit("email_changed", { by: account.id, target: account.id, req, detail: `${revoked} other session(s) revoked` });
+      commit({ type: "account_changed" });
+      return send(res, 200, { ok: true, user: userFromAccount(account), email: account.email });
+    }
+
     // HIDE — a per-user "remove from my list" for Teachers, Parents and
     // Responders. The record itself never changes and stays visible to everyone
     // else; each responder account hides independently.
@@ -1717,7 +1989,8 @@ export function createApp(opts = {}) {
       const body = await readJson(req);
       const email = normEmail(body.email);
       if (!emailOk(email)) throw bad("Enter a valid email address.");
-      if (findAccount(email)) throw new HttpError(409, "email_taken", "An account with that email already exists.");
+      if (store.db.accounts.some((a) => normEmail(a.email) === email || normEmail(a.pendingEmail) === email))
+        throw new HttpError(409, "email_taken", "An account with that email already exists.");
       const role = clean(body.role, 20);
       if (!ACCOUNT_ROLES.has(role)) throw bad("Choose which role this account gets.");
       // A responder answers for exactly one organization — the admin picks it.
@@ -1734,6 +2007,7 @@ export function createApp(opts = {}) {
         if (!section) throw bad("Grade / section is required for a Parent/PTA account.");
       }
       // Optional password: left blank means the server issues temporary credentials (forced change at first sign-in).
+      if (mailReady() && !mailIpAllowed(req)) throw new HttpError(429, "rate_limited", "Too many messages. Try again in a few minutes.");
       let password = body.password === undefined || body.password === null || body.password === "" ? "" : String(body.password);
       let temp = false;
       let mustChange = false;
@@ -1750,10 +2024,45 @@ export function createApp(opts = {}) {
         section = entry.section;
       }
       const acc = newAccount({ email, role, name, password, mustChange, temp, teacherId, section, org });
+      let invited = false;
+      let mailError = null;
+      let maskedEmail = null;
+      if (mailReady()) {
+        const sent = await sendInvite(acc, { req, by: account.id, role: user.role });
+        if (sent.ok) {
+          invited = true;
+          maskedEmail = sent.maskedEmail;
+          acc.status = "invited";
+          acc.mustChange = false;
+          acc.temp = false;
+        } else {
+          mailError = "email could not be sent";
+        }
+      }
       store.save();
-      audit("account_created", { by: user.email, target: email, detail: `role ${role}${org ? ` (${D.orgLabel(org)})` : ""}${temp ? " (temporary credentials)" : ""}`, req });
+      audit("account_created", { by: user.email, target: email, detail: `role ${role}${org ? ` (${D.orgLabel(org)})` : ""}${invited ? " (invitation)" : temp ? " (temporary credentials)" : ""}`, req });
       if (teacherId) commit({ type: "roster_updated", id: teacherId });
-      return send(res, 201, { account: publicAccount(acc), tempPassword: temp ? password : null, teacherId });
+      return send(res, 201, { account: publicAccount(acc), tempPassword: invited ? null : temp ? password : null, teacherId, invited, maskedEmail, mailError });
+    }
+
+    let minvite = p.match(/^\/api\/admin\/accounts\/([\w-]+)\/invite\/(resend|revoke)$/);
+    if (minvite && m === "POST") {
+      need(user, "super_admin");
+      const acc = accountById(minvite[1]);
+      if (!acc) throw new HttpError(404, "not_found", "Account not found.");
+      if (acc.status !== "invited") throw bad("Only an invited account has an invitation to manage.");
+      if (minvite[2] === "revoke") {
+        invalidateVerifications(acc.id, "invite");
+        store.save();
+        audit("invite_revoked", { by: account.id, role: user.role, target: acc.id, req });
+        return send(res, 200, { ok: true, account: publicAccount(acc) });
+      }
+      if (!mailIpAllowed(req)) throw new HttpError(429, "rate_limited", "Too many messages. Try again in a few minutes.");
+      const sent = await sendInvite(acc, { req, by: account.id, role: user.role });
+      if (sent.reason === "rate_limited") throw new HttpError(429, "rate_limited", "Please wait before resending another invitation.");
+      if (!sent.ok) throw new HttpError(503, "email_failed", "Email could not be sent. Check the mail configuration and try again.");
+      store.save();
+      return send(res, 200, { ok: true, account: publicAccount(acc), maskedEmail: sent.maskedEmail });
     }
 
     // Edit an existing account. The Super Admin owns the email and display name;
@@ -1774,7 +2083,8 @@ export function createApp(opts = {}) {
         email = normEmail(body.email);
         if (!email) throw bad("Email is required.", "email_required");
         if (!emailOk(email)) throw bad("Enter a valid email address.", "invalid_email");
-        if (email !== acc.email && store.db.accounts.some((a) => a.id !== acc.id && a.email.toLowerCase() === email.toLowerCase()))
+        if (email !== acc.email && store.db.accounts.some((a) => a.id !== acc.id &&
+          (normEmail(a.email) === email || normEmail(a.pendingEmail) === email)))
           throw new HttpError(409, "email_taken", "An account with that email already exists.");
       }
 
@@ -1818,7 +2128,39 @@ export function createApp(opts = {}) {
         acc.sectionName = structured.sectionName;
         changed.push("section");
       }
-      if (email !== acc.email) { acc.email = email; changed.push("email"); }
+      let emailPending = false;
+      if (email !== acc.email) {
+        if (acc.status === "invited") {
+          if (!mailReady()) throw new HttpError(503, "email_not_configured", "Email delivery is not configured, so this invitation cannot be sent.");
+          acc.email = email;
+          acc.emailVerifiedAt = null;
+          const sent = await sendInvite(acc, { req, by: account.id, role: user.role });
+          if (!sent.ok) {
+            acc.email = oldEmail;
+            throw new HttpError(503, "email_failed", "Email could not be sent. The address was not changed.");
+          }
+          changed.push("email");
+          audit("email_changed", { by: account.id, role: user.role, org: orgOf(acc), target: acc.id, detail: "invited address updated", req });
+        } else if (acc.status === "active" && mailReady()) {
+          const sent = await sendCode(acc, "change_email", email, { req, by: account.id, role: user.role });
+          if (sent.reason === "rate_limited") throw new HttpError(429, "rate_limited", "Please wait before requesting another email.");
+          if (!sent.ok) throw new HttpError(503, "email_failed", "Email could not be sent. The address was not changed.");
+          acc.pendingEmail = email;
+          emailPending = true;
+          changed.push("email pending");
+        } else {
+          // No mail transport (or a closed account): keep the long-standing
+          // immediate change so the Admin can still correct an address.
+          acc.email = email;
+          changed.push("email");
+          const revoked = revokeSessions(acc.id);
+          closeStreamsFor(acc.id);
+          audit("email_changed", {
+            by: account.id, role: user.role, org: orgOf(acc), target: acc.id,
+            detail: `${revoked} session(s) revoked`, req,
+          });
+        }
+      }
       // A teacher's name IS the roster entry's name: keep the two in step.
       if (changed.includes("name") && acc.teacherId) {
         const entry = store.db.roster.find((r) => r.id === acc.teacherId);
@@ -1827,20 +2169,12 @@ export function createApp(opts = {}) {
           for (const inc of store.db.incidents) if (inc.reporterId === entry.id) inc.reporterName = entry.name;
         }
       }
-      if (changed.includes("email")) {
-        const revoked = revokeSessions(acc.id);
-        closeStreamsFor(acc.id);
-        audit("email_changed", {
-          by: account.id, role: user.role, org: orgOf(acc), target: acc.id,
-          detail: `email ${maskEmail(oldEmail)} → ${maskEmail(email)} · ${revoked} session(s) revoked`, req,
-        });
-      }
       if (changed.length) {
         store.save();
         audit("account_updated", { by: user.email, role: user.role, org: orgOf(acc), target: acc.email, detail: `changed ${changed.join(", ")}`, req });
         if (acc.teacherId) commit({ type: "roster_updated", id: acc.teacherId });
       }
-      return send(res, 200, { ok: true, account: publicAccount(acc), changed });
+      return send(res, 200, { ok: true, account: publicAccount(acc), changed, emailPending });
     }
 
     let mact = p.match(/^\/api\/admin\/accounts\/([\w-]+)\/(reset-password|deactivate|activate|unlock|archive|restore)$/);
@@ -2529,7 +2863,9 @@ export function createApp(opts = {}) {
       const email = normEmail(body.email);
       if (!email) throw bad("Email is required.", "email_required");
       if (!emailOk(email)) throw bad("Enter a valid email address.", "invalid_email");
-      if (findAccount(email)) throw new HttpError(409, "email_taken", "An account with that email already exists.");
+      if (store.db.accounts.some((a) => normEmail(a.email) === email || normEmail(a.pendingEmail) === email))
+        throw new HttpError(409, "email_taken", "An account with that email already exists.");
+      if (mailReady() && !mailIpAllowed(req)) throw new HttpError(429, "rate_limited", "Too many messages. Try again in a few minutes.");
       const fields = parseTeacherFields(body);
       const gps = /^-?\d{1,3}\.\d+, ?-?\d{1,3}\.\d+$/.test(String(body.gps || "")) ? String(body.gps) : DEFAULT_GPS;
       const entry = { id: store.nextId("t"), registry: 30, ...fields, gps, status: body.status === "inactive" ? "inactive" : "active" };
@@ -2537,10 +2873,47 @@ export function createApp(opts = {}) {
       // No self-registration: creating a roster row also provisions its sign-in account.
       const tempPassword = makeTempPassword({ email, name: entry.name });
       const acc = newAccount({ email, role: "teacher", name: entry.name, password: tempPassword, mustChange: true, temp: true, teacherId: entry.id, section: entry.section });
+      let invited = false;
+      let mailError = null;
+      let maskedEmail = null;
+      if (mailReady()) {
+        const sent = await sendInvite(acc, { req, by: account.id, role: user.role });
+        if (sent.ok) {
+          invited = true;
+          maskedEmail = sent.maskedEmail;
+          acc.status = "invited";
+          acc.mustChange = false;
+          acc.temp = false;
+        } else {
+          mailError = "email could not be sent";
+        }
+      }
       store.save();
-      audit("account_created", { by: user.email, target: email, detail: "teacher (via roster)", req });
+      audit("account_created", { by: user.email, target: email, detail: `teacher (via roster)${invited ? " — invitation" : ""}`, req });
       commit({ type: "roster_updated", id: entry.id });
-      return send(res, 201, { teacher: entry, account: publicAccount(acc), tempPassword, email });
+      return send(res, 201, { teacher: entry, account: publicAccount(acc), tempPassword: invited ? null : tempPassword, email, invited, maskedEmail, mailError });
+    }
+
+    let trinvite = p.match(/^\/api\/roster\/([\w-]+)\/invite\/(resend|revoke)$/);
+    if (trinvite && m === "POST") {
+      need(user, "principal");
+      const entry = store.db.roster.find((r) => r.id === trinvite[1]);
+      if (!entry) throw new HttpError(404, "not_found", "Teacher not found.");
+      const acc = teacherAccount(entry.id);
+      if (!acc) throw new HttpError(404, "not_found", "That teacher has no sign-in account.");
+      if (acc.status !== "invited") throw bad("Only an invited teacher has an invitation to manage.");
+      if (trinvite[2] === "revoke") {
+        invalidateVerifications(acc.id, "invite");
+        store.save();
+        audit("invite_revoked", { by: account.id, role: user.role, target: acc.id, req });
+        return send(res, 200, { ok: true, account: publicAccount(acc) });
+      }
+      if (!mailIpAllowed(req)) throw new HttpError(429, "rate_limited", "Too many messages. Try again in a few minutes.");
+      const sent = await sendInvite(acc, { req, by: account.id, role: user.role });
+      if (sent.reason === "rate_limited") throw new HttpError(429, "rate_limited", "Please wait before resending another invitation.");
+      if (!sent.ok) throw new HttpError(503, "email_failed", "Email could not be sent. Check the mail configuration and try again.");
+      store.save();
+      return send(res, 200, { ok: true, account: publicAccount(acc), maskedEmail: sent.maskedEmail });
     }
 
     mt = p.match(/^\/api\/roster\/([\w-]+)\/archive$/);
@@ -2706,6 +3079,7 @@ export function createApp(opts = {}) {
     runEscalations,
     runArchiveSweep,
     retention,
+    mailer,
     close() {
       if (tickTimer) clearInterval(tickTimer);
       if (archiveTimer) clearInterval(archiveTimer);
