@@ -604,7 +604,7 @@ test("critical override: Severity 5 is CRITICAL even when the weighted score is 
   assert.deepEqual(gas.overrideReasons, ["SEVERITY_5"]);
   const ranked = (await s.call("GET", "/api/state", { token: responder })).json.incidents[0];
   assert.deepEqual(ranked.overrideReasons, ["SEVERITY_5"]);
-  const normal = (await s.call("POST", "/api/incidents", { token: teacher, body: report({ categoryId: "medical", subId: "severe_injury", populationId: "classroom", locationKind: "area", areaId: "hallway" }) })).json.incident;
+  const normal = (await s.call("POST", "/api/incidents", { token: teacher, body: report({ categoryId: "medical", subId: "injury", populationId: "classroom", locationKind: "area", areaId: "hallway" }) })).json.incident;
   assert.deepEqual(normal.overrideReasons, []);
   await s.close();
 });
@@ -632,7 +632,7 @@ test("hazard mode: raises Location Risk only for ground-floor / low-lying zones,
 
   const canteen = (await s.call("POST", "/api/incidents", { token: t1, body: report({ categoryId: "medical", subId: "heatstroke", populationId: "individual", locationKind: "area", areaId: "canteen" }) })).json.incident;
   assert.equal(canteen.locationRisk, 5, "low-lying area base 3 + 2");
-  const cr = (await s.call("POST", "/api/incidents", { token: t1, body: report({ categoryId: "medical", subId: "severe_injury", populationId: "individual", locationKind: "area", areaId: "cr" }) })).json.incident;
+  const cr = (await s.call("POST", "/api/incidents", { token: t1, body: report({ categoryId: "medical", subId: "injury", populationId: "individual", locationKind: "area", areaId: "cr" }) })).json.incident;
   assert.equal(cr.locationRisk, 5, "CR base 5 is already capped");
 
   await s.call("PUT", "/api/modes/hazard", { token: principal, body: { active: false } });
@@ -1287,9 +1287,9 @@ test("every subtype in CATEGORIES is reachable from the tiles", async () => {
       assert.ok(sub.id && sub.label, `subtype ${cat.id} missing id/label`);
     }
   }
-  // Medical Mass Collapse must exist
+  // Medical Collapse must exist
   const medical = CATEGORIES.find((c) => c.id === "medical");
-  assert.ok(medical?.subs.some((s) => s.id === "mass_collapse"), "medical.mass_collapse exists");
+  assert.ok(medical?.subs.some((s) => s.id === "collapse"), "medical.collapse exists");
 });
 
 // ------------------------------------------- My profile (Account → My profile)

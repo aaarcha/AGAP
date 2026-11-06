@@ -35,9 +35,9 @@ const REPORTED = [
 ];
 
 const CASES = [
-  ["fire", "electrical"], ["fire", "gas"], ["medical", "heatstroke"], ["medical", "severe_injury"],
-  ["medical", "mass_collapse"], ["flood", "flash_flood"], ["flood", "structural_eq"],
-  ["security", "intruder"], ["security", "structural_collapse"], ["other", "other"],
+  ["fire", "electrical"], ["fire", "gas"], ["medical", "heatstroke"], ["medical", "injury"],
+  ["medical", "collapse"], ["flood", "flash_flood"], ["flood", "structural_eq"],
+  ["security", "intruder"], ["security", "disturbance"], ["other", "other"],
 ];
 
 const HOURS = [6, 8, 9, 11, 12, 14, 15, 16];

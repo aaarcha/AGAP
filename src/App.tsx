@@ -29,6 +29,7 @@ import PrincipalView from "./views/PrincipalView";
 import AdminConsole from "./views/AdminConsole";
 import AccountView from "./views/AccountView";
 import TeacherHeadcount from "./views/TeacherHeadcount";
+import InviteView from "./views/InviteView";
 
 /** Why this ticket is in a teacher's My Reports list — never another teacher's name. */
 function relationLabel(inc: Incident, user: { id: string; section?: string }): string | null {
@@ -303,6 +304,13 @@ export default function App() {
   const [pTab, setPTab] = useState<PrincipalTab>("command");
   const [pRecordsSignal, setPRecordsSignal] = useState(0);
   const [rTab, setRTab] = useState<ResponderTab>("queue");
+  const [hash, setHash] = useState(() => (typeof window === "undefined" ? "" : window.location.hash));
+
+  useEffect(() => {
+    const onHash = () => setHash(window.location.hash);
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  }, []);
 
   if (!ready) {
     return (
@@ -310,6 +318,12 @@ export default function App() {
         <img src="/icons/logo-256.png" alt="Loading" width={96} height={96} className="animate-pulse rounded-3xl" />
       </div>
     );
+  }
+
+  // An invitation link is public: it shows the set-password page even when
+  // there is no session. Once accepted the store has a user and this bypasses.
+  if (!user && hash.startsWith("#/invite")) {
+    return (<><InviteView /><AlertToasts /></>);
   }
 
   // Not signed in, OR signed in but the server requires a password change first.

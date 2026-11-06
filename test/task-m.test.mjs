@@ -345,9 +345,9 @@ test("the Admin edits an email and a name, revokes sessions, and the roster neve
   const audit = (await s.call("GET", "/api/admin/audit?limit=100", { token: admin })).json.entries;
   const emailEntry = audit.find((e) => e.action === "email_changed");
   assert.ok(emailEntry, "the change is audited");
-  assert.match(emailEntry.detail, /\*\*\*@sinalhanes\.deped\.ph/);
-  assert.equal(audit.some((e) => e.action === "email_changed" && String(e.detail).includes("ana.reyes@")), false,
-    "the new address is masked too");
+  assert.equal(emailEntry.target, t1.id, "the audit stores the account id");
+  assert.equal(String(emailEntry.detail).includes("ana.reyes@"), false, "no email address is written to the audit");
+  assert.equal(String(emailEntry.detail).includes(t1.email), false, "the old address is not written either");
 
   // The Principal cannot reach the Admin email endpoint at all.
   assert.equal((await s.call("PUT", "/api/admin/accounts/" + t1.id, { token: principal, body: { email: "x@sinalhanes.deped.ph" } })).status, 403);

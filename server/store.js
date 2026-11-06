@@ -29,7 +29,7 @@ function freshDb() {
   return normalize({
     version: 1, seq: 0, roster: structuredClone(SEED_ROSTER), incidents: [], clientIds: {}, modes: freshModes(), drills: [],
     // Auth state: accounts (scrypt hashes, never plaintext), server-side sessions (revocable), append-only audit log.
-    accounts: [], sessions: [], audit: [], schoolYear: { count: 0, startedAt: null },
+    accounts: [], sessions: [], audit: [], verifications: [], schoolYear: { count: 0, startedAt: null },
     // Admin configuration versions (see server/config.js). Append-only: the active
     // version is resolved from here and never rewritten in place.
     configs: [],
@@ -48,14 +48,23 @@ export function normalize(d) {
   d.accounts = Array.isArray(d.accounts) ? d.accounts : [];
   d.sessions = Array.isArray(d.sessions) ? d.sessions : [];
   d.audit = Array.isArray(d.audit) ? d.audit : [];
+  d.verifications = (Array.isArray(d.verifications) ? d.verifications : [])
+    .filter((v) => v && typeof v.hash === "string" && typeof v.accountId === "string")
+    .slice(-2000);
   d.configs = Array.isArray(d.configs) ? d.configs : [];
   d.schoolYear = d.schoolYear && Number.isFinite(d.schoolYear.count) ? d.schoolYear : { count: 0, startedAt: null };
   // Archive / purge layers (see server/retention.js). Backfilled so an old data
   // file keeps working: "inactive" is the long-standing deactivated state, and
   // "deactivated" is accepted as its alias so older/newer files interoperate.
-  const ACCOUNT_STATUSES = ["active", "inactive", "deactivated", "archived", "purged"];
+  const ACCOUNT_STATUSES = ["active", "invited", "inactive", "deactivated", "archived", "purged"];
   for (const a of d.accounts) {
     if (!ACCOUNT_STATUSES.includes(a.status)) a.status = "active";
+    // Email verification is recorded, never forced: existing accounts keep
+    // signing in exactly as before even though they were created without it.
+    a.emailVerifiedAt ??= null;
+    if (a.pendingEmail !== undefined && a.pendingEmail !== null)
+      a.pendingEmail = String(a.pendingEmail).trim().toLowerCase() || null;
+    else a.pendingEmail = null;
     a.archivedAt ??= null;
     a.archivedBy ??= null;
     a.archiveReason ??= null;
@@ -216,8 +225,8 @@ export function createStore({ dataDir, onPersistError = console.error } = {}) {
       const roster = keepRoster ? db.roster : structuredClone(SEED_ROSTER);
       // Demo reset wipes incidents/modes but never auth state: accounts, sessions
       // (the Principal stays signed in), the audit trail or the configuration history.
-      const { accounts, sessions, audit, schoolYear, configs } = db;
-      db = normalize({ ...freshDb(), roster, accounts, sessions, audit, schoolYear, configs, version: db.version });
+      const { accounts, sessions, audit, verifications, schoolYear, configs } = db;
+      db = normalize({ ...freshDb(), roster, accounts, sessions, audit, verifications, schoolYear, configs, version: db.version });
       save();
     },
     // Keep the incident list from growing forever: drop live resolved tickets
