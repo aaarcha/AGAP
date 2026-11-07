@@ -116,11 +116,28 @@ export function createApp(opts = {}) {
     mailDriver,
     mailFrom,
     mailSend,
-    appBaseUrl = process.env.APP_BASE_URL || "http://localhost:5173",
+    // Where invitation and code emails point. Empty means "work it out from the
+    // request (or the host's public domain)", so a deployment that forgets
+    // APP_BASE_URL still mails a usable link instead of http://localhost.
+    appBaseUrl = process.env.APP_BASE_URL || "",
   } = opts;
 
   const store = createStore({ dataDir, databaseUrl, onPersistError: (...a) => log(...a) });
   const mailer = createMailer({ driver: mailDriver, from: mailFrom, sendOverride: mailSend });
+  const configuredBaseUrl = String(appBaseUrl).replace(/\/+$/, "");
+  // RAILWAY_PUBLIC_DOMAIN / RENDER_EXTERNAL_URL are set by the hosts themselves,
+  // which covers mail sent outside a request (e.g. the school-year rollover).
+  const hostBaseUrl =
+    configuredBaseUrl ||
+    (process.env.RAILWAY_PUBLIC_DOMAIN ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}` : "") ||
+    String(process.env.RENDER_EXTERNAL_URL || "").replace(/\/+$/, "");
+  function baseUrlFor(req) {
+    if (hostBaseUrl) return hostBaseUrl;
+    const host = String(req?.headers?.["x-forwarded-host"] || req?.headers?.host || "").split(",")[0].trim();
+    const proto = String(req?.headers?.["x-forwarded-proto"] || "").split(",")[0].trim()
+      || (req?.socket?.encrypted ? "https" : "http");
+    return host ? `${proto}://${host}` : "http://localhost:5173";
+  }
   // Placeholder retention periods (see server/retention.js): read once at boot,
   // invalid env values fall back to the defaults with a warning.
   const retention = createRetention({ env: process.env, warn: (msg) => log(msg) });
@@ -442,7 +459,7 @@ export function createApp(opts = {}) {
     if (!mailAccountAllowed(acc)) return { ok: false, reason: "rate_limited" };
     if (realAddressBlocked(acc)) return { ok: false, reason: "send_failed" };
     const { raw, id } = newVerification(acc, "invite", acc.email, "invite");
-    const result = await mailer.send(inviteMessage({ to: acc.email, token: raw, appBaseUrl }));
+    const result = await mailer.send(inviteMessage({ to: acc.email, token: raw, appBaseUrl: baseUrlFor(req) }));
     if (!result.ok) {
       discardVerification(acc, "invite", raw, "invite");
       return { ok: false, reason: "send_failed" };
@@ -459,7 +476,7 @@ export function createApp(opts = {}) {
     if (!mailAccountAllowed(acc)) return { ok: false, reason: "rate_limited" };
     if (mailer.driver !== "console" && /@sinalhanes\.deped\.ph$/i.test(String(to))) return { ok: false, reason: "send_failed" };
     const { raw, id } = newVerification(acc, purpose, to, "code");
-    const result = await mailer.send(codeMessage({ to, code: raw, purpose, appBaseUrl }));
+    const result = await mailer.send(codeMessage({ to, code: raw, purpose, appBaseUrl: baseUrlFor(req) }));
     if (!result.ok) {
       discardVerification(acc, purpose, raw, "code");
       return { ok: false, reason: "send_failed" };
