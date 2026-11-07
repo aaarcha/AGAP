@@ -1,0 +1,12 @@
+# Nixpacks caches /app/node_modules/.cache across builds, so running `npm ci`
+# during the build phase fails with EBUSY when it tries to delete node_modules.
+# Dependencies are installed once, here, with dev dependencies because Vite
+# needs them to build.
+[phases.install]
+cmds = ["npm ci --include=dev"]
+
+[phases.build]
+cmds = ["npm install --include=dev --no-audit --no-fund", "npm run build"]
+
+[start]
+cmd = "node server/index.js"
