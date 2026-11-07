@@ -307,7 +307,7 @@ export function IncidentCard({ inc, showActions, showLog, defaultExpanded = fals
               Your response{myOrg ? ` · ${orgLabel(myOrg)}` : ""}
             </p>
             {myOrg ? <OrgStepper track={myTrack} /> : (
-              <p className="mt-1 text-xs font-semibold text-blush-700">Your organization is not assigned. Ask the System Administrator.</p>
+              <p className="mt-1 text-xs font-semibold text-blush-700">Your organization is not assigned. Ask the Principal.</p>
             )}
           </section>
         ) : isPrincipal ? (

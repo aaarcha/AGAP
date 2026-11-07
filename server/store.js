@@ -1,10 +1,14 @@
 // Tiny persistent store: one JSON document, atomic writes, debounced.
-// Fine for a single-school prototype on ONE server instance. If you outgrow it,
-// swap this module for Postgres – the rest of the server only uses these methods.
+// Optional PostgreSQL persistence is supported for Railway/Render deployments,
+// while keeping the JSON fallback during local development and tests.
 import fs from "node:fs";
 import path from "node:path";
+import pg from "pg";
 import { parseSection } from "../shared/section.js";
 import { NON_CLASSROOM_AREAS } from "../shared/domain.js";
+
+const { Pool } = pg;
+const PG_STATE_ID = "aspire";
 
 // Timeline entries that are bookkeeping rather than the operational record.
 const INTERNAL_LOG_ACTIONS = new Set([
@@ -58,6 +62,9 @@ export function normalize(d) {
   // "deactivated" is accepted as its alias so older/newer files interoperate.
   const ACCOUNT_STATUSES = ["active", "invited", "inactive", "deactivated", "archived", "purged"];
   for (const a of d.accounts) {
+    // The Super Admin role was merged into the Principal: older data files keep
+    // their accounts, but they now sign in with the Principal's full console.
+    if (a.role === "super_admin") a.role = "principal";
     if (!ACCOUNT_STATUSES.includes(a.status)) a.status = "active";
     // Email verification is recorded, never forced: existing accounts keep
     // signing in exactly as before even though they were created without it.
@@ -168,11 +175,104 @@ export function normalize(d) {
   return d;
 }
 
-export function createStore({ dataDir, onPersistError = console.error } = {}) {
-  const file = dataDir ? path.join(dataDir, "aspire-db.json") : null;
+// Hosts hand out two flavours of connection string: the private network
+// (postgres.railway.internal, *.internal, localhost) which does not speak TLS,
+// and the public proxy (*.proxy.rlwy.net, *.render.com) which does, with a
+// certificate we cannot verify. PGSSLMODE overrides the guess.
+function sslFor(connectionString) {
+  const mode = String(process.env.PGSSLMODE || "").toLowerCase();
+  if (["disable", "allow", "prefer"].includes(mode)) return false;
+  if (["require", "verify-ca", "verify-full"].includes(mode)) return { rejectUnauthorized: mode === "verify-full" };
+  let host = "";
+  try { host = new URL(connectionString).hostname; } catch { /* unparseable: fall through to TLS */ }
+  if (!host || host === "localhost" || host === "127.0.0.1" || host === "::1" || host === "[::1]") return false;
+  if (host.endsWith(".internal") || host === "postgres" || host === "db") return false;
+  return { rejectUnauthorized: false };
+}
+
+export function createStore({ dataDir, onPersistError = console.error, databaseUrl = process.env.DATABASE_URL } = {}) {
+  // When DATABASE_URL is set, Postgres is the single source of truth: the JSON
+  // file is skipped entirely, because on Railway/Render the filesystem is
+  // ephemeral and would silently diverge from the database.
+  const file = databaseUrl ? null : dataDir ? path.join(dataDir, "aspire-db.json") : null;
+  const postgres = databaseUrl ? new Pool({
+    connectionString: databaseUrl,
+    ssl: sslFor(databaseUrl),
+    max: 5,
+    connectionTimeoutMillis: 10000,
+    idleTimeoutMillis: 30000,
+  }) : null;
   let db = freshDb();
   let timer = null;
   let touchTimer = null;
+  // The stored document must be READ before anything is written back. Until
+  // `loaded` is true every flush is a no-op, so a cold start can never replace
+  // real data with a fresh document. `dirty` remembers work done during boot.
+  let loaded = !postgres;
+  let dirty = false;
+  let tableReady = false;
+  let resolveReady;
+  let rejectReady;
+  const ready = new Promise((res, rej) => { resolveReady = res; rejectReady = rej; });
+  if (!postgres) resolveReady();
+  // Shutdown may never await readiness; keep the rejection from going unhandled.
+  ready.catch(() => {});
+
+  if (postgres) {
+    // An idle client error (database restart, failover) must not crash the app.
+    postgres.on("error", (err) => onPersistError("Postgres pool error (will retry):", err.message));
+  }
+
+  async function bootstrapPostgres() {
+    if (!postgres) return;
+    try {
+      await postgres.query(`
+        CREATE TABLE IF NOT EXISTS app_state (
+          id TEXT PRIMARY KEY,
+          payload JSONB NOT NULL,
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+      `);
+      tableReady = true;
+      const result = await postgres.query("SELECT payload FROM app_state WHERE id = $1 LIMIT 1", [PG_STATE_ID]);
+      const row = result.rows[0];
+      if (row?.payload && Array.isArray(row.payload.roster) && Array.isArray(row.payload.incidents)) {
+        db = normalize({ ...freshDb(), ...row.payload });
+      }
+      loaded = true;
+      resolveReady();
+      // A request may have changed state while we were loading: persist it now.
+      if (dirty) void flush();
+    } catch (err) {
+      // Never fall back to an empty in-memory database in production: that would
+      // look like a login failure and would overwrite the real data on next save.
+      loaded = false;
+      // A refused connection surfaces as an AggregateError with an empty message;
+      // fall through to its code / inner errors so the log names the real cause.
+      const detail = err.message || err.code || (err.errors || []).map((e) => e.message || e.code).filter(Boolean).join("; ") || "unknown error";
+      rejectReady(new Error(`Could not load state from Postgres: ${detail}`));
+    }
+  }
+
+  let writeChain = Promise.resolve();
+
+  function persistPostgres() {
+    if (!postgres || !tableReady) return Promise.resolve();
+    const payload = JSON.stringify(db);
+    writeChain = writeChain.then(async () => {
+      try {
+        await postgres.query(
+          `INSERT INTO app_state (id, payload, updated_at)
+           VALUES ($1, $2::jsonb, NOW())
+           ON CONFLICT (id) DO UPDATE SET payload = EXCLUDED.payload, updated_at = NOW()`,
+          [PG_STATE_ID, payload],
+        );
+      } catch (err) {
+        onPersistError("Could not persist data to Postgres:", err.message);
+      }
+    });
+    return writeChain;
+  }
 
   if (file) {
     try {
@@ -189,34 +289,46 @@ export function createStore({ dataDir, onPersistError = console.error } = {}) {
       onPersistError("Could not read data file, starting fresh:", err.message);
     }
   }
+  if (postgres) void bootstrapPostgres();
 
   function flush() {
-    if (!file) return;
-    try {
-      const tmp = `${file}.tmp`;
-      fs.writeFileSync(tmp, JSON.stringify(db));
-      fs.renameSync(tmp, file);
-    } catch (err) {
-      onPersistError("Could not persist data:", err.message);
+    // Before the database has been read, writing would destroy what is stored.
+    if (!loaded) return Promise.resolve();
+    dirty = false;
+    if (file) {
+      try {
+        const tmp = `${file}.tmp`;
+        fs.writeFileSync(tmp, JSON.stringify(db));
+        fs.renameSync(tmp, file);
+      } catch (err) {
+        onPersistError("Could not persist data:", err.message);
+      }
     }
+    return persistPostgres();
   }
 
   function save() {
     db.version += 1;
-    if (!file) return;
+    dirty = true;
     clearTimeout(timer);
     timer = setTimeout(flush, 250);
   }
 
   // Persist in-memory-only updates (e.g. session activity) without bumping the shared version number.
   function schedule() {
-    if (!file) return;
     clearTimeout(touchTimer);
     touchTimer = setTimeout(flush, 2000);
   }
 
   return {
     get db() { return db; },
+    // Resolves once the persistent state is loaded; rejects if Postgres is
+    // configured but unreachable, so the process can fail loudly instead of
+    // serving an empty database.
+    ready: () => ready,
+    // True when a database is configured whose document has not loaded yet, so
+    // callers can defer first-run provisioning until it is available.
+    pendingLoad: Boolean(postgres),
     save,
     schedule,
     flush,

@@ -9,10 +9,10 @@
   },
   "scripts": {
     "dev": "vite",
-    "dev:server": "node --watch server/index.js",
+    "dev:server": "node --env-file=.env --watch server/index.js",
     "dev:all": "node scripts/dev.mjs",
     "build": "vite build",
-    "start": "node server/index.js",
+    "start": "node --env-file=.env server/index.js",
     "test": "node --test test/*.test.mjs",
     "typecheck": "tsc --noEmit",
     "seed:dev": "node scripts/seed-dev.mjs",
@@ -21,6 +21,7 @@
   "dependencies": {
     "lucide-react": "^0.545.0",
     "nodemailer": "^7.0.13",
+    "pg": "^8.13.0",
     "react": "19.1.0",
     "react-dom": "19.1.0"
   },

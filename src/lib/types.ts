@@ -1,4 +1,4 @@
-export type Role = "teacher" | "principal" | "parent" | "responder" | "super_admin";
+export type Role = "teacher" | "principal" | "parent" | "responder";
 export type Status = "SENT" | "SEEN" | "EN_ROUTE" | "ON_SITE" | "RESOLVED";
 
 /** A responder answers for exactly one organization — there are no shared accounts. */
@@ -220,7 +220,7 @@ export interface ServerState {
   hidden?: Incident[];
 }
 
-// ---- admin configuration (Super Admin only) -----------------------------------
+// ---- admin configuration (Principal only) -------------------------------------
 export interface ConfigWeights {
   severity: number;
   vulnerability: number;
@@ -283,7 +283,7 @@ export interface AppConfig {
   school?: { name: string; depedId: string; barangay: string; city: string; division: string; phone: string };
 }
 
-// ---- authentication / Super Admin console ------------------------------------
+// ---- authentication / Principal admin console ---------------------------------
 export interface TeacherRecord {
   id: string;
   name: string;

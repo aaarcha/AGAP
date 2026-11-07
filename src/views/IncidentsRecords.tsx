@@ -25,7 +25,6 @@ const ROLE_LABEL: Record<string, string> = {
   principal: "Principal",
   parent: "Parent / PTA",
   responder: "Responder",
-  super_admin: "System Administrator",
 };
 
 const accountName = (a: AccountRecord) => (a.status === "purged" ? "Deleted account" : a.name || "Deleted account");
@@ -345,7 +344,7 @@ function SystemArchivesTab({
         <section aria-label="Archived accounts">
           {!showAccounts ? (
             <p className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-xs text-slate-500">
-              Account archives are visible to the System Administrator only.
+              Archived account records are shown only where the role is allowed to manage them.
             </p>
           ) : accounts.length === 0 ? (
             <p className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-xs text-slate-500">No archived accounts.</p>
@@ -427,10 +426,10 @@ function PurgeRecordDialog({ record, onConfirm, onClose }: {
 
 export default function IncidentsRecords({ showAccounts = false }: { showAccounts?: boolean }) {
   const { user } = useApp();
-  // The official record is read-only for everyone; the archive verbs belong to
-  // the Principal, the irreversible purge to the System Administrator.
+  // The official record is read-only for everyone; the archive verbs and the
+  // retention-gated purge belong to the Principal.
   const canArchive = user?.role === "principal";
-  const canPurge = user?.role === "super_admin";
+  const canPurge = user?.role === "principal";
 
   const [tab, setTab] = useState<RecordsTab>("real");
   const [archiveSection, setArchiveSection] = useState<ArchiveSection>("tickets");

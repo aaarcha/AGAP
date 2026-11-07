@@ -1,7 +1,7 @@
 // ONE password policy for every role.
 // Imported by the server (server/app.js) and the client (src/lib/password.ts).
 // Nothing role-specific belongs here: teacher, parent, principal, responder and
-// Super Admin all get exactly these rules.
+// Principal all get exactly these rules.
 
 export const PASSWORD_MIN = 8;
 export const PASSWORD_MAX = 64;

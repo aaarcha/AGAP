@@ -1,5 +1,11 @@
 # Render Blueprint – "New +" → "Blueprint" → pick this repo.
 services:
+  - type: postgres
+    name: aspire-db
+    plan: free
+    region: singapore
+    ipAllowList: []
+
   - type: web
     name: aspire
     runtime: node
@@ -12,12 +18,22 @@ services:
     envVars:
       - key: NODE_VERSION
         value: 22
+      - key: DATABASE_URL
+        fromDatabase:
+          name: aspire-db
+          property: connectionString
       - key: ASPIRE_SECRET
         generateValue: true     # signs login tokens; keep it stable
       - key: ASPIRE_ACCESS_CODE
         sync: false             # optional: set a school access code in the dashboard
       - key: ASPIRE_SCHOOL_PHONE
         sync: false             # optional: school contact number (parent Contact School button)
+      - key: ASPIRE_PRINCIPAL_EMAIL
+        value: principal@gmail.com
+      - key: ASPIRE_PRINCIPAL_PASSWORD
+        generateValue: true
+      - key: ASPIRE_REQUIRE_GMAIL
+        value: "1"
       - key: SEED_DEMO_INCIDENT
         value: "0"
       - key: ALLOW_DEMO_RESET
@@ -28,4 +44,4 @@ services:
     #   name: aspire-data
     #   mountPath: /var/data
     #   sizeGB: 1
-    # and add env var  DATA_DIR = /var/data
+    # and add env var DATA_DIR = /var/data

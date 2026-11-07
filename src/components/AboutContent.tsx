@@ -12,17 +12,16 @@ const ROLE_LABEL: Record<string, string> = {
   principal: "Principal",
   parent: "Parent / PTA",
   responder: "Responder",
-  super_admin: "System Administrator",
 };
 
 const COMMON_HELP = [
   {
     q: "Can't log in?",
-    a: "Check your email and password. After several wrong attempts the account is locked for a short time; ask your System Administrator to unlock it.",
+    a: "Check your email and password. After several wrong attempts the account is locked for a short time; ask the Principal to unlock it.",
   },
   {
     q: "Forgot your password?",
-    a: "Ask the System Administrator for a reset. You will receive a temporary password and must set a new one.",
+    a: "Ask the Principal for a reset. You will receive a temporary password and must set a new one.",
   },
   {
     q: "No internet?",
@@ -84,6 +83,18 @@ const ROLE_HELP: Record<string, { title: string; items: { q: string; a: string }
         q: "Hazard Mode and Drill Mode",
         a: "Use Hazard Mode for a flood warning or typhoon signal. Use Drill Mode for drills; drill reports do not alert parents.",
       },
+      {
+        q: "Users, school year and audit log",
+        a: "Admin opens the user roster: create and manage users, start a new school year (resets credentials), and review the audit log.",
+      },
+      {
+        q: "System Settings",
+        a: "System Settings changes affect only new reports and are recorded.",
+      },
+      {
+        q: "Archived records",
+        a: "Admin > More > Incidents & Records reads the archived tickets and accounts; the retention and purge rules live under Retention and purge rules in this page.",
+      },
     ],
   },
   responder: {
@@ -103,23 +114,6 @@ const ROLE_HELP: Record<string, { title: string; items: { q: string; a: string }
       },
     ],
   },
-  super_admin: {
-    title: "Administrator guide",
-    items: [
-      {
-        q: "Users, school year and audit log",
-        a: "Create and manage users, start a new school year (resets credentials), and review the audit log.",
-      },
-      {
-        q: "System Settings",
-        a: "System Settings changes affect only new reports and are recorded.",
-      },
-      {
-        q: "Archived records",
-        a: "Open Users > Records & Archives > Open archive to read archived tickets in the Tickets and Accounts tabs; the retention and purge rules live under Retention and purge rules in this page.",
-      },
-    ],
-  },
 };
 
 function DataAccordion() {
@@ -134,9 +128,9 @@ function DataAccordion() {
       </ul>
       <p className="mt-2 text-xs leading-relaxed text-slate-500">
         Collected only for school DRRM use under RA 10173 (Data Privacy Act). Records are archived instead of deleted,
-        and archived records stay readable on their own page: the System Administrator opens
-        Users &gt; Records &amp; Archives &gt; Open archive, the Principal opens History &gt; View archive,
-        and teachers open My Reports &gt; Archived. Personal data is erased only by the System Administrator after the
+        and archived records stay readable on their own page: the Principal opens
+        Users &gt; Records &amp; Archives &gt; Open archive, the Principal also opens History &gt; View archive,
+        and teachers open My Reports &gt; Archived. Personal data is erased only by the Principal after the
         retention period or on a valid request. Ask the school office to correct, restrict, or delete your data.
         Reports made offline stay on this device until they can be sent.
       </p>
@@ -147,7 +141,7 @@ function DataAccordion() {
 /** Data governance: the retention & purge rules, expandable (they used to sit on the Admin landing). */
 function RetentionRules() {
   const { user } = useApp();
-  const isAdmin = user?.role === "super_admin";
+  const isAdmin = user?.role === "principal";
   const [info, setInfo] = useState<RetentionInfo | null>(null);
 
   // The concrete periods come from an Admin-only endpoint; everyone else reads
@@ -166,7 +160,7 @@ function RetentionRules() {
       <SectionLabel>Data governance</SectionLabel>
       <p className="mt-2 text-sm leading-relaxed text-slate-600">
         Nothing is deleted from the app. Records are hidden (your own list), archived (the official record) or,
-        after the retention period, purged by the System Administrator.
+        after the retention period, purged by the Principal.
       </p>
       <div className="mt-3">
         <Accordion title="Retention and purge rules">
@@ -178,12 +172,12 @@ function RetentionRules() {
             <li>
               <b>Archive</b> — the Principal archives closed tickets one at a time or all at once, and a
               retention sweep archives them automatically once they pass the archive period. Archived records
-              leave every live list but stay readable on their own page: the System Administrator opens
-              Users &gt; Records &amp; Archives &gt; Open archive, the Principal opens History &gt; View archive,
+              leave every live list but stay readable on their own page: the Principal opens
+              Users &gt; Records &amp; Archives &gt; Open archive, the Principal also opens History &gt; View archive,
               and teachers open My Reports &gt; Archived.
             </li>
             <li>
-              <b>Purge</b> — the System Administrator erases personal data, and only once the record is archived
+              <b>Purge</b> — the Principal erases personal data, and only once the record is archived
               and past its retention period, or through a valid data request. Statistics are kept, a typed
               confirmation is required, and the action is audit-logged.
             </li>

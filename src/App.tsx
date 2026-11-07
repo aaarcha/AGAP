@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Check, Flame, HeartPulse, ShieldAlert, Siren, Users, Waves } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
-import { SCHOOL, STATUS_LABEL } from "../shared/domain.js";
+import { STATUS_LABEL } from "../shared/domain.js";
 import { elapsed, locationLabel } from "./lib/format";
 import { catTheme } from "./lib/theme";
 import { useApp } from "./lib/store";
@@ -23,10 +23,7 @@ import {
   type DateRangeState, type FilterSpec,
 } from "./lib/filters";
 import type { Incident } from "./lib/types";
-import { recordsHash } from "./lib/records";
-import type { AnalyticsRecordsLink } from "./components/RecordsAnalytics";
 import PrincipalView from "./views/PrincipalView";
-import AdminConsole from "./views/AdminConsole";
 import AccountView from "./views/AccountView";
 import TeacherHeadcount from "./views/TeacherHeadcount";
 import InviteView from "./views/InviteView";
@@ -331,14 +328,38 @@ export default function App() {
     return (<><LoginView /><AlertToasts /></>);
   }
 
-  if (user.role === "super_admin") return <AdminConsole />;
+  if (user.role === "principal") {
+    return (
+      <div className="h-dvh overflow-hidden bg-cream">
+        <div className="flex h-full min-h-0 overflow-hidden">
+          <RoleNav role="principal" tab={pTab} setTab={setPTab} />
+          <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+            <Header title="Principal" subtitle={user.subtitle} />
+            <StatusBanner />
+            <main className="scroll-area min-h-0 flex-1 overflow-y-auto overflow-x-hidden pb-24 md:pb-8">
+              <PrincipalView
+                tab={pTab}
+                recordsSignal={pRecordsSignal}
+                onOpenRecords={() => { setPRecordsSignal((n) => n + 1); setPTab("more"); }}
+              />
+            </main>
+          </div>
+        </div>
+        <AlertToasts />
+      </div>
+    );
+  }
 
   const pendingHeadcount = user.role === "teacher"
     ? headcountTasks.filter((i) => i.status !== "RESOLVED" && !i.headcounts.some((h) => h.section === user.section)).length
     : 0;
-  const title = { teacher: "Teacher", principal: "Principal", parent: "Parent/PTA", responder: "Responder" }[user.role];
-  // A responder's subtitle names their own org ("Responder · CDRRMO").
-  const subtitle = user.role === "principal" ? SCHOOL.name : user.subtitle;
+  const title = {
+    teacher: "Teacher",
+    parent: "Parent/PTA",
+    responder: "Responder",
+    principal: "Principal",
+  }[user.role] ?? "Principal";
+  const subtitle = user.subtitle ?? "School account";
 
   return (
     <div className="h-dvh overflow-hidden bg-cream">
@@ -348,7 +369,6 @@ export default function App() {
           <RoleNav role="teacher" tab={teacherTab} setTab={setTeacherTab} pendingHeadcount={pendingHeadcount} />
         )}
         {user.role === "parent" && <RoleNav role="parent" tab={parentTab} setTab={setParentTab} />}
-        {user.role === "principal" && <RoleNav role="principal" tab={pTab} setTab={setPTab} />}
         {user.role === "responder" && <RoleNav role="responder" tab={rTab} setTab={setRTab} />}
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
           <Header
@@ -382,17 +402,6 @@ export default function App() {
                 </>
               )}
               {user.role === "parent" && (parentTab === "alerts" ? <ParentView /> : <AccountView />)}
-              {user.role === "principal" && (
-                <PrincipalView
-                  tab={pTab}
-                  recordsSignal={pRecordsSignal}
-                  onOpenRecords={(link: AnalyticsRecordsLink) => {
-                    if (link) window.location.hash = recordsHash(link);
-                    setPRecordsSignal((n) => n + 1);
-                    setPTab("more");
-                  }}
-                />
-              )}
               {user.role === "responder" && <ResponderView tab={rTab} />}
           </main>
         </div>

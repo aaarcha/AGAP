@@ -285,7 +285,7 @@ test("archiving an account blocks sign-in, revokes sessions and hides it from ro
   await s.close();
 });
 
-test("an admin cannot archive their own account or the last active Super Admin", async () => {
+test("an admin cannot archive their own account, and the Principal owns the admin archive routes", async () => {
   const s = await boot();
   const admin = await s.loginSuper();
   const accounts = (await s.call("GET", "/api/admin/accounts", { token: admin })).json.accounts;
@@ -295,15 +295,11 @@ test("an admin cannot archive their own account or the last active Super Admin",
   assert.match(self.json.message, /your own account/i);
   assert.equal((await s.call("GET", "/api/admin/accounts", { token: admin })).status, 200, "the admin is still signed in");
 
-  // …and the last Super Admin cannot be archived by anyone
-  const last = await s.call("POST", `/api/admin/accounts/${me.id}/archive`, { token: admin, body: {} });
-  assert.equal(last.status, 400);
-
-  // the Principal cannot reach the Admin archive routes at all
+  // The Principal is the admin role now, so it may use the account archive.
   const principal = await s.login("principal");
   const teacherAccount = accounts.find((a) => a.role === "teacher");
-  assert.equal((await s.call("POST", `/api/admin/accounts/${teacherAccount.id}/archive`, { token: principal, body: {} })).status, 403);
-  assert.equal((await s.call("GET", "/api/admin/retention", { token: principal })).status, 403);
+  assert.equal((await s.call("POST", `/api/admin/accounts/${teacherAccount.id}/archive`, { token: principal, body: {} })).status, 200);
+  assert.equal((await s.call("GET", "/api/admin/retention", { token: principal })).status, 200);
   await s.close();
 });
 
@@ -528,7 +524,7 @@ test("account purge erases personal data but audit entries still resolve by id",
     assert.ok(purgeEntry.by, "the actor id is recorded");
     assert.equal(purgeEntry.by.includes("@"), false, "actor recorded as an id, never an email");
     assert.ok(purgeEntry.reason, "the reason is stored");
-    assert.equal(purgeEntry.role, "super_admin");
+    assert.equal(purgeEntry.role, "principal");
     assert.ok(purgeEntry.org, "the organisation is stored instead of a name");
     // the entry itself carries no name, email, password or token
     const raw = JSON.stringify(purgeEntry);

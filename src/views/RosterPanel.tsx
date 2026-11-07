@@ -113,7 +113,7 @@ function TeacherForm({ initial, knownSections, onClose, onCreated, onInvited }: 
             className="mt-1 min-h-12 w-full rounded-xl border border-slate-300 px-3 text-base font-normal outline-none focus:border-brand-500" />
         </label>
         {initial ? (
-          <p className="text-xs text-slate-500">Email cannot be changed here. Ask the System Administrator to correct an email.</p>
+          <p className="text-xs text-slate-500">Email cannot be changed here. Ask the Principal to correct an email.</p>
         ) : (
           <label className="block text-xs font-semibold text-slate-600">Email
             <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="name@deped.gov.ph"

@@ -32,7 +32,6 @@ const ROLE_LABEL: Record<string, string> = {
   principal: "Principal",
   parent: "Parent / PTA",
   responder: "Responder",
-  super_admin: "System Administrator",
 };
 
 /** The account's display name, or an honest tombstone once it was purged. */
@@ -46,7 +45,7 @@ const accountName = (a: AccountRecord) => (a.status === "purged" ? "Deleted acco
  *   Accounts — Admin only, shown when `accounts` is passed.
  *
  * Used by the Principal (History → View archive), the Teacher (My Reports →
- * Archived) and the Super Admin (Users → Records & Archives → Open archive).
+ * Archived) and the Principal (Admin → More → Incidents & Records).
  */
 export default function ArchivePage({
   title = "Archived records",

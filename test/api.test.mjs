@@ -921,7 +921,7 @@ test("school-year rollover issues temporary credentials, forces a new password a
   const roll = await s.call("POST", "/api/admin/school-year/start", { token: admin });
   assert.equal(roll.status, 200);
   assert.equal(roll.json.year, 1);
-  assert.equal(roll.json.accounts.length, 9, "every non-admin account (3 teachers, principal, 2 responders, 3 parents) is rolled over");
+  assert.equal(roll.json.accounts.length, 9, "every other account is rolled over (3 teachers, the other principal, 2 responders, 3 parents)");
   assert.equal((await s.call("GET", "/api/state", { token: teacher2 })).status, 401, "existing sessions are invalidated");
 
   const entry = roll.json.accounts.find((a) => a.email === emailFor("teacher", "t1"));
@@ -987,7 +987,7 @@ test("first Super Admin is bootstrapped from the environment with a forced passw
   const s = await boot();
   const first = await s.loginWith(ADMIN_EMAIL, ADMIN_BOOTSTRAP_PASSWORD);
   assert.equal(first.status, 200);
-  assert.equal(first.json.user.role, "super_admin");
+  assert.equal(first.json.user.role, "principal");
   assert.equal(first.json.mustChange, true, "bootstrap password must be changed at first sign-in");
   const tok = first.json.token;
   assert.equal((await s.call("GET", "/api/state", { token: tok })).status, 403);

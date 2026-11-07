@@ -191,7 +191,7 @@ export function useFilterState<T>(key: string, initial: T | (() => T)): [T, (nex
 
 // ----------------------------------------------------------------- date range
 // Period presets for the record lists (incident History for every role, and
-// the Super Admin audit log). Pure so test/date-range.test.mjs can pin them.
+// the Principal audit log). Pure so test/date-range.test.mjs can pin them.
 
 export type PeriodId = "all" | "today" | "7d" | "30d" | "sy" | "custom";
 

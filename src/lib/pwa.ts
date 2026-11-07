@@ -53,14 +53,37 @@ export function usePwaInstall() {
 
 export const notificationsSupported = () => typeof Notification !== "undefined";
 
+function playAlertTone() {
+  if (typeof window === "undefined") return;
+  const AudioCtor = window.AudioContext || (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+  if (!AudioCtor) return;
+  try {
+    const ctx = new AudioCtor();
+    const oscillator = ctx.createOscillator();
+    const gain = ctx.createGain();
+    oscillator.type = "sine";
+    oscillator.frequency.setValueAtTime(880, ctx.currentTime);
+    oscillator.frequency.exponentialRampToValueAtTime(440, ctx.currentTime + 0.22);
+    gain.gain.setValueAtTime(0.0001, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.08, ctx.currentTime + 0.02);
+    gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.45);
+    oscillator.connect(gain);
+    gain.connect(ctx.destination);
+    oscillator.start();
+    oscillator.stop(ctx.currentTime + 0.48);
+    void ctx.resume();
+  } catch { /* some browsers block autoplay until the user interacts */ }
+}
+
 export async function showSystemNotification(title: string, body: string, tag: string) {
   if (!notificationsSupported() || Notification.permission !== "granted") return;
+  playAlertTone();
   try {
     const reg = await navigator.serviceWorker?.getRegistration();
     if (reg) {
       await reg.showNotification(title, { body, tag, icon: "/icons/icon-192.png", badge: "/icons/favicon-32.png", vibrate: [200, 100, 200], requireInteraction: true } as NotificationOptions);
     } else {
-      new Notification(title, { body, tag, icon: "/icons/icon-192.png" });
+      new Notification(title, { body, tag, icon: "/icons/icon-192.png", silent: false });
     }
   } catch { /* some browsers only allow SW notifications */ }
 }

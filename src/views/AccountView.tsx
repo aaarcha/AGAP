@@ -22,7 +22,6 @@ const ROLE_LABEL: Record<string, string> = {
   principal: "Principal",
   parent: "Parent / PTA",
   responder: "Responder",
-  super_admin: "Super Admin",
 };
 
 /** One menu row for the Account screen: left icon, label, optional wrapping
@@ -384,7 +383,7 @@ export default function AccountView({ onBack, openProfileSignal = 0, onProfileOp
   const org: string =
     role === "teacher"
       ? `${school} · ${user!.section ?? "—"}`
-    : role === "principal" || role === "super_admin"
+    : role === "principal"
       ? school
     : role === "parent"
       ? user!.section ?? school

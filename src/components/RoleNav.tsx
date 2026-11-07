@@ -1,11 +1,9 @@
 import { BottomNav, SideNav, type NavTab } from "./Chrome";
 import {
-  ADMIN_TABS,
   PARENT_TABS,
   PRINCIPAL_TABS,
   RESPONDER_TABS,
   TEACHER_TABS,
-  type AdminTab,
   type ParentTab,
   type PrincipalTab,
   type ResponderTab,
@@ -38,8 +36,7 @@ export type RoleNavProps =
   | ({ role: "teacher" } & RoleProps<TeacherTab> & TeacherNavExtras)
   | ({ role: "parent" } & RoleProps<ParentTab>)
   | ({ role: "principal" } & RoleProps<PrincipalTab>)
-  | ({ role: "responder" } & RoleProps<ResponderTab>)
-  | ({ role: "super_admin" } & RoleProps<AdminTab>);
+  | ({ role: "responder" } & RoleProps<ResponderTab>);
 
 export function RoleNav(props: RoleNavProps) {
   switch (props.role) {
@@ -55,7 +52,5 @@ export function RoleNav(props: RoleNavProps) {
       return <Rail tab={props.tab} setTab={props.setTab} tabs={PRINCIPAL_TABS} subtitle="Principal" />;
     case "responder":
       return <Rail tab={props.tab} setTab={props.setTab} tabs={RESPONDER_TABS} subtitle="Responder" />;
-    case "super_admin":
-      return <Rail tab={props.tab} setTab={props.setTab} tabs={ADMIN_TABS} subtitle="Super Admin" />;
   }
 }

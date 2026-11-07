@@ -2,7 +2,7 @@ import { useState, useEffect, useMemo, type ReactNode } from "react";
 import {
   Users, ClipboardList, Calendar, Plus, RefreshCw, Unlock, UserX, UserCheck, Key, Eye, EyeOff, Copy, Check, AlertCircle,
   SlidersHorizontal, Search, X, History, Pencil, RotateCcw, Save, Trash2, FileWarning, Archive, Radio, ShieldCheck, User, ChevronRight,
-  Footprints, Bike, Truck, ShieldAlert, Send, ShieldX,
+  Activity, Menu, Footprints, Bike, Truck, ShieldAlert, Send, ShieldX,
   LogIn, LogOut, Database, Siren, AlertTriangle,
 } from "lucide-react";
 import { api } from "../lib/api";
@@ -10,8 +10,7 @@ import type { AccountRecord, AuditEntry, ConfigPayload, ConfigVersion, SchoolYea
 import { Modal, ConfirmModal } from "../components/Modal";
 import { TempCredentialModal, PasswordResultModal, InviteSentModal, type InviteNotice } from "../components/Credentials";
 import { dateTime } from "../lib/format";
-import { BackBarFor, Header, StatusBanner } from "../components/Chrome";
-import { RoleNav } from "../components/RoleNav";
+import { BackBarFor } from "../components/Chrome";
 import { ADMIN_TABS, type AdminTab } from "../lib/navigation";
 import { MasterDetail } from "../components/MasterDetail";
 import { BoundedPane, PageFlow } from "../components/PageShell";
@@ -299,6 +298,36 @@ const MORE_ITEMS: { id: Exclude<MoreScreen, "menu">; label: string; hint: string
   { id: "account", label: "Account", hint: "Password, About and sign out", icon: User },
 ];
 
+/** The admin sections, as an inline row under the one Principal header. */
+function AdminSectionNav({ tab, setTab }: { tab: AdminTab; setTab: (t: AdminTab) => void }) {
+  return (
+    <div className="sticky top-0 z-20 border-b border-slate-200/70 bg-cream/95 backdrop-blur">
+      <nav aria-label="Admin sections" className="mx-auto flex w-full max-w-6xl gap-1 overflow-x-auto px-3 py-2">
+        {ADMIN_TABS.map((t) => {
+          const Icon = t.icon;
+          const active = t.id === tab;
+          return (
+            <button
+              key={t.id}
+              type="button"
+              onClick={() => setTab(t.id)}
+              aria-current={active ? "page" : undefined}
+              className={`flex min-h-11 shrink-0 items-center gap-1.5 rounded-xl border px-3 text-xs font-bold transition-colors ${
+                active
+                  ? "border-brand-600 bg-brand-600 text-white"
+                  : "border-slate-200 bg-white text-slate-600 hover:border-brand-300"
+              }`}
+            >
+              <Icon size={14} className="shrink-0" aria-hidden />
+              {t.label}
+            </button>
+          );
+        })}
+      </nav>
+    </div>
+  );
+}
+
 export default function AdminConsole() {
   const [tab, setTab] = useState<AdminTab>("accounts");
   const [accounts, setAccounts] = useState<AccountRecord[]>([]);
@@ -514,179 +543,116 @@ export default function AdminConsole() {
     } catch (e) { setError(e instanceof Error ? e.message : "Failed to start new school year"); }
   }
 
+  // This view always renders inside the Principal page. There is exactly one
+  // rail and one header (App.tsx); the four admin sections switch with the
+  // inline tab row below, so a second shell can never stack on top of it.
   return (
-    <div className="flex h-dvh overflow-hidden bg-cream">
-      <RoleNav role="super_admin" tab={tab} setTab={guardedSetTab} />
-      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-        <Header title="Super Admin" subtitle="Users, analytics and system settings" />
-        <StatusBanner />
-        <main className="scroll-area min-h-0 flex-1 pb-24 lg:pb-0">
-          {error && (
-            <div className="mx-auto mb-3 flex w-full max-w-6xl items-start gap-2 rounded-xl border border-blush-200 bg-blush-100 p-3 text-sm text-blush-800">
-              <AlertCircle size={16} className="mt-0.5 shrink-0" />
-              <span>{error}</span>
-            </div>
-          )}
-          {notice && (
-            <div className="mx-auto mb-3 flex w-full max-w-6xl items-start justify-between gap-2 rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-800">
-              <span className="flex items-center gap-2"><Send size={16} className="shrink-0" /> {notice}</span>
-              <button type="button" onClick={() => setNotice("")} aria-label="Dismiss" className="shrink-0 text-emerald-700"><X size={16} /></button>
-            </div>
-          )}
-          {loading && <div className="py-8 text-center text-slate-500">Loading…</div>}
-
-          {tab === "accounts" && !loading && (
-            /* FLOW page: the whole page scrolls with the wheel. The compact
-               metric cards sit inside the roster header, under search + filters. */
-            <PageFlow className="space-y-4">
-              <section aria-label="Users">
-                <div className="mb-2 flex items-center justify-between gap-3">
-                  <h2 className={h2}><Users size={14} /> Users ({accounts.length})</h2>
-                  <button onClick={() => setShowProvision(true)} className={btnPrimary}><Plus size={15} /> Provision</button>
-                </div>
-                {/* Bounded at >= 1024 so the list and detail panes scroll
-                    internally; below that the list opens a slide-over. */}                  <BoundedPane label="User roster">
-                  <AccountsPane accounts={accounts} summary={<AdminDashboard accounts={accounts} />}
-                    onUnlock={handleUnlock} onActivate={handleActivate}
-                    onReset={setResetTarget} onDeactivate={setDeactivateTarget} onRestore={handleRestore}
-                    onPurge={setPurgeTarget} onRequest={setRequestTarget} onEdit={setEditTarget}
-                    onResendInvite={handleResendInvite} onRevokeInvite={handleRevokeInvite}
-                    />
-                </BoundedPane>
-              </section>
-            </PageFlow>
-          )}
-
-          {tab === "analytics" && (
-            <AnalyticsView onOpenRecords={(link: AnalyticsRecordsLink) => {
-              if (link) window.location.hash = recordsHash(link);
-              setTab("more");
-              setMoreScreen("records");
-            }} />
-          )}
-
-          {tab === "more" && moreScreen === "menu" && (
-            <PageFlow width="max-w-md" className="space-y-3">
-              <div>
-                <h1 className="text-lg font-black tracking-tight text-brand-900">More</h1>
-                <p className="mt-1 text-xs text-slate-500">School year, audit, records and your account.</p>
+    <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+      <AdminSectionNav tab={tab} setTab={guardedSetTab} />
+      <div className="min-h-0 flex-1">
+            {error && (
+              <div className="mx-auto mb-3 flex w-full max-w-6xl items-start gap-2 rounded-xl border border-blush-200 bg-blush-100 p-3 text-sm text-blush-800">
+                <AlertCircle size={16} className="mt-0.5 shrink-0" />
+                <span>{error}</span>
               </div>
-              <div className="space-y-2">
-                {MORE_ITEMS.map((it) => (
-                  <button key={it.id} type="button" onClick={() => setMoreScreen(it.id)}
-                    className="flex min-h-16 w-full items-center gap-3 rounded-2xl border border-slate-200 bg-white px-4 text-left">
-                    <it.icon size={20} className="shrink-0 text-brand-600" />
-                    <span className="min-w-0 flex-1">
-                      <span className="block text-sm font-bold text-slate-800">{it.label}</span>
-                      <span className="block text-xs text-slate-500">{it.hint}</span>
-                    </span>
-                    <ChevronRight size={18} className="shrink-0 text-slate-400" />
-                  </button>
-                ))}
+            )}
+            {notice && (
+              <div className="mx-auto mb-3 flex w-full max-w-6xl items-start justify-between gap-2 rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-800">
+                <span className="flex items-center gap-2"><Send size={16} className="shrink-0" /> {notice}</span>
+                <button type="button" onClick={() => setNotice("")} aria-label="Dismiss" className="shrink-0 text-emerald-700"><X size={16} /></button>
               </div>
-            </PageFlow>
-          )}
-
-          {tab === "more" && moreScreen === "records" && (
-            <>
-              <BackBarFor title="Incidents & Records" backLabel="More" onBack={() => setMoreScreen("menu")} />
-              <IncidentsRecords showAccounts />
-            </>
-          )}
-
-          {tab === "more" && moreScreen === "audit" && !loading && (
-            <>
-            <BackBarFor title="Audit log" backLabel="More" onBack={() => setMoreScreen("menu")} actions={auditFilterBar} />
-            <PageFlow className="space-y-3">
-              <p data-audit-summary className="text-xs text-slate-500" aria-live="polite">
-                {auditShown.length} event{auditShown.length === 1 ? "" : "s"} · {periodLabel(auditRange)}
-              </p>
-              <AuditLog entries={auditShown} now={Date.now()} />
-              {auditEntries.length === 0 && <p className="py-8 text-center text-slate-500">No audit entries yet.</p>}
-              {auditEntries.length > 0 && auditShown.length === 0 && (
-                <p className="py-8 text-center text-slate-500">No entries in that date range.</p>
-              )}
-            </PageFlow>
-            </>
-          )}
-
-          {tab === "more" && moreScreen === "year" && !loading && (
-            <>
-            <BackBarFor title="School year" backLabel="More" onBack={() => setMoreScreen("menu")} />
-            <PageFlow className="space-y-3">
-              <h2 className={h2}><Calendar size={14} /> School year</h2>
-              <div className={card}>
-                <div className="flex items-center justify-between gap-3">
-                  <div>
-                    <p className="text-3xl font-black text-slate-800">Year {schoolYear?.count || 0}</p>
-                    {schoolYear?.startedAt && <p className="mt-1 text-sm text-slate-600">Started: {dateTime(schoolYear.startedAt)}</p>}
-                    <p className="mt-1 text-xs text-slate-500">{schoolYear?.accounts || 0} total accounts</p>
+            )}
+            {loading && <div className="py-8 text-center text-slate-500">Loading…</div>}
+            {tab === "accounts" && !loading && (
+              <PageFlow className="space-y-4">
+                <section aria-label="Users">
+                  <div className="mb-2 flex items-center justify-between gap-3">
+                    <h2 className={h2}><Users size={14} /> Users ({accounts.length})</h2>
+                    <button onClick={() => setShowProvision(true)} className={btnPrimary}><Plus size={15} /> Provision</button>
                   </div>
-                  <button onClick={() => setRolloverConfirm(true)} className={btnPrimary}>
-                    <RefreshCw size={15} /> Start new year
-                  </button>
+                  <BoundedPane label="User roster">
+                    <AccountsPane accounts={accounts} summary={<AdminDashboard accounts={accounts} />}
+                      onUnlock={handleUnlock} onActivate={handleActivate}
+                      onReset={setResetTarget} onDeactivate={setDeactivateTarget} onRestore={handleRestore}
+                      onPurge={setPurgeTarget} onRequest={setRequestTarget} onEdit={setEditTarget}
+                      onResendInvite={handleResendInvite} onRevokeInvite={handleRevokeInvite}
+                      />
+                  </BoundedPane>
+                </section>
+              </PageFlow>
+            )}
+            {tab === "analytics" && (
+              <AnalyticsView onOpenRecords={(link: AnalyticsRecordsLink) => {
+                if (link) window.location.hash = recordsHash(link);
+                setTab("more");
+                setMoreScreen("records");
+              }} />
+            )}
+            {tab === "more" && moreScreen === "menu" && (
+              <PageFlow width="max-w-md" className="space-y-3">
+                <div>
+                  <h1 className="text-lg font-black tracking-tight text-brand-900">More</h1>
+                  <p className="mt-1 text-xs text-slate-500">School year, audit, records and your account.</p>
                 </div>
-              </div>
-            </PageFlow>
-            </>
-          )}
-
-          {tab === "config" && <ConfigTab onDirtyChange={setConfigDirty} />}
-          {tab === "more" && moreScreen === "account" && <AccountView onBack={() => setMoreScreen("menu")} />}
-        </main>
-
+                <div className="space-y-2">
+                  {MORE_ITEMS.map((it) => (
+                    <button key={it.id} type="button" onClick={() => setMoreScreen(it.id)}
+                      className="flex min-h-16 w-full items-center gap-3 rounded-2xl border border-slate-200 bg-white px-4 text-left">
+                      <it.icon size={20} className="shrink-0 text-brand-600" />
+                      <span className="min-w-0 flex-1">
+                        <span className="block text-sm font-bold text-slate-800">{it.label}</span>
+                        <span className="block text-xs text-slate-500">{it.hint}</span>
+                      </span>
+                      <ChevronRight size={18} className="shrink-0 text-slate-400" />
+                    </button>
+                  ))}
+                </div>
+              </PageFlow>
+            )}
+            {tab === "more" && moreScreen === "records" && (
+              <>
+                <BackBarFor title="Incidents & Records" backLabel="More" onBack={() => setMoreScreen("menu")} />
+                <IncidentsRecords showAccounts />
+              </>
+            )}
+            {tab === "more" && moreScreen === "audit" && !loading && (
+              <>
+                <BackBarFor title="Audit log" backLabel="More" onBack={() => setMoreScreen("menu")} actions={auditFilterBar} />
+                <PageFlow className="space-y-3">
+                  <p data-audit-summary className="text-xs text-slate-500" aria-live="polite">
+                    {auditShown.length} event{auditShown.length === 1 ? "" : "s"} · {periodLabel(auditRange)}
+                  </p>
+                  <AuditLog entries={auditShown} now={Date.now()} />
+                  {auditEntries.length === 0 && <p className="py-8 text-center text-slate-500">No audit entries yet.</p>}
+                  {auditEntries.length > 0 && auditShown.length === 0 && (
+                    <p className="py-8 text-center text-slate-500">No entries in that date range.</p>
+                  )}
+                </PageFlow>
+              </>
+            )}
+            {tab === "more" && moreScreen === "year" && !loading && (
+              <>
+                <BackBarFor title="School year" backLabel="More" onBack={() => setMoreScreen("menu")} />
+                <PageFlow className="space-y-3">
+                  <h2 className={h2}><Calendar size={14} /> School year</h2>
+                  <div className={card}>
+                    <div className="flex items-center justify-between gap-3">
+                      <div>
+                        <p className="text-3xl font-black text-slate-800">Year {schoolYear?.count || 0}</p>
+                        {schoolYear?.startedAt && <p className="mt-1 text-sm text-slate-600">Started: {dateTime(schoolYear.startedAt)}</p>}
+                        <p className="mt-1 text-xs text-slate-500">{schoolYear?.accounts || 0} total accounts</p>
+                      </div>
+                      <button onClick={() => setRolloverConfirm(true)} className={btnPrimary}>
+                        <RefreshCw size={15} /> Start new year
+                      </button>
+                    </div>
+                  </div>
+                </PageFlow>
+              </>
+            )}
+            {tab === "config" && <ConfigTab onDirtyChange={setConfigDirty} />}
+            {tab === "more" && moreScreen === "account" && <AccountView onBack={() => setMoreScreen("menu")} />}
       </div>
-
-      {showProvision && (
-        <ProvisionModal knownSections={accounts.map((a) => a.section ?? "")} onClose={() => setShowProvision(false)}
-          onCreated={(r) => {
-            setShowProvision(false);
-            setProvisionResult(r.credential);
-            setInviteNotice(r.invite);
-            if (r.mailError) setNotice("Email could not be sent, so a temporary password was issued instead.");
-            void loadData();
-          }} />
-      )}
-      {provisionResult && <TempCredentialModal title="Account provisioned" credential={provisionResult} onClose={() => setProvisionResult(null)} />}
-      {inviteNotice && <InviteSentModal notice={inviteNotice} onClose={() => setInviteNotice(null)} onChanged={() => void loadData()} />}
-      {inviteRevokeTarget && (
-        <ConfirmModal title="Revoke invitation" danger onClose={() => setInviteRevokeTarget(null)}
-          message={`The current invitation link for ${inviteRevokeTarget.name} stops working immediately. The account stays invited and cannot sign in until a new link is sent.`}
-          confirmLabel="Revoke invite" onConfirm={() => void confirmRevokeInvite()} />
-      )}
-      {editTarget && (
-        <AccountEditModal acc={editTarget} knownSections={accounts.map((a) => a.section ?? "")}
-          onClose={() => setEditTarget(null)} onSave={handleEdit} />
-      )}
-      {resetTarget && (
-        <ConfirmModal title="Reset password" onClose={() => setResetTarget(null)}
-          message={`This will generate a new temporary password for ${resetTarget.name} (${resetTarget.email}). All existing sessions will be revoked.`}
-          confirmLabel="Reset password" onConfirm={() => void handleReset()} />
-      )}
-      {resetResult && <PasswordResultModal tempPassword={resetResult} onClose={() => setResetResult(null)} />}
-      {deactivateTarget && (
-        <ConfirmModal title="Deactivate account" danger onClose={() => setDeactivateTarget(null)}
-          message={`This will deactivate ${deactivateTarget.name} (${deactivateTarget.email}). All their sessions will be revoked immediately.`}
-          confirmLabel="Deactivate" onConfirm={() => void handleDeactivate()} />
-      )}
-      {purgeTarget && (
-        <PurgeDialog acc={purgeTarget} onClose={() => setPurgeTarget(null)} onConfirm={handlePurge} />
-      )}
-      {requestTarget && (
-        <DataRequestDialog acc={requestTarget} onClose={() => setRequestTarget(null)} onConfirm={handleDataRequest} />
-      )}
-      {rolloverConfirm && (
-        <ConfirmModal title="Start new school year" onClose={() => setRolloverConfirm(false)}
-          message="This will revoke all existing sessions for non-admin users and issue temporary credentials. Each user must set a new password on their next sign-in."
-          confirmLabel="Start new year" onConfirm={() => void handleRollover()} />
-      )}
-      {rolloverResult && <RolloverResultModal credentials={rolloverResult} onClose={() => setRolloverResult(null)} />}
-      {leaveTo && (
-        <ConfirmModal title="Discard unsaved changes?" danger onClose={() => setLeaveTo(null)}
-          message="Your configuration edits have not been saved. Leaving this tab discards them."
-          confirmLabel="Discard"
-          onConfirm={() => { setConfigDirty(false); setTab(leaveTo); setLeaveTo(null); }} />
-      )}
     </div>
   );
 }
@@ -700,7 +666,7 @@ const SECURITY_ACTIONS = new Set([
 const ONE_DAY_MS = 24 * 60 * 60 * 1000;
 
 /**
- * The Super Admin landing: three quick metrics, nothing else. The retention
+ * The Admin landing: three quick metrics, nothing else. The retention
  * policy table deliberately does NOT live here — it moved to About ASPIRE.
  */
 function AdminDashboard({ accounts }: { accounts: AccountRecord[] }) {
@@ -986,7 +952,6 @@ const ROLE_CHIPS: { value: string; label: string }[] = [
   { value: "parent", label: "Parent" },
   { value: "principal", label: "Principal" },
   { value: "responder", label: "Responder" },
-  { value: "super_admin", label: "Admin" },
 ];
 
 const STATUS_CHIPS: { value: string; label: string }[] = [
@@ -1023,7 +988,7 @@ const roleLine = (a: AccountRecord) =>
   `${a.role}${a.role === "responder" && a.orgLabel ? ` · ${a.orgLabel}` : ""}${a.section ? ` · ${a.section}` : ""}`;
 
 const ROLE_LABEL: Record<string, string> = {
-  teacher: "Teacher", parent: "Parent/PTA", principal: "Principal", responder: "Responder", super_admin: "Super Admin",
+  teacher: "Teacher", parent: "Parent/PTA", principal: "Principal", responder: "Responder",
 };
 
 /** What the account belongs to: a dispatch org, a class section, the school or the console. */
@@ -1031,7 +996,6 @@ const assignmentOf = (a: AccountRecord) => {
   if (a.role === "responder") return a.orgLabel || "Not assigned";
   if (a.section) return `${SCHOOL.name} · ${a.section}`;
   if (a.role === "principal") return `${SCHOOL.name} · School-wide`;
-  if (a.role === "super_admin") return "System console";
   return SCHOOL.name;
 };
 

@@ -8,6 +8,7 @@ import RosterPanel from "./RosterPanel";
 import SafetyView from "./SafetyView";
 import HeadcountView from "./HeadcountView";
 import AccountView from "./AccountView";
+import AdminConsole from "./AdminConsole";
 import IncidentsRecords from "./IncidentsRecords";
 import AnalyticsView from "./AnalyticsView";
 import type { AnalyticsRecordsLink } from "../components/RecordsAnalytics";
@@ -557,7 +558,7 @@ function More({ recordsSignal = 0 }: { recordsSignal?: number }) {
   // Account > About ASPIRE, like every other role.
   if (screen === "safety") return shell("Safety", <SafetyView />);
   if (screen === "headcount") return shell("Headcount status", <HeadcountView />);
-  if (screen === "records") return shell("Incidents & Records", <IncidentsRecords />);
+  if (screen === "records") return shell("Incidents & Records", <IncidentsRecords showAccounts />);
   if (screen === "roster") return shell("Teacher roster", <RosterPanel />);
   if (screen === "account") return <AccountView onBack={() => setScreen("menu")} />;
   return (
@@ -587,6 +588,7 @@ export default function PrincipalView({ tab, recordsSignal = 0, onOpenRecords }:
       {tab === "command" && <Command />}
       {tab === "report" && <ReportView />}
       {tab === "analytics" && <AnalyticsView onOpenRecords={(link) => onOpenRecords?.(link)} />}
+      {tab === "admin" && <AdminConsole />}
       {tab === "more" && <More recordsSignal={recordsSignal} />}
     </>
   );

@@ -51,7 +51,7 @@ export function prettyRoom(legacy: string): string {
 
 /** Only these roles may see where the report was actually filed from. */
 export function canSeeReportedFrom(role?: string): boolean {
-  return role === "principal" || role === "super_admin";
+  return role === "principal";
 }
 
 export function elapsed(ts: number, now: number): string {

@@ -32,11 +32,12 @@ export const PARENT_TABS: NavTab<ParentTab>[] = [
 
 // Analytics has its own tab; Safety, headcount, the official record and
 // Incidents & Records live under More, so the rail stays focused on live work.
-export type PrincipalTab = "command" | "report" | "analytics" | "more";
+export type PrincipalTab = "command" | "report" | "analytics" | "admin" | "more";
 export const PRINCIPAL_TABS: NavTab<PrincipalTab>[] = [
   { id: "command", label: "Command", icon: ClipboardList },
   { id: "report", label: "Report", icon: Siren },
   { id: "analytics", label: "Analytics", icon: Activity },
+  { id: "admin", label: "Admin", icon: SlidersHorizontal },
   { id: "more", label: "More", icon: Menu },
 ];
 

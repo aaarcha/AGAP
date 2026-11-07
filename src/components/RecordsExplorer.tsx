@@ -336,7 +336,7 @@ export function RecordDetailPanel({ record }: { record: RecordItem }) {
 
 /**
  * Modal form used by the System Archives tab. The irreversible purge lives
- * here — never on a list row — and only for the Super Admin, gated by the
+ * here — never on a list row — and only for the Principal, gated by the
  * record's own retention eligibility.
  */
 export function RecordDetail({ record, onClose, purge }: {

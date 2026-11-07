@@ -1,9 +1,9 @@
 /**
  * Role-set contract.
  *
- * The only roles in ASPIRE are teacher, parent, principal, responder and
- * super_admin (displayed as "System Administrator"). A previous draft
- * introduced a "School Admin" role; these tests make sure it can never come
+ * The only roles in ASPIRE are teacher, parent, principal and responder.
+ * The former super_admin role was merged into principal; a previous draft
+ * introduced a "School Admin" role; these tests make sure neither can come
  * back — neither as a role value nor as a user-facing string.
  *
  * Both tests are static (no bundling, no jsdom): they read the source, which is
@@ -17,7 +17,7 @@ import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
-const EXPECTED_ROLES = ["parent", "principal", "responder", "super_admin", "teacher"];
+const EXPECTED_ROLES = ["parent", "principal", "responder", "teacher"];
 
 /** Recursively collect source files under `dir` matching `exts`. */
 function walk(dir, exts, out = []) {
@@ -38,7 +38,7 @@ function walk(dir, exts, out = []) {
 
 const read = (rel) => fs.readFileSync(path.join(root, rel), "utf8");
 
-test("the server and the client agree on exactly five roles", () => {
+test("the server and the client agree on exactly four roles", () => {
   // Server: ACCOUNT_ROLES in server/app.js
   const server = read("server/app.js");
   const serverMatch = server.match(/ACCOUNT_ROLES\s*=\s*new Set\(\[([^\]]+)\]\)/);

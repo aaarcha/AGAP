@@ -33,7 +33,6 @@ const PASSWORD = {
   principal: "Dev-Head-2026!",
   responder: "Dev-Brgy-2026!",
   parent: "Dev-Guardian-2026!",
-  super_admin: "Dev-Console-2026!",
 };
 
 const db = store.db;
@@ -71,7 +70,6 @@ targets.push(
   { role: "responder", org: "barangay", email: normEmail("barangay@sinalhanes.deped.ph"), name: "Barangay Dev Responder", password: PASSWORD.responder },
   { role: "responder", org: "cdrrmo", email: normEmail("cdrrmo@sinalhanes.deped.ph"), name: "CDRRMO Dev Responder", password: PASSWORD.responder },
   { role: "parent", email: normEmail(`parent-${slugify(parentSection)}@sinalhanes.deped.ph`), name: "Dev Parent", section: parentSection, password: PASSWORD.parent },
-  { role: "super_admin", email: normEmail("superadmin@sinalhanes.deped.ph"), name: "Dev Super Admin", id: "super-admin-dev", password: PASSWORD.super_admin },
 );
 
 for (const t of targets) {

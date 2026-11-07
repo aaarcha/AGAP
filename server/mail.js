@@ -45,7 +45,10 @@ export function createMailer({
   timeoutMs = TIMEOUT_MS,
 } = {}) {
   const envDriver = setting(driver ?? process.env.MAIL_DRIVER);
-  const chosen = lower(envDriver) || (process.env.NODE_ENV === "production" ? "none" : "console");
+  const detectedDriver = !envDriver
+    ? (setting(resendApiKey) ? "resend" : setting(host) ? "smtp" : process.env.NODE_ENV === "production" ? "none" : "console")
+    : lower(envDriver);
+  const chosen = detectedDriver;
   const outbox = [];
 
   const smtpReady = chosen === "smtp" && Boolean(setting(host)) && Boolean(setting(from));
