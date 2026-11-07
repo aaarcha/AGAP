@@ -68,6 +68,9 @@ temporary password and nothing is delivered. Gmail-to-Gmail works with an App
 Password (Google Account → Security → 2-Step Verification → App passwords):
 
 ```
+# Replace every value below with your own. Do not keep the words "your.address"
+# or the angle brackets: the app recognises them as placeholders and stays in
+# "mail not configured" mode. SMTP_PASS is a 16-character Google App Password.
 MAIL_DRIVER=smtp
 MAIL_FROM=ASPIRE <your.address@gmail.com>
 SMTP_HOST=smtp.gmail.com
@@ -81,6 +84,13 @@ SMTP_PASS=<16-character app password>
 reaches arbitrary Gmail recipients after you verify a domain — without one it can
 only email the account owner. Railway allows outbound SMTP on 587 (port 25 is
 blocked), so Gmail SMTP is the simplest choice for a school pilot.
+
+No separate mail API key is involved: with `MAIL_DRIVER=smtp` the Gmail address and
+its App Password are the whole credential. To confirm what the deployment is
+using, open `https://<your-app>/api/health` – the `mail` block shows `driver`,
+`from`, the masked `user`, and a `problem` code such as `smtp_pass_placeholder`
+or `mail_from_placeholder` (empty means mail is usable). The boot log prints the
+same line, e.g. `mail: NOT configured (smtp_pass_placeholder)`.
 
 ### Database tables
 No tables are created by hand: on its first boot against `DATABASE_URL` the app

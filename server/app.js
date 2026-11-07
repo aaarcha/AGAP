@@ -124,6 +124,13 @@ export function createApp(opts = {}) {
 
   const store = createStore({ dataDir, databaseUrl, onPersistError: (...a) => log(...a) });
   const mailer = createMailer({ driver: mailDriver, from: mailFrom, sendOverride: mailSend });
+  {
+    // Say out loud at boot whether mail can work – the alternative is an operator
+    // discovering it only when a teacher never receives an invitation.
+    const s = mailer.status();
+    if (s.problem) log(`mail: NOT configured (${s.problem}) – invitation and verification emails will not be sent`);
+    else if (s.configured) log(`mail: ${s.driver}${s.host ? ` via ${s.host}:${s.port}${s.secure ? " (TLS)" : " (STARTTLS)"}` : ""} as ${s.user || "no auth"}`);
+  }
   const configuredBaseUrl = String(appBaseUrl).replace(/\/+$/, "");
   // RAILWAY_PUBLIC_DOMAIN / RENDER_EXTERNAL_URL are set by the hosts themselves,
   // which covers mail sent outside a request (e.g. the school-year rollover).
@@ -1732,7 +1739,11 @@ export function createApp(opts = {}) {
     const p = url.pathname;
     const m = req.method;
 
-    if (p === "/api/health" && m === "GET") return send(res, 200, { ok: true, version: store.db.version, uptime: Math.round(process.uptime()) });
+    if (p === "/api/health" && m === "GET") {
+      // `mail` is a non-secret snapshot (masked user, no password) so a deployment
+      // can be checked from outside: problem:"" means mail is usable.
+      return send(res, 200, { ok: true, version: store.db.version, uptime: Math.round(process.uptime()), mail: mailer.status() });
+    }
 
     if (p === "/api/config" && m === "GET")
       return send(res, 200, { accessCodeRequired: Boolean(accessCode), demoReset: Boolean(allowReset) && process.env.NODE_ENV !== "production", passwordMin: PASSWORD_MIN, passwordPolicy: POLICY_TEXT, school: { ...D.SCHOOL, phone: schoolPhone } });

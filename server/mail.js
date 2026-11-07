@@ -15,9 +15,27 @@ const OUTBOX_LIMIT = 100;
 
 const DEFAULT_FROM = "ASPIRE <no-reply@aspire.local>";
 
-const setting = (v) => String(v ?? "").trim();
+// Values pasted from a README often keep their quotes ("ASPIRE <a@b.com>"), which
+// makes an otherwise correct SMTP_USER or MAIL_FROM invalid. Strip one matching
+// pair of wrapping quotes before anything else reads the value.
+const setting = (v) => String(v ?? "").trim().replace(/^(['"])([\s\S]*)\1$/, "$2").trim();
 const lower = (v) => setting(v).toLowerCase();
 const bool = (v) => /^(1|true|yes|on)$/i.test(setting(v));
+
+// Documentation placeholders. Sending with these fails at the SMTP server with
+// "Invalid login", which reads like a wrong password; recognising them up front
+// lets the app report "mail is not configured" instead of blaming the account.
+const PLACEHOLDER = [
+  /your\.?address/i,
+  /your[._-]?email/i,
+  /you@gmail\.com/i,
+  /app[-_ ]?password/i,
+  /^<[\s\S]*>$/,
+  /xxxx/i,
+  /replace[-_ ]?me/i,
+  /changeme/i,
+];
+const isPlaceholder = (v) => PLACEHOLDER.some((re) => re.test(String(v ?? "")));
 
 function timeout(ms) {
   return new Promise((_, reject) => {
@@ -51,8 +69,24 @@ export function createMailer({
   const chosen = detectedDriver;
   const outbox = [];
 
-  const smtpReady = chosen === "smtp" && Boolean(setting(host)) && Boolean(setting(from));
-  const resendReady = chosen === "resend" && Boolean(setting(resendApiKey)) && Boolean(setting(from));
+  const fromValue = setting(from);
+  const smtpUser = setting(user);
+  const smtpPass = setting(pass);
+  const smtpPort = Number(setting(port)) || (bool(secure) ? 465 : 587);
+  // An empty problem means SMTP is usable. A reason is reported on /api/health and
+  // in the boot log, so the operator can see WHICH variable is still wrong.
+  const smtpProblem = chosen !== "smtp"
+    ? ""
+    : !setting(host) ? "smtp_host_missing"
+      : !fromValue ? "mail_from_missing"
+        : isPlaceholder(fromValue) ? "mail_from_placeholder"
+          : isPlaceholder(smtpUser) ? "smtp_user_placeholder"
+            : isPlaceholder(smtpPass) ? "smtp_pass_placeholder"
+              : smtpUser && !smtpPass ? "smtp_pass_missing"
+                : !smtpUser && smtpPass ? "smtp_user_missing"
+                  : "";
+  const smtpReady = chosen === "smtp" && !smtpProblem;
+  const resendReady = chosen === "resend" && Boolean(setting(resendApiKey)) && Boolean(fromValue);
   const consoleReady = chosen === "console" && process.env.NODE_ENV !== "production";
 
   const enabled = Boolean(sendOverride) || smtpReady || resendReady || consoleReady;
@@ -65,12 +99,16 @@ export function createMailer({
   let transport = null;
   async function smtpTransport() {
     if (transport) return transport;
-    const p = Number(port) || (bool(secure) ? 465 : 587);
+    const p = smtpPort;
+    const encrypted = bool(secure) || p === 465;
     transport = nodemailer.createTransport({
       host: setting(host),
       port: p,
-      secure: bool(secure) || p === 465,
-      auth: setting(user) ? { user: setting(user), pass: String(pass ?? "") } : undefined,
+      secure: encrypted,
+      // Port 587 opens in the clear and upgrades with STARTTLS; require the upgrade
+      // so a provider cannot quietly refuse the send over an unencrypted socket.
+      requireTLS: !encrypted,
+      auth: smtpUser ? { user: smtpUser, pass: smtpPass } : undefined,
       connectionTimeout: timeoutMs,
       greetingTimeout: timeoutMs,
       socketTimeout: timeoutMs,
@@ -118,8 +156,22 @@ export function createMailer({
     throw new Error("mail driver is not configured");
   }
 
+  // Turn nodemailer's terse codes into something a school operator can act on.
+  function explain(err) {
+    const msg = err instanceof Error ? err.message : String(err ?? "email could not be sent");
+    if (/invalid login|username and password not accepted|eauth|535|534/i.test(msg)) {
+      return "Gmail rejected the SMTP sign-in – check SMTP_USER, and that SMTP_PASS is the 16-character App Password (2-Step Verification must be on, and the normal account password will not work)";
+    }
+    if (/enotfound|eai_again|getaddrinfo/i.test(msg)) return `SMTP_HOST (${setting(host)}) could not be resolved`;
+    if (/etimedout|esocket|timeout/i.test(msg)) return `No answer from ${setting(host)}:${smtpPort} – the host may block outbound SMTP ports`;
+    if (/self.signed|certificate|ssl|tls/i.test(msg)) return "The SMTP server's TLS certificate was rejected";
+    return msg;
+  }
+
   async function send(message) {
-    if (!enabled) return { ok: false, error: "email could not be sent" };
+    if (!enabled) {
+      return { ok: false, error: "email could not be sent", detail: smtpProblem || "mail driver is not configured" };
+    }
     let lastError = "email could not be sent";
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
@@ -130,17 +182,38 @@ export function createMailer({
         if (attempt === 0) await new Promise((r) => setTimeout(r, 250));
       }
     }
-    return { ok: false, error: "email could not be sent", detail: lastError };
+    return { ok: false, error: "email could not be sent", detail: explain(lastError) };
+  }
+
+  // Never leak the password; the user is masked because /api/health is public.
+  function maskUser(v) {
+    const s = setting(v);
+    const at = s.indexOf("@");
+    return !s ? "" : at > 0 ? `${s[0]}***${s.slice(at)}` : "***";
   }
 
   return {
     driver: chosen,
     enabled,
     configured,
-    from,
+    from: fromValue,
     outbox,
     send,
     clearOutbox() { outbox.length = 0; },
+    // Non-secret summary of how mail is set up, for the boot log and /api/health.
+    status() {
+      return {
+        driver: chosen,
+        configured,
+        ready: enabled,
+        from: fromValue,
+        host: chosen === "smtp" ? setting(host) : "",
+        port: chosen === "smtp" ? smtpPort : 0,
+        secure: chosen === "smtp" ? Boolean(bool(secure) || smtpPort === 465) : false,
+        user: chosen === "smtp" ? maskUser(user) : "",
+        problem: enabled ? "" : smtpProblem || (chosen === "none" ? "mail_driver_not_configured" : ""),
+      };
+    },
   };
 }
 
