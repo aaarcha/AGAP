@@ -54,6 +54,40 @@ The first Principal account is bootstrapped into Postgres on first boot when
 variables later does **not** change an existing password — use Account → Change
 password in the app instead.
 
+### Recovering the Principal login
+If the Principal password is lost (or the account was created with an address you
+no longer use), add `ASPIRE_RESET_PRINCIPAL=1` to the service along with the
+`ASPIRE_PRINCIPAL_EMAIL` / `ASPIRE_PRINCIPAL_PASSWORD` you want, and restart. On
+boot the app rewrites that account's address and password, clears the lockout
+counter and signs out every other device; the audit log records `principal_reset`.
+Remove the variable once you are in — while it is set, every restart re-applies it.
+
+### Sending real email (verification codes, invitations)
+Codes and invites need an outbound mail driver; without one the app falls back to a
+temporary password and nothing is delivered. Gmail-to-Gmail works with an App
+Password (Google Account → Security → 2-Step Verification → App passwords):
+
+```
+MAIL_DRIVER=smtp
+MAIL_FROM=ASPIRE <your.address@gmail.com>
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+SMTP_SECURE=0
+SMTP_USER=your.address@gmail.com
+SMTP_PASS=<16-character app password>
+```
+
+`RESEND_API_KEY` is the alternative when a host blocks SMTP, but Resend only
+reaches arbitrary Gmail recipients after you verify a domain — without one it can
+only email the account owner. Railway allows outbound SMTP on 587 (port 25 is
+blocked), so Gmail SMTP is the simplest choice for a school pilot.
+
+### Database tables
+No tables are created by hand: on its first boot against `DATABASE_URL` the app
+creates `app_state` and keeps the whole document in one JSONB row (`id = aspire`).
+If the Postgres Data tab says “You have no tables”, the app has not booted against
+that database yet.
+
 Notes specific to Railway:
 * **Keep one replica.** All state is held by a single process that writes one
   `app_state` row; two replicas would fight over it.

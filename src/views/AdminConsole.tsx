@@ -76,6 +76,7 @@ const AUDIT_ACTION_LABEL: Record<string, string> = {
   account_locked: "Account locked",
   account_unlocked: "Account unlocked",
   account_created: "Account created",
+  principal_reset: "Principal credentials reset",
   account_updated: "Account updated",
   email_changed: "Email changed",
   email_verified: "Email verified",

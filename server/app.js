@@ -100,6 +100,7 @@ export function createApp(opts = {}) {
     superAdminPassword = "",
     principalEmail = "",
     principalPassword = "",
+    resetPrincipal = false,
     requireTeacherGmail = false,
     historyDays = 90,
     escalationMinutes = D.DEFAULT_ESCALATION_MINUTES,
@@ -1618,6 +1619,46 @@ export function createApp(opts = {}) {
         newAccount({ email, role: "principal", name: "School Principal", password: superAdminPassword, mustChange: true });
         audit("account_created", { by: "bootstrap", target: email, detail: "initial Principal (legacy env bootstrap)" });
         log(`Principal account created for ${email} – password change required at first sign-in.`);
+      }
+    }
+
+    // Operator-driven credential recovery. Set ASPIRE_RESET_PRINCIPAL=1 in the
+    // host's variables together with ASPIRE_PRINCIPAL_EMAIL /
+    // ASPIRE_PRINCIPAL_PASSWORD and restart: the Principal keeps its id and its
+    // history, but the address, password and verification state are taken from
+    // the environment, the lockout counter is cleared and every open session is
+    // revoked. Remove the flag afterwards – it applies on every boot while set.
+    if (resetPrincipal) {
+      const current = store.db.accounts.find((a) => a.role === "principal" && a.status !== "purged") || null;
+      const email = principalEmail ? normEmail(principalEmail) : current?.email || "";
+      const owner = email ? findAccount(email) : null;
+      const issue = !principalPassword
+        ? "ASPIRE_PRINCIPAL_PASSWORD is not set"
+        : !email || !emailOk(email)
+          ? "ASPIRE_PRINCIPAL_EMAIL is not a valid email address"
+          : owner && owner !== current
+            ? `${email} already belongs to another account`
+            : passwordProblem(principalPassword, { email, name: current?.name || "School Principal" });
+      if (issue) {
+        log(`ASPIRE_RESET_PRINCIPAL: ${issue} – the credentials were not changed.`);
+      } else {
+        const acc = current || newAccount({ email, role: "principal", name: "School Principal", password: principalPassword, mustChange: true, id: "principal" });
+        const { salt, hash } = hashPassword(principalPassword);
+        acc.email = email;
+        acc.pwSalt = salt;
+        acc.pwHash = hash;
+        acc.status = "active";
+        acc.pendingEmail = null;
+        acc.emailVerifiedAt = null;
+        acc.mustChange = true;
+        acc.temp = false;
+        acc.failed = 0;
+        acc.lockedUntil = 0;
+        const resetAt = now();
+        for (const s of store.db.sessions) if (s.accountId === acc.id && !s.revokedAt) s.revokedAt = resetAt;
+        audit("principal_reset", { by: "bootstrap", target: acc.email, detail: "credentials reset from ASPIRE_RESET_PRINCIPAL (all sessions signed out)" });
+        store.save();
+        log(`ASPIRE_RESET_PRINCIPAL applied to ${acc.email} – sign in with the environment password, then remove the flag.`);
       }
     }
 

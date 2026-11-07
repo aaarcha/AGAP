@@ -38,6 +38,8 @@ const app = createApp({
   staticDir: path.join(root, "dist"),
   // Demo endpoints are off unless explicitly enabled (ALLOW_DEMO_RESET=1).
   allowReset: env.ALLOW_DEMO_RESET === "1",
+  // One-time credential recovery for the Principal (see README).
+  resetPrincipal: env.ASPIRE_RESET_PRINCIPAL === "1",
   schoolPhone: env.ASPIRE_SCHOOL_PHONE || "",
   seedDemoIncident: env.SEED_DEMO_INCIDENT === "1",
   // Demo accounts exist only in demo mode – production provisions real accounts instead.

@@ -7,6 +7,7 @@ import { catTheme } from "./lib/theme";
 import { useApp } from "./lib/store";
 import { api } from "./lib/api";
 import { AlertToasts, Header, StatusBanner } from "./components/Chrome";
+import { InstallPrompt } from "./components/InstallPrompt";
 import { RoleNav } from "./components/RoleNav";
 import type { ParentTab, PrincipalTab, ResponderTab, TeacherTab } from "./lib/navigation";
 import LoginView from "./views/LoginView";
@@ -346,6 +347,7 @@ export default function App() {
           </div>
         </div>
         <AlertToasts />
+        <InstallPrompt />
       </div>
     );
   }
@@ -407,6 +409,7 @@ export default function App() {
         </div>
       </div>
       <AlertToasts />
+      <InstallPrompt />
     </div>
   );
 }

@@ -1,8 +1,7 @@
 import type { ReactNode } from "react";
-import { ArrowLeft, Bell, Download, X, WifiOff } from "lucide-react";
+import { ArrowLeft, Bell, X, WifiOff } from "lucide-react";
 import { HAZARD_KINDS } from "../../shared/domain.js";
 import { useApp } from "../lib/store";
-import { usePwaInstall } from "../lib/pwa";
 import type { NavTab } from "../lib/navigation";
 
 export type { NavTab };
@@ -51,12 +50,11 @@ export function Header({ title, subtitle, action }: { title: string; subtitle?: 
 }
 
 /**
- * One slim banner at a time, by priority: offline > hazard > drill > install.
+ * One slim banner at a time, by priority: offline > hazard > drill.
  * Nothing is shown while online and idle.
  */
 export function StatusBanner() {
   const { user, online, queue, modes } = useApp();
-  const { canInstall, iosHint, install, dismiss } = usePwaInstall();
   if (!user) return null;
   const queued = queue.length;
 
@@ -89,19 +87,6 @@ export function StatusBanner() {
     return (
       <div role="status" className="truncate bg-brand-700 px-3 py-1.5 text-center text-xs font-bold text-white">
         Drill in progress{modes.drill.label ? ` · ${modes.drill.label}` : ""}
-      </div>
-    );
-  }
-  if (canInstall || iosHint) {
-    return (
-      <div role="status" className="flex min-h-12 items-center justify-center gap-2 whitespace-nowrap bg-brand-900 px-3 text-xs font-semibold text-white">
-        <span className="truncate">Install ASPIRE</span>
-        {canInstall && (
-          <button onClick={() => void install()} className="inline-flex h-12 items-center gap-1 rounded-lg bg-white/15 px-2 font-bold">
-            <Download size={12} /> Install
-          </button>
-        )}
-        <button onClick={dismiss} aria-label="Not now" className="flex h-12 w-12 items-center justify-center text-white/70"><X size={14} /></button>
       </div>
     );
   }
