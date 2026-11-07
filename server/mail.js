@@ -37,6 +37,15 @@ const PLACEHOLDER = [
 ];
 const isPlaceholder = (v) => PLACEHOLDER.some((re) => re.test(String(v ?? "")));
 
+// Google displays an App Password as four groups of four ("abcd efgh ijkl mnop").
+// The spaces are only for reading, and Gmail rejects them when they are sent, so
+// they are removed for Gmail hosts and left alone for every other provider, whose
+// passwords may legitimately contain spaces.
+export function normalizeSmtpPass(host, pass) {
+  const s = setting(pass);
+  return /gmail/i.test(setting(host)) ? s.replace(/\s+/g, "") : s;
+}
+
 function timeout(ms) {
   return new Promise((_, reject) => {
     const t = setTimeout(() => reject(new Error("email send timed out")), ms);
@@ -71,7 +80,7 @@ export function createMailer({
 
   const fromValue = setting(from);
   const smtpUser = setting(user);
-  const smtpPass = setting(pass);
+  const smtpPass = normalizeSmtpPass(host, pass);
   const smtpPort = Number(setting(port)) || (bool(secure) ? 465 : 587);
   // An empty problem means SMTP is usable. A reason is reported on /api/health and
   // in the boot log, so the operator can see WHICH variable is still wrong.

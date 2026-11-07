@@ -12,7 +12,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { createMailer } from "../server/mail.js";
+import { createMailer, normalizeSmtpPass } from "../server/mail.js";
 import { createApp } from "../server/app.js";
 
 const quiet = { log() {} };
@@ -53,6 +53,12 @@ test("quotes around pasted values are stripped and the password never appears in
   assert.equal(m.from, "ASPIRE <school.pilot@gmail.com>");
   assert.equal(s.user, "s***@gmail.com");
   assert.equal(JSON.stringify(s).includes("abcdefghijklmnop"), false);
+});
+
+test("the spaces Google prints inside an App Password are removed for Gmail only", () => {
+  assert.equal(normalizeSmtpPass("smtp.gmail.com", "abcd efgh ijkl mnop"), "abcdefghijklmnop");
+  assert.equal(normalizeSmtpPass("smtp.gmail.com", "  abcd efgh ijkl mnop "), "abcdefghijklmnop");
+  assert.equal(normalizeSmtpPass("mail.school.example", "pass word"), "pass word");
 });
 
 test("a user without an app password is flagged rather than attempted", () => {
