@@ -654,6 +654,59 @@ export default function AdminConsole() {
             {tab === "config" && <ConfigTab onDirtyChange={setConfigDirty} />}
             {tab === "more" && moreScreen === "account" && <AccountView onBack={() => setMoreScreen("menu")} />}
       </div>
+
+      {/* Every account action opens one of these dialogs. They live here, next to
+          the handlers that drive them, so a button can never point at nothing. */}
+      {showProvision && (
+        <ProvisionModal knownSections={accounts.map((a) => a.section ?? "")} onClose={() => setShowProvision(false)}
+          onCreated={(r) => {
+            setShowProvision(false);
+            setProvisionResult(r.credential);
+            setInviteNotice(r.invite);
+            if (r.mailError) setNotice("Email could not be sent, so a temporary password was issued instead.");
+            void loadData();
+          }} />
+      )}
+      {provisionResult && <TempCredentialModal title="Account provisioned" credential={provisionResult} onClose={() => setProvisionResult(null)} />}
+      {inviteNotice && <InviteSentModal notice={inviteNotice} onClose={() => setInviteNotice(null)} onChanged={() => void loadData()} />}
+      {inviteRevokeTarget && (
+        <ConfirmModal title="Revoke invitation" danger onClose={() => setInviteRevokeTarget(null)}
+          message={`The current invitation link for ${inviteRevokeTarget.name} stops working immediately. The account stays invited and cannot sign in until a new link is sent.`}
+          confirmLabel="Revoke invite" onConfirm={() => void confirmRevokeInvite()} />
+      )}
+      {editTarget && (
+        <AccountEditModal acc={editTarget} knownSections={accounts.map((a) => a.section ?? "")}
+          onClose={() => setEditTarget(null)} onSave={handleEdit} />
+      )}
+      {resetTarget && (
+        <ConfirmModal title="Reset password" onClose={() => setResetTarget(null)}
+          message={`This will generate a new temporary password for ${resetTarget.name} (${resetTarget.email}). All existing sessions will be revoked.`}
+          confirmLabel="Reset password" onConfirm={() => void handleReset()} />
+      )}
+      {resetResult && <PasswordResultModal tempPassword={resetResult} onClose={() => setResetResult(null)} />}
+      {deactivateTarget && (
+        <ConfirmModal title="Deactivate account" danger onClose={() => setDeactivateTarget(null)}
+          message={`This will deactivate ${deactivateTarget.name} (${deactivateTarget.email}). All their sessions will be revoked immediately.`}
+          confirmLabel="Deactivate" onConfirm={() => void handleDeactivate()} />
+      )}
+      {purgeTarget && (
+        <PurgeDialog acc={purgeTarget} onClose={() => setPurgeTarget(null)} onConfirm={handlePurge} />
+      )}
+      {requestTarget && (
+        <DataRequestDialog acc={requestTarget} onClose={() => setRequestTarget(null)} onConfirm={handleDataRequest} />
+      )}
+      {rolloverConfirm && (
+        <ConfirmModal title="Start new school year" onClose={() => setRolloverConfirm(false)}
+          message="This will revoke all existing sessions for non-admin users and issue temporary credentials. Each user must set a new password on their next sign-in."
+          confirmLabel="Start new year" onConfirm={() => void handleRollover()} />
+      )}
+      {rolloverResult && <RolloverResultModal credentials={rolloverResult} onClose={() => setRolloverResult(null)} />}
+      {leaveTo && (
+        <ConfirmModal title="Discard unsaved changes?" danger onClose={() => setLeaveTo(null)}
+          message="Your configuration edits have not been saved. Leaving this tab discards them."
+          confirmLabel="Discard"
+          onConfirm={() => { setConfigDirty(false); if (leaveTo !== "more") setMoreScreen("menu"); setTab(leaveTo); setLeaveTo(null); }} />
+      )}
     </div>
   );
 }
